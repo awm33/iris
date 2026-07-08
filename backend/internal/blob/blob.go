@@ -26,11 +26,18 @@ type Config struct {
 	// API reaches MinIO via a different host than the browser does. Empty =
 	// use Endpoint as-is.
 	PublicEndpoint string
+	// ExternalEndpoint signs URLs for model-endpoint consumers that reach the
+	// object store via a different host than this process (dev: dockerized
+	// mocks reach host MinIO via host.docker.internal). S3 signatures cover
+	// the Host header, so this needs a separate signing client — a host
+	// rewrite would invalidate the signature. Empty = same as Endpoint.
+	ExternalEndpoint string
 }
 
 type Store struct {
-	client *minio.Client
-	cfg    Config
+	client   *minio.Client
+	external *minio.Client // presigning only; never used for connections
+	cfg      Config
 }
 
 func New(cfg Config) (*Store, error) {
@@ -41,7 +48,21 @@ func New(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{client: client, cfg: cfg}, nil
+	external := client
+	if cfg.ExternalEndpoint != "" && cfg.ExternalEndpoint != cfg.Endpoint {
+		// Region pinned so presigning never performs a bucket-location
+		// lookup — this client's endpoint is often unreachable from this
+		// process (that's the whole point of it).
+		external, err = minio.New(cfg.ExternalEndpoint, &minio.Options{
+			Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+			Secure: cfg.UseSSL,
+			Region: "us-east-1",
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Store{client: client, external: external, cfg: cfg}, nil
 }
 
 func (s *Store) PresignPut(ctx context.Context, key string, expiry time.Duration) (string, error) {
@@ -62,6 +83,28 @@ func (s *Store) PresignGet(ctx context.Context, key, contentType string, expiry 
 		return "", err
 	}
 	return s.public(u), nil
+}
+
+// PresignGetExternal / PresignPutExternal sign for model-endpoint consumers
+// (see Config.ExternalEndpoint).
+func (s *Store) PresignGetExternal(ctx context.Context, key, contentType string, expiry time.Duration) (string, error) {
+	params := url.Values{}
+	if contentType != "" {
+		params.Set("response-content-type", contentType)
+	}
+	u, err := s.external.PresignedGetObject(ctx, s.cfg.Bucket, key, expiry, params)
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
+}
+
+func (s *Store) PresignPutExternal(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	u, err := s.external.PresignedPutObject(ctx, s.cfg.Bucket, key, expiry)
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
 }
 
 // HashAndPromote streams the temp object, computes sha256, copies it to the

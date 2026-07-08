@@ -15,6 +15,7 @@ import (
 	"github.com/awm33/iris/backend/gen/iris/v1/irisv1connect"
 	"github.com/awm33/iris/backend/internal/api"
 	"github.com/awm33/iris/backend/internal/blob"
+	"github.com/awm33/iris/backend/internal/registry"
 	"github.com/awm33/iris/backend/internal/store"
 )
 
@@ -48,11 +49,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	reg := registry.New(st.Pool())
+	if err := reg.SeedDevEndpoints(ctx, store.DevWorkspaceID, map[string]string{
+		"Mock Video (dev)": getenv("IRIS_MOCK_VIDEO_URL", "http://localhost:8900"),
+		"Mock Image (dev)": getenv("IRIS_MOCK_IMAGE_URL", "http://localhost:8901"),
+	}); err != nil {
+		slog.Error("endpoint seed", "err", err)
+		os.Exit(1)
+	}
+	if err := reg.Refresh(ctx); err != nil {
+		slog.Warn("initial manifest refresh failed (endpoints may be down)", "err", err)
+	}
+	go reg.RefreshLoop(context.Background(), time.Minute)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.Handle(irisv1connect.NewWorkspaceServiceHandler(&api.WorkspaceServer{Store: st}))
 	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl}))
-	// TODO(M2): GenerationService + /ws event bridge (pg LISTEN 'jobs' → WS fan-out)
+	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}))
+	// TODO(PR 3): /ws event bridge (pg LISTEN → WS fan-out) + Jobs/generate-panel UI
 
 	slog.Info("iris-api listening", "addr", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
