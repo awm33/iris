@@ -179,46 +179,55 @@ func (s *Store) ListSubJobs(ctx context.Context, parentID string) ([]*GenJob, er
 	return out, rows.Err()
 }
 
-// CancelGeneration marks queued/in-flight rows canceled (parent + children)
-// and returns the endpoint-side ids of dispatched sub-jobs so the caller can
-// cancel them remotely. Workers detect the state change on heartbeat.
-func (s *Store) CancelGeneration(ctx context.Context, jobID string) (dispatched []string, err error) {
-	// RETURNING sees post-update values, so the pre-update state must be
-	// captured in the CTE to know which sub-jobs were already dispatched.
-	rows, err := s.pool.Query(ctx, `
+// CancelGeneration marks queued/in-flight rows canceled (parent + children).
+// Endpoint-side cancellation is the owning worker's job: it detects the state
+// flip on its next heartbeat and cancels with the per-attempt id only it
+// knows. Canceling an already-terminal job is an idempotent no-op.
+func (s *Store) CancelGeneration(ctx context.Context, jobID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock children before the parent — the completion path locks its own
+	// child row then the parent (rollup), so matching that order avoids
+	// deadlock aborts between cancel and a completing worker.
+	tag, err := tx.Exec(ctx, `
 		WITH victims AS (
-			SELECT id, state AS old_state FROM generation_jobs
+			SELECT id FROM generation_jobs
 			WHERE (id = $1 OR parent_job_id = $1)
 			  AND state IN ('queued', 'dispatched', 'running')
+			ORDER BY (parent_job_id IS NULL), id
 			FOR UPDATE
 		)
 		UPDATE generation_jobs j
 		SET state = 'canceled', updated_at = now()
-		FROM victims WHERE j.id = victims.id
-		RETURNING j.id, victims.old_state IN ('dispatched','running')`, jobID)
+		FROM victims WHERE j.id = victims.id`, jobID)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
-	found := false
-	for rows.Next() {
-		var id string
-		var wasDispatched bool
-		if err := rows.Scan(&id, &wasDispatched); err != nil {
-			return nil, err
+	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM generation_jobs WHERE id = $1)`, jobID).
+			Scan(&exists); err != nil {
+			return err
 		}
-		found = true
-		if wasDispatched && id != jobID {
-			dispatched = append(dispatched, id)
+		if !exists {
+			return ErrNotFound
 		}
+		return nil // already terminal — idempotent
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	// If the target was a sub-job, its parent aggregate must reflect the
+	// cancellation; if it was a parent, dependents gate on it and must fail.
+	if err := queue.RollupAfterCancel(ctx, tx, jobID); err != nil {
+		return err
 	}
-	if !found {
-		return nil, ErrNotFound
+	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, queue.GenerationChannel, jobID); err != nil {
+		return err
 	}
-	return dispatched, nil
+	return tx.Commit(ctx)
 }
 
 // RecordUsage writes a usage event (cost metering).

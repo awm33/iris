@@ -18,7 +18,11 @@ type GenerationServer struct {
 	Registry *registry.Registry
 }
 
-const maxFanout = 8
+const (
+	maxFanout        = 8
+	maxPromptLen     = 10_000 // runes; stored per sub-job and forwarded to endpoints
+	maxParamsJSONLen = 64 << 10
+)
 
 func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[irisv1.CreateJobRequest]) (*connect.Response[irisv1.CreateJobResponse], error) {
 	j := req.Msg.Job
@@ -28,6 +32,12 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 	}
 	if j.ProjectId == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("job.project_id is required"))
+	}
+	if len([]rune(j.Prompt)) > maxPromptLen || len([]rune(j.NegativePrompt)) > maxPromptLen {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("prompt too long"))
+	}
+	if len(j.ParamsJson) > maxParamsJSONLen {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("params_json too large"))
 	}
 	count := int(j.Count)
 	if count < 1 {
@@ -42,11 +52,24 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 	}
 
 	ep, ok := s.Registry.Get(j.ModelEndpointId)
-	if !ok {
+	if !ok || ep.WorkspaceID != workspaceID(j.WorkspaceId) {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown model endpoint"))
 	}
 	if !ep.Healthy || ep.Manifest == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("endpoint unhealthy or manifest unavailable"))
+	}
+	// A dependency that can never complete would strand this job (dependents
+	// gate on 'complete'); reject up front. Post-create failures propagate
+	// via FailDependents.
+	if j.DependsOnJobId != "" {
+		dep, err := s.Store.GetGenJob(ctx, j.DependsOnJobId)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("depends_on_job_id not found"))
+		}
+		if dep.State == "failed" || dep.State == "canceled" {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				errors.New("dependency job is "+dep.State+" and will never complete"))
+		}
 	}
 
 	genReq, infReq, err := s.toGenRequest(j, count)
@@ -166,8 +189,8 @@ func (s *GenerationServer) ListJobs(ctx context.Context, req *connect.Request[ir
 func (s *GenerationServer) CancelJob(ctx context.Context, req *connect.Request[irisv1.CancelJobRequest]) (*connect.Response[irisv1.CancelJobResponse], error) {
 	// Flipping the rows is sufficient: the owning worker notices on its next
 	// heartbeat (≤1 poll interval) and cancels the endpoint-side job using
-	// the per-attempt id only it knows.
-	if _, err := s.Store.CancelGeneration(ctx, req.Msg.Id); err != nil {
+	// the per-attempt id only it knows. Canceling a terminal job is a no-op.
+	if err := s.Store.CancelGeneration(ctx, req.Msg.Id); err != nil {
 		return nil, connectErr(err)
 	}
 	return connect.NewResponse(&irisv1.CancelJobResponse{}), nil
@@ -177,6 +200,26 @@ func (s *GenerationServer) RetryJob(ctx context.Context, req *connect.Request[ir
 	prev, err := s.Store.GetGenJob(ctx, req.Msg.Id)
 	if err != nil {
 		return nil, connectErr(err)
+	}
+	// Guardrails: only terminal parents are retryable — retrying a running
+	// job silently doubles its whole fan-out and spend; retrying a sub-job
+	// builds a nonsensical one-sub parent from a child row.
+	if prev.ParentJobID != "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("retry the parent job, not a sub-job"))
+	}
+	switch prev.State {
+	case "failed", "canceled":
+	default:
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("only failed or canceled jobs can be retried (state: "+prev.State+")"))
+	}
+	// A dependency that terminally failed would strand the retry immediately.
+	if prev.DependsOnJobID != "" {
+		if dep, err := s.Store.GetGenJob(ctx, prev.DependsOnJobID); err == nil &&
+			(dep.State == "failed" || dep.State == "canceled") {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				errors.New("dependency job is "+dep.State+"; retry it first"))
+		}
 	}
 	var genReq store.GenRequest
 	_ = json.Unmarshal(prev.Request, &genReq)

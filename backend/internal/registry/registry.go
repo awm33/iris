@@ -94,7 +94,12 @@ func (r *Registry) Refresh(ctx context.Context) error {
 		raw, err := client.GetManifest(fctx)
 		cancel()
 		if err == nil {
-			if m, perr := inference.ParseManifest(raw); perr == nil {
+			// Schema validation first — a manifest that would fail every job
+			// (empty profiles, negative pricing) marks the endpoint unhealthy
+			// rather than parsing loosely and failing at dispatch.
+			if verr := inference.ValidateManifestDocument(raw); verr != nil {
+				slog.Warn("endpoint manifest fails schema", "endpoint", e.name, "err", verr)
+			} else if m, perr := inference.ParseManifest(raw); perr == nil {
 				ep.Manifest, ep.ManifestRaw, ep.Healthy = m, raw, true
 			} else {
 				slog.Warn("endpoint manifest invalid", "endpoint", e.name, "err", perr)
@@ -102,12 +107,30 @@ func (r *Registry) Refresh(ctx context.Context) error {
 		} else {
 			slog.Warn("endpoint manifest fetch failed", "endpoint", e.name, "err", err)
 		}
-		if _, err := r.pool.Exec(ctx, `
-			UPDATE model_endpoints
-			SET manifest = $2, manifest_fetched_at = now(), healthy = $3
-			WHERE id = $1`,
-			e.id, ep.ManifestRaw, ep.Healthy); err != nil {
-			return err
+
+		if ep.Healthy {
+			if _, err := r.pool.Exec(ctx, `
+				UPDATE model_endpoints
+				SET manifest = $2, manifest_fetched_at = now(), healthy = true
+				WHERE id = $1`, e.id, ep.ManifestRaw); err != nil {
+				return err
+			}
+		} else {
+			// Keep the last-known-good manifest (DB and cache): a transient
+			// endpoint blip must not erase capabilities and hard-fail queued
+			// jobs — dispatch continues against the stale manifest and the
+			// endpoint's own errors drive retry behavior.
+			var stored []byte
+			if err := r.pool.QueryRow(ctx,
+				`SELECT manifest FROM model_endpoints WHERE id = $1`, e.id).Scan(&stored); err == nil && len(stored) > 0 {
+				if m, perr := inference.ParseManifest(stored); perr == nil {
+					ep.Manifest, ep.ManifestRaw = m, stored
+				}
+			}
+			if _, err := r.pool.Exec(ctx, `
+				UPDATE model_endpoints SET healthy = false WHERE id = $1`, e.id); err != nil {
+				return err
+			}
 		}
 		fresh[e.id] = ep
 	}

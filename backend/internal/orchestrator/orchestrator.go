@@ -11,7 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"net"
+	"net/url"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,12 +39,14 @@ type Orchestrator struct {
 }
 
 const (
-	claimBatch    = 4
-	pollFallback  = 15 * time.Second
-	reapEvery     = time.Minute
-	pollInterval  = 2 * time.Second
-	dispatchLimit = 30 * time.Minute // hard ceiling per sub-job incl. queue+generation
-	signedURLTTL  = 20 * time.Minute
+	claimBatch     = 4
+	pollFallback   = 15 * time.Second
+	reapEvery      = time.Minute
+	pollInterval   = 2 * time.Second
+	dispatchLimit  = 30 * time.Minute              // hard ceiling per sub-job incl. queue+generation
+	refGetTTL      = 20 * time.Minute              // refs are fetched at generation start
+	artifactPutTTL = dispatchLimit + 5*time.Minute // must outlive the longest legal generation
+	maxGPUSeconds  = 1e6                           // metering sanity ceiling; endpoint-reported values are untrusted
 )
 
 // Run claims and executes generation sub-jobs until ctx is canceled.
@@ -87,13 +94,22 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		// Concurrent execution: serial batches would starve batch-mates'
+		// leases (a video generation legally runs minutes; the lease is 5m),
+		// letting a second orchestrator's reaper requeue and double-dispatch.
+		var wg sync.WaitGroup
 		for _, job := range jobs {
 			if ctx.Err() != nil {
 				o.recordFailure(job, "transient", "worker shutting down", true)
 				continue
 			}
-			o.execute(ctx, job)
+			wg.Add(1)
+			go func(j *queue.GenerationJob) {
+				defer wg.Done()
+				o.execute(ctx, j)
+			}(job)
 		}
+		wg.Wait()
 	}
 	return ctx.Err()
 }
@@ -122,6 +138,18 @@ func (o *Orchestrator) execute(ctx context.Context, job *queue.GenerationJob) {
 		slog.Info("generation job canceled", "job", job.ID)
 		return
 	}
+	var unreachable errUnreachable
+	if errors.As(err, &unreachable) {
+		slog.Warn("endpoint unreachable; requeueing without attempt cost",
+			"job", job.ID, "err", err)
+		rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if rerr := queue.RequeueGenerationJobUnreachable(rctx, o.Pool, job, o.Name, truncateMsg(err.Error())); rerr != nil &&
+			!errors.Is(rerr, queue.ErrNotOwner) {
+			slog.Error("unreachable requeue failed (lease reaper will recover)", "job", job.ID, "err", rerr)
+		}
+		return
+	}
 
 	code, message, retryable := classify(err)
 	slog.Error("generation job failed", "job", job.ID, "attempt", job.Attempts,
@@ -136,20 +164,30 @@ var errCanceled = errors.New("job canceled")
 func classify(err error) (code, message string, retryable bool) {
 	var jerr *inference.JobError
 	if errors.As(err, &jerr) {
+		// Endpoint-supplied text is untrusted and unbounded; cap it before
+		// it lands in the job row and API responses.
+		msg := truncateMsg(jerr.Message)
 		switch jerr.Code {
 		case "invalid_input", "safety_blocked":
-			return jerr.Code, jerr.Message, false
+			return jerr.Code, msg, false
 		case "overloaded", "transient":
-			return jerr.Code, jerr.Message, true
+			return jerr.Code, msg, true
 		default:
-			return "internal", jerr.Message, jerr.Retryable
+			return "internal", msg, jerr.Retryable
 		}
 	}
 	var verr *inference.ValidationError
 	if errors.As(err, &verr) {
 		return "invalid_input", verr.Msg, false
 	}
-	return "transient", err.Error(), true
+	return "transient", truncateMsg(err.Error()), true
+}
+
+func truncateMsg(s string) string {
+	if r := []rune(s); len(r) > 500 {
+		return string(r[:500]) + "…"
+	}
+	return s
 }
 
 func (o *Orchestrator) recordFailure(job *queue.GenerationJob, code, message string, retryable bool) {
@@ -183,9 +221,19 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 		return err
 	}
 
+	// Ownership check immediately before the paid dispatch: this job may have
+	// been reaped and reclaimed while earlier work in this goroutine ran —
+	// dispatching without the lease would double-generate on the endpoint.
+	if err := queue.HeartbeatGenerationJob(ctx, o.Pool, job.ID, o.Name, "dispatched", 0); err != nil {
+		return err // ErrNotOwner surfaces to execute()
+	}
+
 	client := inference.New(ep.BaseURL, ep.Token)
 	status, err := client.CreateJob(ctx, infReq)
 	if err != nil {
+		if isUnreachable(err) {
+			return errUnreachable{err}
+		}
 		return err
 	}
 
@@ -199,7 +247,10 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 			return ctx.Err()
 		case <-time.After(pollInterval):
 		}
-		if err := queue.HeartbeatGenerationJob(ctx, o.Pool, job.ID, o.Name, "running", status.Progress); err != nil {
+		// Progress is endpoint-reported: clamp before it reaches the DB and
+		// the parent's aggregate.
+		progress := min(max(status.Progress, 0), 1)
+		if err := queue.HeartbeatGenerationJob(ctx, o.Pool, job.ID, o.Name, "running", progress); err != nil {
 			if errors.Is(err, queue.ErrNotOwner) {
 				_ = client.CancelJob(context.Background(), infReq.ID)
 				return errCanceled
@@ -207,12 +258,18 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 			return err
 		}
 		if status, err = client.GetJob(ctx, infReq.ID); err != nil {
+			if isUnreachable(err) {
+				return errUnreachable{err}
+			}
 			return err
 		}
 	}
 
 	switch status.State {
 	case "failed":
+		// Failed generations still burned GPU time (spec §3 provides metrics
+		// on any terminal state) — meter them or the spend is invisible.
+		o.meterUsage(job, status)
 		if status.Error != nil {
 			return status.Error
 		}
@@ -261,7 +318,7 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 		if err != nil {
 			return nil, "", &inference.ValidationError{Msg: fmt.Sprintf("reference version %s not found", versionID)}
 		}
-		url, err := o.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, signedURLTTL)
+		url, err := o.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
 		if err != nil {
 			return nil, "", fmt.Errorf("presign reference: %w", err)
 		}
@@ -270,39 +327,58 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 		})
 	}
 
-	artifactKey := "uploads/gen/" + job.ID + "/0"
-	putURL, err := o.Blob.PresignPutExternal(ctx, artifactKey, signedURLTTL)
+	// Per-ATTEMPT key: attempts can overlap (lease expiry → reclaim), and a
+	// prior attempt's still-valid PUT URL writing into this attempt's key
+	// would corrupt the landed artifact.
+	artifactKey := "uploads/gen/" + infReq.ID + "/0"
+	putURL, err := o.Blob.PresignPutExternal(ctx, artifactKey, artifactPutTTL)
 	if err != nil {
 		return nil, "", fmt.Errorf("presign artifact target: %w", err)
 	}
-	contentType := "video/mp4"
-	if ep.Manifest.Modality == "image" {
-		contentType = "image/png"
-	}
-	infReq.Upload = &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: putURL, ContentType: contentType}}}
+	infReq.Upload = &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: putURL, ContentType: expectedContentType(ep.Manifest.Modality)}}}
 	return infReq, artifactKey, nil
 }
 
+// expectedContentType is Iris's own decision — the endpoint's reported
+// content type is untrusted and never stored (a reported "text/html" would
+// otherwise be reflected by SignDownload's response-content-type).
+func expectedContentType(modality string) string {
+	if modality == "image" {
+		return "image/png"
+	}
+	return "video/mp4"
+}
+
+var hexSHA = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
 // landArtifact promotes the uploaded artifact to content-addressed storage
 // and creates the asset + version + lineage + job completion atomically.
+//
+// Endpoint responses are UNTRUSTED: the stored content type is Iris's own
+// (never the endpoint's — a reported "text/html" would be reflected by
+// SignDownload), dimensions/duration/fps are left null for the probe worker
+// to measure from the actual bytes, and the reported sha256 must be a
+// well-formed hash matching what actually arrived.
 func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJob, ep *registry.Endpoint, req *store.GenRequest, status *inference.JobStatus, artifactKey string) error {
 	if len(status.Artifacts) == 0 || !status.Artifacts[0].Uploaded {
 		return fmt.Errorf("endpoint reported complete without an uploaded artifact")
 	}
 	art := status.Artifacts[0]
+	if !hexSHA.MatchString(art.SHA256) {
+		return &inference.ValidationError{Msg: "endpoint reported malformed artifact sha256"}
+	}
 
 	hash, size, _, err := o.Blob.HashAndPromote(ctx, artifactKey)
 	if err != nil {
 		return fmt.Errorf("promote artifact: %w", err)
 	}
-	if art.SHA256 != "" && !strings.EqualFold(art.SHA256, hash) {
+	// TODO(follow-up): promoted-object GC — a rollback below (or sha
+	// mismatch) strands sha256/<hash> with no referencing row.
+	if !strings.EqualFold(art.SHA256, hash) {
 		return fmt.Errorf("artifact sha256 mismatch: endpoint reported %s, received %s", art.SHA256, hash)
 	}
 
-	gpuSeconds := 0.0
-	if status.Metrics != nil {
-		gpuSeconds = status.Metrics.GPUSeconds
-	}
+	gpuSeconds := clampGPUSeconds(status)
 
 	tx, err := o.Pool.Begin(ctx)
 	if err != nil {
@@ -323,10 +399,9 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO asset_versions (id, asset_id, sha256, content_type, size_bytes, width, height, duration_s, fps)
-		VALUES ($1,$2,$3,$4,$5,NULLIF($6,0),NULLIF($7,0),NULLIF($8,0.0),NULLIF($9,0.0))`,
-		versionID, assetID, hash, art.ContentType, size,
-		art.Width, art.Height, art.DurationS, art.FPS); err != nil {
+		INSERT INTO asset_versions (id, asset_id, sha256, content_type, size_bytes)
+		VALUES ($1, $2, $3, $4, $5)`,
+		versionID, assetID, hash, expectedContentType(ep.Manifest.Modality), size); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
@@ -350,12 +425,11 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 			return err
 		}
 	}
-	// Video artifacts need probe/poster like any other ingest.
-	if kind == "video" {
-		if err := queue.EnqueueMediaJob(ctx, tx, job.WorkspaceID, "probe",
-			map[string]string{"version_id": versionID}); err != nil {
-			return err
-		}
+	// Probe for BOTH modalities: it is the sole trusted source of
+	// dimensions/duration/fps (and posters for video).
+	if err := queue.EnqueueMediaJob(ctx, tx, job.WorkspaceID, "probe",
+		map[string]string{"version_id": versionID}); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO usage_events (workspace_id, job_id, kind, unit, quantity)
@@ -369,13 +443,61 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 	return tx.Commit(ctx)
 }
 
+// clampGPUSeconds bounds the endpoint-reported metering value — it feeds
+// usage_events and cost rollups, so negative or absurd values are rejected.
+func clampGPUSeconds(status *inference.JobStatus) float64 {
+	if status.Metrics == nil {
+		return 0
+	}
+	g := status.Metrics.GPUSeconds
+	if g < 0 || math.IsNaN(g) || math.IsInf(g, 0) {
+		slog.Warn("endpoint reported invalid gpu_seconds; metering 0", "value", g)
+		return 0
+	}
+	if g > maxGPUSeconds {
+		slog.Warn("endpoint reported implausible gpu_seconds; clamping", "value", g)
+		return maxGPUSeconds
+	}
+	return g
+}
+
+// meterUsage records GPU spend for non-complete terminal states (best
+// effort — failures here must not mask the job outcome).
+func (o *Orchestrator) meterUsage(job *queue.GenerationJob, status *inference.JobStatus) {
+	g := clampGPUSeconds(status)
+	if g == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := o.Store.RecordUsage(ctx, job.WorkspaceID, job.ID, "generation", "gpu_second", g); err != nil {
+		slog.Error("metering failed generation", "job", job.ID, "err", err)
+	}
+}
+
 func generatedName(prompt, modality string) string {
 	p := strings.TrimSpace(prompt)
-	if len(p) > 48 {
-		p = p[:48] + "…"
+	if r := []rune(p); len(r) > 48 { // rune-safe: byte slicing can split UTF-8
+		p = string(r[:48]) + "…"
 	}
 	if p == "" {
 		p = "untitled"
 	}
 	return fmt.Sprintf("gen: %s (%s)", p, modality)
+}
+
+// errUnreachable marks endpoint-connectivity failures, which requeue without
+// burning an attempt (endpoint restarts are routine and outlast 3 backoffs).
+type errUnreachable struct{ err error }
+
+func (e errUnreachable) Error() string { return "endpoint unreachable: " + e.err.Error() }
+func (e errUnreachable) Unwrap() error { return e.err }
+
+func isUnreachable(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true // dial/timeout/TLS-level failure — no HTTP response at all
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }

@@ -22,14 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/awm33/iris/backend/internal/inference"
 )
-
-// manifest.schema.json is a byte-for-byte copy of spec/manifest.schema.json;
-// TestSchemaCopyInSync guards against drift.
-//
-//go:embed manifest.schema.json
-var manifestSchema []byte
 
 type Config struct {
 	BaseURL          string
@@ -151,24 +145,8 @@ func (c *checker) checkManifest(ctx context.Context) (string, error) {
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("want 200, got %d", resp.StatusCode)
 	}
-	compiler := jsonschema.NewCompiler()
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(manifestSchema))
-	if err != nil {
-		return "", fmt.Errorf("parse embedded schema: %w", err)
-	}
-	if err := compiler.AddResource("manifest.schema.json", doc); err != nil {
+	if err := inference.ValidateManifestDocument(data); err != nil {
 		return "", err
-	}
-	schema, err := compiler.Compile("manifest.schema.json")
-	if err != nil {
-		return "", fmt.Errorf("compile schema: %w", err)
-	}
-	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
-	if err != nil {
-		return "", fmt.Errorf("manifest is not valid json: %w", err)
-	}
-	if err := schema.Validate(inst); err != nil {
-		return "", fmt.Errorf("manifest fails schema: %w", err)
 	}
 	var m struct {
 		ID string `json:"id"`

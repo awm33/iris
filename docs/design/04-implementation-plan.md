@@ -89,6 +89,14 @@ Sequence edges + carry payloads (last frame, refs, style), "generate next shot f
 Export service v1 (server render of the frame graph — TS-shared-shader or early Rust-native per the M5 checkpoint; H.264 presets + captions burn-in), auto-transcribe → caption track (+ text edit), color basics (LUT + exposure/contrast/temp per clip), transitions (cut/dissolve), audio ducking, golden-frame CI (client preview vs server export perceptual diff), 3D set import + camera → depth-sequence render path (the R&D-differentiating control input) **if R&D endpoint supports depth conditioning by now; else stays behind mock**.
 **Exit (W5 — THE dogfood):** the team produces a complete short multi-scene piece (≥1 min) entirely in Iris — script beats → sets/characters → generated takes → cut → captions → color → export. Phase 0 (HLD §7) is done.
 
+### Security-hardening backlog (from PR 1–2 independent reviews; prerequisites for auth-v1 / BYO-endpoints, not blockers today)
+- Workspace scoping on ALL read/mutate paths (SignDownload, GetLineage, generation Get/List/Cancel/Retry, reference resolution in the orchestrator) — the IDOR class once multi-user auth exists.
+- SSRF egress controls before BYO endpoint URLs: https-only, dialer deny-list for RFC1918/link-local/metadata ranges, redirect caps.
+- Promoted-blob GC sweep (landing rollbacks / sha-mismatch orphans under `sha256/`; stale `uploads/` temp keys).
+- Artifact upload size ceiling (presigned PUT content-length range or post-hoc check).
+- Cost model cleanup: `cost_estimate` (manifest pricing units) vs `cost_actual` (gpu-seconds) aren't comparable; unify when billing becomes real.
+- Endpoint auth tokens to KMS/vault (auth_ref is plaintext in dev).
+
 ### M8+ — Phase 1 backlog (not planned in detail yet)
 Additional commercial adapters (`fal` first — one adapter, many models), nano-banana; capability-manifest UI polish; multi-view expansion; adjustment layers/clone/heal/filters; speed ramps; shot-match color; onboarding/Assist mode; project export; OSS IdP (Keycloak-class) replacing auth v0; review links. Re-plan after the M7 dogfood retro.
 

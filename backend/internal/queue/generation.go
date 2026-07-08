@@ -92,7 +92,8 @@ func HeartbeatGenerationJob(ctx context.Context, pool *pgxpool.Pool, jobID, work
 func CompleteGenerationJob(ctx context.Context, tx pgx.Tx, jobID, worker string, costActual float64) error {
 	tag, err := tx.Exec(ctx, `
 		UPDATE generation_jobs
-		SET state = 'complete', progress = 1, cost_actual = $3, updated_at = now()
+		SET state = 'complete', progress = 1, cost_actual = $3,
+		    error_code = NULL, error_message = NULL, updated_at = now()
 		WHERE id = $1 AND claimed_by = $2 AND state IN ('dispatched', 'running')`,
 		jobID, worker, costActual)
 	if err != nil {
@@ -106,6 +107,30 @@ func CompleteGenerationJob(ctx context.Context, tx pgx.Tx, jobID, worker string,
 	}
 	_, err = tx.Exec(ctx, `SELECT pg_notify($1, $2)`, GenerationChannel, jobID)
 	return err
+}
+
+// RequeueGenerationJobUnreachable requeues a sub-job whose endpoint was
+// unreachable WITHOUT burning an attempt — endpoint restarts are expected
+// (spec §4 overloaded/transient) and shouldn't park jobs in ~20s of backoff.
+// Bounded by job age: after maxUnreachableAge the job parks instead.
+const maxUnreachableAge = time.Hour
+
+func RequeueGenerationJobUnreachable(ctx context.Context, pool *pgxpool.Pool, job *GenerationJob, worker, message string) error {
+	tag, err := pool.Exec(ctx, `
+		UPDATE generation_jobs
+		SET state = CASE WHEN created_at < now() - make_interval(secs => $4) THEN 'failed' ELSE 'queued' END,
+		    attempts = CASE WHEN created_at < now() - make_interval(secs => $4) THEN attempts ELSE attempts - 1 END,
+		    not_before = now() + make_interval(secs => 15),
+		    error_code = 'overloaded', error_message = $3, updated_at = now()
+		WHERE id = $1 AND claimed_by = $2 AND state IN ('dispatched', 'running')`,
+		job.ID, worker, message, maxUnreachableAge.Seconds())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotOwner
+	}
+	return nil
 }
 
 // FailGenerationJob records a failure with the spec's error taxonomy.
@@ -151,20 +176,45 @@ func FailGenerationJob(ctx context.Context, pool *pgxpool.Pool, job *GenerationJ
 // rollupParent recomputes the parent job's aggregate state and progress from
 // its children: complete when all terminal and ≥1 complete; failed when all
 // terminal and none complete; else running with mean progress.
+//
+// The parent row is locked BEFORE the aggregate is computed: under READ
+// COMMITTED, a blocked UPDATE re-evaluates only its qual after the lock
+// clears — a pre-computed aggregate CTE would be stale, and two children
+// finishing concurrently could leave the parent stuck 'running' forever.
+// Lock-then-aggregate serializes sibling rollups correctly.
 func rollupParent(ctx context.Context, tx pgx.Tx, subJobID string) error {
-	_, err := tx.Exec(ctx, `
-		WITH parent AS (
-			SELECT parent_job_id AS id FROM generation_jobs WHERE id = $1 AND parent_job_id IS NOT NULL
-		), agg AS (
+	var parentID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT parent_job_id FROM generation_jobs WHERE id = $1`, subJobID).
+		Scan(&parentID); err != nil {
+		return err
+	}
+	if parentID == nil {
+		return nil
+	}
+	return rollupParentByID(ctx, tx, *parentID)
+}
+
+func rollupParentByID(ctx context.Context, tx pgx.Tx, parentID string) error {
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM generation_jobs WHERE id = $1 FOR UPDATE`, parentID); err != nil {
+		return err
+	}
+	var prevState, newState string
+	err := tx.QueryRow(ctx, `
+		WITH agg AS (
 			SELECT count(*) AS total,
 			       count(*) FILTER (WHERE state IN ('complete','failed','canceled')) AS terminal,
 			       count(*) FILTER (WHERE state = 'complete') AS ok,
 			       avg(progress) AS progress,
 			       sum(cost_actual) AS cost_actual
-			FROM generation_jobs WHERE parent_job_id = (SELECT id FROM parent)
+			FROM generation_jobs WHERE parent_job_id = $1
+		), prev AS (
+			SELECT state FROM generation_jobs WHERE id = $1
 		)
 		UPDATE generation_jobs p
 		SET state = CASE
+		        WHEN p.state = 'canceled' THEN 'canceled'
 		        WHEN agg.terminal = agg.total AND agg.ok > 0 THEN 'complete'
 		        WHEN agg.terminal = agg.total THEN 'failed'
 		        ELSE 'running'
@@ -172,8 +222,111 @@ func rollupParent(ctx context.Context, tx pgx.Tx, subJobID string) error {
 		    progress = COALESCE(agg.progress, 0),
 		    cost_actual = agg.cost_actual,
 		    updated_at = now()
-		FROM agg
-		WHERE p.id = (SELECT id FROM parent)`, subJobID)
+		FROM agg, prev
+		WHERE p.id = $1
+		RETURNING prev.state, p.state`, parentID).Scan(&prevState, &newState)
+	if err != nil {
+		return err
+	}
+	// Dependency-failure propagation (C1): dependents gate on this parent
+	// reaching 'complete'; if it terminalized any other way they can never
+	// run — fail them now (transitively), same transaction.
+	if newState != prevState && (newState == "failed" || newState == "canceled") {
+		return FailDependents(ctx, tx, parentID)
+	}
+	return nil
+}
+
+// RollupAfterCancel reconciles aggregates after CancelGeneration: if the
+// canceled id was a sub-job its parent is re-rolled; if it was a parent, its
+// dependents can never run and are failed transitively.
+func RollupAfterCancel(ctx context.Context, tx pgx.Tx, jobID string) error {
+	var parentID *string
+	if err := tx.QueryRow(ctx,
+		`SELECT parent_job_id FROM generation_jobs WHERE id = $1`, jobID).
+		Scan(&parentID); err != nil {
+		return err
+	}
+	if parentID != nil {
+		return rollupParentDependentsOnly(ctx, tx, *parentID)
+	}
+	return FailDependents(ctx, tx, jobID)
+}
+
+// FailDependents fails all queued sub-jobs (and re-rolls their parents,
+// transitively) whose depends_on_job_id will never complete.
+func FailDependents(ctx context.Context, tx pgx.Tx, failedJobID string) error {
+	frontier := []string{failedJobID}
+	for len(frontier) > 0 {
+		next := []string{}
+		for _, dep := range frontier {
+			rows, err := tx.Query(ctx, `
+				UPDATE generation_jobs
+				SET state = 'failed', error_code = 'dependency_failed',
+				    error_message = 'dependency ' || $1 || ' did not complete',
+				    updated_at = now()
+				WHERE state = 'queued' AND depends_on_job_id = $1
+				  AND parent_job_id IS NOT NULL
+				RETURNING parent_job_id`, dep)
+			if err != nil {
+				return err
+			}
+			parents := map[string]bool{}
+			for rows.Next() {
+				var p string
+				if err := rows.Scan(&p); err != nil {
+					rows.Close()
+					return err
+				}
+				parents[p] = true
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			for p := range parents {
+				if err := rollupParentDependentsOnly(ctx, tx, p); err != nil {
+					return err
+				}
+				next = append(next, p)
+			}
+		}
+		frontier = next
+	}
+	return nil
+}
+
+// rollupParentDependentsOnly is rollupParentByID without re-entering
+// FailDependents (the caller's loop handles transitivity).
+func rollupParentDependentsOnly(ctx context.Context, tx pgx.Tx, parentID string) error {
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM generation_jobs WHERE id = $1 FOR UPDATE`, parentID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		WITH agg AS (
+			SELECT count(*) AS total,
+			       count(*) FILTER (WHERE state IN ('complete','failed','canceled')) AS terminal,
+			       count(*) FILTER (WHERE state = 'complete') AS ok,
+			       avg(progress) AS progress,
+			       sum(cost_actual) AS cost_actual
+			FROM generation_jobs WHERE parent_job_id = $1
+		)
+		UPDATE generation_jobs p
+		SET state = CASE
+		        WHEN p.state = 'canceled' THEN 'canceled'
+		        WHEN agg.terminal = agg.total AND agg.ok > 0 THEN 'complete'
+		        WHEN agg.terminal = agg.total THEN 'failed'
+		        ELSE 'running'
+		    END,
+		    progress = COALESCE(agg.progress, 0),
+		    cost_actual = agg.cost_actual,
+		    updated_at = now()
+		FROM agg WHERE p.id = $1`, parentID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `SELECT pg_notify($1, $2)`, GenerationChannel, parentID)
 	return err
 }
 
@@ -201,23 +354,102 @@ func ReapStaleGenerationJobs(ctx context.Context, pool *pgxpool.Pool) (requeued,
 	if err != nil {
 		return requeued, 0, err
 	}
-	// Terminal children may have arrived while their parent was mid-flight;
-	// reconcile any parent stuck non-terminal whose children are all done.
-	if _, err := pool.Exec(ctx, `
-		UPDATE generation_jobs p
-		SET state = CASE WHEN ok > 0 THEN 'complete' ELSE 'failed' END, updated_at = now()
-		FROM (
-			SELECT parent_job_id AS id,
-			       count(*) FILTER (WHERE state = 'complete') AS ok
+	parked = tag.RowsAffected()
+
+	// Backstop for dependency-failure propagation (races, retries created
+	// against an already-failed dependency): park queued sub-jobs whose
+	// dependency is terminally non-complete, then reconcile their parents.
+	if err := reapTx(ctx, pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			UPDATE generation_jobs
+			SET state = 'failed', error_code = 'dependency_failed',
+			    error_message = 'dependency ' || depends_on_job_id || ' did not complete',
+			    updated_at = now()
+			WHERE state = 'queued' AND parent_job_id IS NOT NULL
+			  AND depends_on_job_id IN
+			      (SELECT id FROM generation_jobs WHERE state IN ('failed','canceled'))
+			RETURNING parent_job_id`)
+		if err != nil {
+			return err
+		}
+		parents := map[string]bool{}
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				rows.Close()
+				return err
+			}
+			parents[p] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for p := range parents {
+			if err := rollupParentDependentsOnly(ctx, tx, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return requeued, parked, err
+	}
+
+	// Terminal children may have arrived while their parent rollup raced
+	// (see rollupParentByID); reconcile stuck parents with a FULL recompute
+	// (state + progress + cost) and notify — a repaired state without its
+	// progress/cost, or without a NOTIFY, is still wrong.
+	if err := reapTx(ctx, pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT parent_job_id
 			FROM generation_jobs
 			WHERE parent_job_id IS NOT NULL
 			GROUP BY parent_job_id
 			HAVING count(*) = count(*) FILTER (WHERE state IN ('complete','failed','canceled'))
-		) done
-		WHERE p.id = done.id AND p.state NOT IN ('complete','failed','canceled')`); err != nil {
-		return requeued, tag.RowsAffected(), err
+			   AND parent_job_id IN
+			       (SELECT id FROM generation_jobs
+			        WHERE state NOT IN ('complete','failed','canceled'))`)
+		if err != nil {
+			return err
+		}
+		var parents []string
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				rows.Close()
+				return err
+			}
+			parents = append(parents, p)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, p := range parents {
+			if err := rollupParentByID(ctx, tx, p); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, GenerationChannel, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return requeued, parked, err
 	}
-	return requeued, tag.RowsAffected(), nil
+	return requeued, parked, nil
+}
+
+func reapTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func backoffFor(attempts int) time.Duration {

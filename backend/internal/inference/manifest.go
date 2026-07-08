@@ -86,9 +86,20 @@ func (m *Manifest) Validate(req *CreateJobRequest) error {
 		return invalid("model %s has no profile %q", m.ID, req.Profile)
 	}
 	if req.Output != nil {
+		// Absolute server-side ceilings independent of the manifest — a
+		// compromised manifest declaring max_width 2^31 must not let requests
+		// through (defense in depth; hard bounds also catch negatives).
+		const hardMaxDim, hardMaxDuration = 8192, 600.0
+		if req.Output.Width <= 0 || req.Output.Height <= 0 ||
+			req.Output.Width > hardMaxDim || req.Output.Height > hardMaxDim {
+			return invalid("output dimensions %dx%d out of bounds", req.Output.Width, req.Output.Height)
+		}
 		if req.Output.Width > profile.MaxWidth || req.Output.Height > profile.MaxHeight {
 			return invalid("output %dx%d exceeds profile %q max %dx%d",
 				req.Output.Width, req.Output.Height, req.Profile, profile.MaxWidth, profile.MaxHeight)
+		}
+		if req.Output.DurationS < 0 || req.Output.DurationS > hardMaxDuration {
+			return invalid("duration %.1fs out of bounds", req.Output.DurationS)
 		}
 		if req.Output.DurationS > 0 {
 			if m.Duration == nil {

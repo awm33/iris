@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/awm33/iris/backend/internal/inference"
 	"github.com/awm33/iris/backend/internal/mockmodel"
 )
 
@@ -59,14 +60,15 @@ func TestImageModalityConformance(t *testing.T) {
 	}
 }
 
-// TestSchemaCopyInSync guards the embedded schema copy against drift from the
-// canonical spec/manifest.schema.json.
+// TestSchemaCopyInSync guards the embedded schema copy (now owned by the
+// inference package, shared by conformance and the registry) against drift
+// from the canonical spec/manifest.schema.json.
 func TestSchemaCopyInSync(t *testing.T) {
 	canonical, err := os.ReadFile("../../../spec/manifest.schema.json")
 	if err != nil {
 		t.Fatalf("read canonical schema: %v", err)
 	}
-	if !bytes.Equal(bytes.TrimSpace(canonical), bytes.TrimSpace(manifestSchema)) {
-		t.Fatal("backend/internal/conformance/manifest.schema.json has drifted from spec/manifest.schema.json — copy it over")
+	if !bytes.Equal(bytes.TrimSpace(canonical), bytes.TrimSpace(inference.ManifestSchemaJSON)) {
+		t.Fatal("backend/internal/inference/manifest.schema.json has drifted from spec/manifest.schema.json — copy it over")
 	}
 }
