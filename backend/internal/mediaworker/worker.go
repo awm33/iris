@@ -182,10 +182,13 @@ func (w *Worker) runProbe(ctx context.Context, job *queue.MediaJob) error {
 		return err
 	}
 
-	// Dimensions/fps are only trusted for genuine video containers — audio
-	// files with attached cover art also report video streams (parseProbe
-	// filters attached_pic, this is the second gate).
+	// Dimensions are trusted for video AND image containers (the probe is the
+	// sole metadata source for generated images — endpoint-reported metadata
+	// is never stored); audio files with attached cover art also report video
+	// streams (parseProbe filters attached_pic, this is the second gate).
+	// fps/posters remain video-only.
 	isVideo := strings.HasPrefix(contentType, "video/")
+	isImage := strings.HasPrefix(contentType, "image/")
 
 	meta := map[string]any{}
 	if info.HasVideo && isVideo {
@@ -208,8 +211,11 @@ func (w *Worker) runProbe(ctx context.Context, job *queue.MediaJob) error {
 	metaJSON, _ := json.Marshal(meta)
 
 	width, height, fps := info.Width, info.Height, info.FPS
+	if !isVideo && !isImage {
+		width, height = 0, 0
+	}
 	if !isVideo {
-		width, height, fps = 0, 0, 0
+		fps = 0
 	}
 
 	// Job completion and the probe results commit atomically; the guarded
