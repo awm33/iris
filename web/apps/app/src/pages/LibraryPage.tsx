@@ -4,7 +4,7 @@ import { useRef } from "react";
 import { AssetKind, type Asset } from "@iris/api-client";
 import { assetClient, uploadFile } from "../api";
 
-export function LibraryPage(props: { projectId?: string }) {
+export function LibraryPage(props: { projectId?: string; onGenerate?: () => void }) {
   const qc = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -22,7 +22,12 @@ export function LibraryPage(props: { projectId?: string }) {
     <div>
       <h2>Library</h2>
       <div className="toolbar">
-        <button className="btn" onClick={() => fileInput.current?.click()} disabled={upload.isPending}>
+        {props.onGenerate && (
+          <button className="btn" onClick={props.onGenerate}>
+            ⚡ Generate
+          </button>
+        )}
+        <button className="btn secondary" onClick={() => fileInput.current?.click()} disabled={upload.isPending}>
           {upload.isPending ? "Uploading…" : "Upload media"}
         </button>
         <input

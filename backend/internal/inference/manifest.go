@@ -3,6 +3,7 @@ package inference
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 )
 
 // Manifest is the parsed capability manifest (spec/manifest.schema.json).
@@ -90,6 +91,14 @@ func (m *Manifest) Validate(req *CreateJobRequest) error {
 		// compromised manifest declaring max_width 2^31 must not let requests
 		// through (defense in depth; hard bounds also catch negatives).
 		const hardMaxDim, hardMaxDuration = 8192, 600.0
+		// NaN sidesteps every </>/== comparison below (proto3 JSON accepts
+		// "NaN" for doubles) — reject explicitly before range checks.
+		if math.IsNaN(req.Output.DurationS) || math.IsNaN(req.Output.FPS) {
+			return invalid("duration/fps must be numbers")
+		}
+		if req.Output.FPS < 0 || req.Output.FPS > 240 {
+			return invalid("fps %.1f out of bounds", req.Output.FPS)
+		}
 		if req.Output.Width <= 0 || req.Output.Height <= 0 ||
 			req.Output.Width > hardMaxDim || req.Output.Height > hardMaxDim {
 			return invalid("output dimensions %dx%d out of bounds", req.Output.Width, req.Output.Height)
@@ -110,6 +119,12 @@ func (m *Manifest) Validate(req *CreateJobRequest) error {
 					req.Output.DurationS, m.Duration.MinS, m.Duration.MaxS)
 			}
 		}
+	}
+	// Video generation without a duration would dispatch with the length
+	// unspecified — a deferred failure (or surprise-length clip) on a real
+	// endpoint. duration=0 must not sneak past as "not video".
+	if m.Modality == "video" && (req.Output == nil || req.Output.DurationS <= 0) {
+		return invalid("video generation requires a duration")
 	}
 	if req.Seed != 0 && !m.Features.Seed {
 		return invalid("model %s does not support seeds", m.ID)
