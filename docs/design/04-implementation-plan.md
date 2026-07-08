@@ -33,7 +33,18 @@
 - ✅ `GetLineage` API exists (empty until M2 writes edges).
 - Servers for local dev: `just api` (:8280) + `just web` (:5173); stack via `just dev`.
 
-**Remaining for M1 exit:** media-worker ingest probe (ffprobe → duration/fps/dims for video+audio, filmstrip thumbnail for video cards) — first consumer of the pg queue, which then carries straight into M2's orchestrator. Then M2: generation core against the mocks.
+**M1 — ✅ COMPLETE** (PR #1, merged `df4f13f`): media-worker ingest probe — ffprobe metadata via signed URLs, video posters, first pg-queue consumer with the lease/reaper/ownership design that survived independent review (stranded-`running` recovery, ffmpeg protocol whitelist, per-job panic recovery). Filmstrips deferred to M5 with the rest of media prep.
+
+**M2 progress (PR #2, merged `0ddc919`) — backend core ✅ COMPLETE:**
+- Inference client + parsed capability manifests with two-stage validation (click-time + dispatch-time), JSON-Schema-gated endpoint health, last-known-good manifests.
+- Endpoint registry (dev-seeded mocks, refresh loop, on-demand refresh).
+- Generation queue: lease/heartbeat/reaper, `depends_on` gating **with transitive dependency-failure propagation**, parent rollup (lock-then-aggregate; race-proof), error taxonomy, unreachable-endpoint requeues that don't burn attempts.
+- Orchestrator: resolve refs (pin-or-head) → dispatch (per-attempt endpoint ids + upload keys) → poll with heartbeat-as-cancel-detection → atomic artifact landing (content-addressed, sha-verified, lineage edges, probe enqueue for image+video, usage metering).
+- GenerationService: CreateJob (fan-out ≤8, seed derivation), Get/List/Cancel(idempotent)/Retry(guarded), ListModelEndpoints.
+- **Endpoint responses treated as untrusted** (own content types, probe-measured metadata, clamped metering) per security review; hardening backlog below.
+- Two independent review rounds; findings incl. a critical dependency-deadlock fixed and live-verified.
+
+**Remaining for M2 exit (→ PR 3):** the browser dogfood moment — WS event bridge (pg NOTIFY → WebSocket), Jobs page + queue tray, generate panel v1 (model picker from manifests, prompt, library ref chips, count, draft/master). Backend is fully curl-verified; no generation UI exists yet.
 
 ---
 
