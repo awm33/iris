@@ -6,9 +6,9 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Connect-RPC + WS to the Go api service in dev.
+      // Connect-RPC + SSE to the Go api service in dev.
       "/iris.v1": { target: "http://localhost:8280", changeOrigin: true },
-      "/ws": { target: "ws://localhost:8280", ws: true },
+      "/events": { target: "http://localhost:8280", changeOrigin: true },
     },
   },
 });

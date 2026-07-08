@@ -138,21 +138,36 @@ func (s *Store) GetGenJob(ctx context.Context, id string) (*GenJob, error) {
 	return j, rows.Err()
 }
 
-// ListGenJobs returns parent jobs (the user-facing units) newest-first.
+// ListGenJobs returns parent jobs (the user-facing units) newest-first, with
+// artifact version ids aggregated from their sub-jobs' lineage edges — the
+// Jobs UI renders thumbnails straight from the list.
 func (s *Store) ListGenJobs(ctx context.Context, projectID, state string) ([]*GenJob, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+genJobCols+` FROM generation_jobs
-		WHERE project_id = $1 AND parent_job_id IS NULL
-		  AND ($2 = '' OR state = $2)
-		ORDER BY created_at DESC LIMIT 100`, projectID, state)
+		SELECT `+genJobCols+`,
+		       COALESCE(art.ids, '{}') AS artifact_ids
+		FROM generation_jobs g
+		LEFT JOIN LATERAL (
+			SELECT array_agg(l.from_version_id ORDER BY l.created_at) AS ids
+			FROM asset_links l
+			JOIN generation_jobs sub ON sub.id = l.to_entity_id
+			WHERE sub.parent_job_id = g.id AND l.role = 'generated_by'
+		) art ON true
+		WHERE g.project_id = $1 AND g.parent_job_id IS NULL
+		  AND ($2 = '' OR g.state = $2)
+		ORDER BY g.created_at DESC LIMIT 100`, projectID, state)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []*GenJob
 	for rows.Next() {
-		j, err := scanGenJob(rows)
-		if err != nil {
+		j := &GenJob{}
+		if err := rows.Scan(&j.ID, &j.WorkspaceID, &j.ProjectID, &j.EndpointID,
+			&j.ParentJobID, &j.DependsOnJobID, &j.Task, &j.Profile,
+			&j.State, &j.Request, &j.TargetEntityID, &j.Progress,
+			&j.ErrorCode, &j.ErrorMessage,
+			&j.CostEstimate, &j.CostActual, &j.CreatedAt, &j.UpdatedAt,
+			&j.ArtifactVersionIDs); err != nil {
 			return nil, err
 		}
 		out = append(out, j)

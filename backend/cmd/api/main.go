@@ -15,6 +15,8 @@ import (
 	"github.com/awm33/iris/backend/gen/iris/v1/irisv1connect"
 	"github.com/awm33/iris/backend/internal/api"
 	"github.com/awm33/iris/backend/internal/blob"
+	"github.com/awm33/iris/backend/internal/events"
+	"github.com/awm33/iris/backend/internal/queue"
 	"github.com/awm33/iris/backend/internal/registry"
 	"github.com/awm33/iris/backend/internal/store"
 )
@@ -62,12 +64,15 @@ func main() {
 	}
 	go reg.RefreshLoop(context.Background(), time.Minute)
 
+	bridge := &events.Bridge{DSN: dsn, Channels: []string{queue.GenerationChannel, queue.MediaChannel}}
+	go bridge.Run(context.Background())
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+	mux.Handle("GET /events", bridge)
 	mux.Handle(irisv1connect.NewWorkspaceServiceHandler(&api.WorkspaceServer{Store: st}))
 	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl}))
 	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}))
-	// TODO(PR 3): /ws event bridge (pg LISTEN → WS fan-out) + Jobs/generate-panel UI
 
 	slog.Info("iris-api listening", "addr", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
