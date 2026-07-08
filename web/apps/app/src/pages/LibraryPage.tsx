@@ -51,16 +51,24 @@ export function LibraryPage(props: { projectId?: string }) {
 
 function AssetCard({ asset }: { asset: Asset }) {
   const isImage = asset.kind === AssetKind.IMAGE;
+  const isVideo = asset.kind === AssetKind.VIDEO;
   const thumb = useQuery({
-    queryKey: ["thumb", asset.headVersionId],
-    enabled: isImage && asset.headVersionId !== "",
+    queryKey: ["thumb", asset.headVersionId, isVideo ? "poster" : ""],
+    enabled: (isImage || isVideo) && asset.headVersionId !== "",
     staleTime: 10 * 60 * 1000, // signed URLs live 15m
-    queryFn: () => assetClient.signDownload({ versionId: asset.headVersionId }),
+    // Video posters appear once the ingest probe runs — retry NotFound briefly.
+    retry: isVideo ? 5 : 1,
+    retryDelay: 2000,
+    queryFn: () =>
+      assetClient.signDownload({
+        versionId: asset.headVersionId,
+        variant: isVideo ? "poster" : "",
+      }),
   });
 
   return (
     <div className="card">
-      {isImage && thumb.data ? (
+      {thumb.data ? (
         <img className="thumb" src={thumb.data.url} alt={asset.name} />
       ) : (
         <div className="thumb-placeholder">{kindGlyph(asset.kind)}</div>

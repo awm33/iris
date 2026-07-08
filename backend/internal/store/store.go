@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/awm33/iris/backend/internal/ids"
+	"github.com/awm33/iris/backend/internal/queue"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -183,8 +184,9 @@ type AssetVersion struct {
 }
 
 // CreateAssetWithVersion inserts the asset identity + first version + head
-// pointer in one transaction.
-func (s *Store) CreateAssetWithVersion(ctx context.Context, a *Asset, v *AssetVersion) error {
+// pointer in one transaction. enqueueProbe adds a media probe job to the same
+// transaction (NOTIFY fires on commit — job and version land atomically).
+func (s *Store) CreateAssetWithVersion(ctx context.Context, a *Asset, v *AssetVersion, enqueueProbe bool) error {
 	a.ID = ids.New("ast")
 	v.ID = ids.New("astv")
 	v.AssetID = a.ID
@@ -209,6 +211,12 @@ func (s *Store) CreateAssetWithVersion(ctx context.Context, a *Asset, v *AssetVe
 	if _, err := tx.Exec(ctx,
 		`UPDATE assets SET head_version_id = $2 WHERE id = $1`, a.ID, v.ID); err != nil {
 		return err
+	}
+	if enqueueProbe {
+		if err := queue.EnqueueMediaJob(ctx, tx, a.WorkspaceID, "probe",
+			map[string]string{"version_id": v.ID}); err != nil {
+			return err
+		}
 	}
 	a.HeadVersionID = v.ID
 	return tx.Commit(ctx)
@@ -276,11 +284,19 @@ func (s *Store) ListAssets(ctx context.Context, workspaceID, projectID, kind, qu
 	return out, rows.Err()
 }
 
-func (s *Store) GetVersionObjectInfo(ctx context.Context, versionID string) (sha256, contentType string, err error) {
-	err = wrapNotFound(s.pool.QueryRow(ctx,
-		`SELECT sha256, content_type FROM asset_versions WHERE id = $1`, versionID).
-		Scan(&sha256, &contentType))
-	return
+type VersionObjectInfo struct {
+	SHA256      string
+	ContentType string
+	PosterKey   string // "" until the probe job has produced one
+}
+
+func (s *Store) GetVersionObjectInfo(ctx context.Context, versionID string) (*VersionObjectInfo, error) {
+	info := &VersionObjectInfo{}
+	err := wrapNotFound(s.pool.QueryRow(ctx,
+		`SELECT sha256, content_type, COALESCE(meta->>'poster_key', '')
+		 FROM asset_versions WHERE id = $1`, versionID).
+		Scan(&info.SHA256, &info.ContentType, &info.PosterKey))
+	return info, err
 }
 
 type AssetLink struct {

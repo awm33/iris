@@ -33,5 +33,8 @@ api:
 orchestrator:
     cd backend && go run ./cmd/orchestrator
 
+worker:
+    cd backend && go run ./cmd/media-worker
+
 web:
     cd web && pnpm dev
