@@ -1,0 +1,10 @@
+{
+  "name": "iris-web",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @iris/app dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@iris/api-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "GENERATED Connect-RPC client from proto/iris/v1 \u2014 never hand-edit src/gen. Regenerate with `just gen`.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.0"
+  }
+}

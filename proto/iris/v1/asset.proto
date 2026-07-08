@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package iris.v1;
+
+import "iris/v1/common.proto";
+
+option go_package = "github.com/awm33/iris/backend/gen/iris/v1;irisv1";
+
+enum AssetKind {
+  ASSET_KIND_UNSPECIFIED = 0;
+  ASSET_KIND_IMAGE = 1;
+  ASSET_KIND_VIDEO = 2;
+  ASSET_KIND_AUDIO = 3;
+  ASSET_KIND_MODEL_3D = 4;
+  ASSET_KIND_LUT = 5;
+  ASSET_KIND_FONT = 6;
+}
+
+// Mutable identity; content lives in immutable versions (TDD §3.2).
+message Asset {
+  string id = 1;
+  string workspace_id = 2;
+  string project_id = 3; // empty = workspace-level (shared characters/styles)
+  AssetKind kind = 4;
+  string name = 5;
+  string head_version_id = 6;
+  repeated string tags = 7;
+  Timestamps timestamps = 15;
+}
+
+message AssetVersion {
+  string id = 1;
+  string asset_id = 2;
+  string sha256 = 3;          // content-addressed storage key
+  string content_type = 4;
+  int64 size_bytes = 5;
+  int32 width = 6;
+  int32 height = 7;
+  double duration_s = 8;      // video/audio
+  double fps = 9;             // video
+  Timestamps timestamps = 15;
+}
+
+// Lineage edge (TDD §3.2): what made this, what used it.
+enum LinkRole {
+  LINK_ROLE_UNSPECIFIED = 0;
+  LINK_ROLE_GENERATED_BY = 1;      // asset_version ← generation job
+  LINK_ROLE_REFERENCE_OF = 2;      // asset_version used as ref in job/take
+  LINK_ROLE_CONDITIONING_FRAME_OF = 3;
+  LINK_ROLE_DERIVED_FROM = 4;      // e.g. master upscaled from draft; canvas export from take frame
+  LINK_ROLE_USED_IN_TAKE = 5;
+}
+
+message AssetLink {
+  string from_version_id = 1;
+  string to_entity_id = 2;   // job_, tk_, ast_ ...
+  LinkRole role = 3;
+}
+
+service AssetService {
+  // Upload flow: Start → client PUTs parts to signed URLs → Complete → ingest pipeline runs.
+  rpc StartUpload(StartUploadRequest) returns (StartUploadResponse);
+  rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
+
+  rpc GetAsset(GetAssetRequest) returns (GetAssetResponse);
+  rpc ListAssets(ListAssetsRequest) returns (ListAssetsResponse);
+  rpc GetLineage(GetLineageRequest) returns (GetLineageResponse);
+
+  // Short-lived signed GET for display/refs.
+  rpc SignDownload(SignDownloadRequest) returns (SignDownloadResponse);
+}
+
+message StartUploadRequest {
+  string workspace_id = 1;
+  string project_id = 2;
+  string filename = 3;
+  string content_type = 4;
+  int64 size_bytes = 5;
+}
+message StartUploadResponse {
+  string upload_id = 1;
+  repeated string part_put_urls = 2;
+}
+
+message CompleteUploadRequest {
+  string upload_id = 1;
+  repeated string etags = 2;
+}
+message CompleteUploadResponse {
+  Asset asset = 1;
+  AssetVersion version = 2;
+}
+
+message GetAssetRequest { string id = 1; }
+message GetAssetResponse {
+  Asset asset = 1;
+  repeated AssetVersion versions = 2;
+}
+
+message ListAssetsRequest {
+  string workspace_id = 1;
+  string project_id = 2;   // empty = all in workspace
+  AssetKind kind = 3;      // unspecified = all
+  string query = 4;        // name/tag search (semantic later)
+  PageRequest page = 5;
+}
+message ListAssetsResponse {
+  repeated Asset assets = 1;
+  PageResponse page = 2;
+}
+
+message GetLineageRequest { string version_id = 1; }
+message GetLineageResponse {
+  repeated AssetLink upstream = 1;
+  repeated AssetLink downstream = 2;
+}
+
+message SignDownloadRequest { string version_id = 1; }
+message SignDownloadResponse {
+  string url = 1;
+  int64 expires_unix = 2;
+}

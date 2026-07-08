@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package iris.v1;
+
+import "iris/v1/common.proto";
+
+option go_package = "github.com/awm33/iris/backend/gen/iris/v1;irisv1";
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_DRAFT = 1;
+  JOB_STATE_QUEUED = 2;
+  JOB_STATE_DISPATCHED = 3;
+  JOB_STATE_RUNNING = 4;
+  JOB_STATE_UPLOADING = 5;
+  JOB_STATE_COMPLETE = 6;
+  JOB_STATE_FAILED = 7;
+  JOB_STATE_CANCELED = 8;
+}
+
+message Reference {
+  string kind = 1;      // image | video | audio
+  string role = 2;      // manifest-declared role (character, scene_view, speech_lipsync, ...)
+  AssetRef asset = 3;
+  double weight = 4;    // 0 = default
+}
+
+message Conditioning {
+  AssetRef first_frame = 1;
+  AssetRef last_frame = 2;
+  repeated KeyframeAt keyframes = 3;
+  AssetRef depth_sequence = 4;
+  AssetRef source_video = 5;
+  AssetRef mask = 6;
+}
+
+message KeyframeAt {
+  double t_seconds = 1;
+  AssetRef frame = 2;
+}
+
+message OutputSpec {
+  int32 width = 1;
+  int32 height = 2;
+  double duration_s = 3; // video only
+  double fps = 4;        // video only
+}
+
+// A generation request. Fan-out: `count` takes; orchestrator expands to sub-jobs.
+message GenerationJob {
+  string id = 1;
+  string workspace_id = 2;
+  string project_id = 3;
+  string model_endpoint_id = 4;
+  string task = 5;           // t2i | t2v | i2v | inpaint | ...
+  string profile = 6;        // draft | master
+  string prompt = 7;
+  string negative_prompt = 8;
+  int64 seed = 9;            // 0 = random per sub-job
+  OutputSpec output = 10;
+  repeated Reference references = 11;
+  Conditioning conditioning = 12;
+  string params_json = 13;   // validated against manifest.params_schema
+  int32 count = 14;          // fan-out N (sub-jobs)
+  string target_entity_id = 16; // sht_ | canvas selection id | view slot — where results land
+  string depends_on_job_id = 17; // chain regeneration ordering
+  JobState state = 18;
+  double progress = 19;
+  string error_code = 20;
+  string error_message = 21;
+  double cost_estimate = 22;
+  double cost_actual = 23;
+  repeated string artifact_version_ids = 24;
+  Timestamps timestamps = 15;
+}
+
+service GenerationService {
+  rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc RetryJob(RetryJobRequest) returns (RetryJobResponse);
+
+  // Model endpoints (roster) — manifests cached server-side, refreshed on interval.
+  rpc ListModelEndpoints(ListModelEndpointsRequest) returns (ListModelEndpointsResponse);
+}
+
+message CreateJobRequest { GenerationJob job = 1; }
+message CreateJobResponse { GenerationJob job = 1; }
+
+message GetJobRequest { string id = 1; }
+message GetJobResponse { GenerationJob job = 1; }
+
+message ListJobsRequest {
+  string project_id = 1;
+  JobState state = 2; // unspecified = all
+  PageRequest page = 3;
+}
+message ListJobsResponse {
+  repeated GenerationJob jobs = 1;
+  PageResponse page = 2;
+}
+
+message CancelJobRequest { string id = 1; }
+message CancelJobResponse {}
+
+message RetryJobRequest { string id = 1; }
+message RetryJobResponse { GenerationJob job = 1; }
+
+message ModelEndpoint {
+  string id = 1;
+  string display_name = 2;
+  string base_url = 3;
+  string kind = 4;          // iris | openweight | commercial
+  string manifest_json = 5; // last-fetched manifest (validates spec/manifest.schema.json)
+  bool healthy = 6;
+}
+
+message ListModelEndpointsRequest { string workspace_id = 1; }
+message ListModelEndpointsResponse { repeated ModelEndpoint endpoints = 1; }

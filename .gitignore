@@ -1,0 +1,23 @@
+# Generated code (rebuilt via `just gen`)
+backend/gen/
+web/packages/api-client/src/gen/
+
+# Go
+backend/bin/
+
+# Rust
+engine/target/
+
+# Node
+node_modules/
+web/**/dist/
+
+# Env & tooling
+.env
+.env.*
+*.local
+.DS_Store
+.dev/
+
+# TS build cache
+*.tsbuildinfo

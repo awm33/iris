@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:spec:manifest:1.0",
+  "title": "Iris Model Capability Manifest",
+  "description": "Declares everything Iris may send to a model endpoint and everything the UI may offer for it. Honesty rule: undeclared = unsupported.",
+  "type": "object",
+  "required": ["spec_version", "id", "family", "version", "modality", "tasks", "profiles", "references", "conditioning", "features", "pricing", "limits"],
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": { "const": "1.0" },
+    "id": { "type": "string", "description": "Stable endpoint id, e.g. iris-video-2.2", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+    "family": { "type": "string", "description": "Model lineage, e.g. wan2.2-iris" },
+    "version": { "type": "string", "description": "Endpoint release, e.g. 2026.07.1 — bump on any capability change" },
+    "modality": { "enum": ["image", "video", "audio"] },
+    "tasks": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": { "enum": ["t2i", "i2i", "t2v", "i2v", "v2v", "inpaint", "outpaint", "upscale", "restyle", "extend", "multi_view", "lipsync_post", "tts"] }
+    },
+    "profiles": {
+      "type": "object", "minProperties": 1,
+      "description": "Named quality/cost tiers; 'draft' and 'master' are conventional.",
+      "additionalProperties": {
+        "type": "object", "required": ["max_width", "max_height"], "additionalProperties": false,
+        "properties": {
+          "max_width": { "type": "integer", "minimum": 64 },
+          "max_height": { "type": "integer", "minimum": 64 },
+          "steps": { "type": "integer" },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "duration": {
+      "type": "object", "additionalProperties": false,
+      "description": "Video only.",
+      "properties": {
+        "min_s": { "type": "number", "exclusiveMinimum": 0 },
+        "max_s": { "type": "number", "exclusiveMinimum": 0 },
+        "fps": { "type": "array", "items": { "type": "integer" }, "description": "Supported output fps values" }
+      }
+    },
+    "references": {
+      "type": "object", "additionalProperties": false,
+      "description": "Reference inputs accepted per kind. Omit a kind entirely if unsupported.",
+      "properties": {
+        "image": { "$ref": "#/$defs/refKind" },
+        "video": { "$ref": "#/$defs/refKind" },
+        "audio": { "$ref": "#/$defs/refKind" }
+      }
+    },
+    "conditioning": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "first_frame": { "type": "boolean" },
+        "last_frame": { "type": "boolean" },
+        "keyframes": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "max": { "type": "integer", "minimum": 2 } },
+          "description": "Multi-keyframe interpolation (superset of first+last)."
+        },
+        "depth_sequence": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "formats": { "type": "array", "items": { "enum": ["png16.zip", "gray.mp4"] } } }
+        },
+        "pose_sequence": { "type": "boolean" },
+        "mask": { "type": "boolean", "description": "Inpainting mask (static for image, mask video for video)" },
+        "source_video": { "type": "boolean", "description": "v2v / restyle / extend input" },
+        "multi_view": { "type": "boolean", "description": "Consistent multi-view generation from view refs" }
+      }
+    },
+    "features": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "seed": { "type": "boolean" },
+        "negative_prompt": { "type": "boolean" },
+        "native_batch": { "type": "object", "additionalProperties": false, "properties": { "max_n": { "type": "integer", "minimum": 2 } } },
+        "lip_sync_in_gen": { "type": "boolean", "description": "Audio reference drives lip sync during generation" },
+        "lip_sync_post": { "type": "boolean", "description": "Post-hoc lip sync of existing video (task lipsync_post)" },
+        "audio_gen": { "type": "boolean", "description": "Generates audio with video output" },
+        "camera_control": { "enum": [null, "prompt", "preset_moves", "depth_path"], "description": "depth_path = camera implied by depth_sequence conditioning" },
+        "v2v_restyle": { "type": "boolean" },
+        "video_inpaint": { "enum": [null, "mask", "mask+prompt"] }
+      }
+    },
+    "params_schema": {
+      "type": "object",
+      "description": "JSON Schema for the job's `params` object; drives the Advanced panel. Empty object = no extra params."
+    },
+    "pricing": {
+      "type": "object", "required": ["unit"], "additionalProperties": false,
+      "properties": {
+        "unit": { "enum": ["gpu_second", "usd_per_second", "usd_per_image", "usd_per_job"] },
+        "estimates": {
+          "type": "object",
+          "description": "Per-profile estimated cost in `unit` for a nominal generation (5s video / 1 image).",
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "limits": {
+      "type": "object", "required": ["concurrency"], "additionalProperties": false,
+      "properties": {
+        "concurrency": { "type": "integer", "minimum": 1 },
+        "max_queue": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "refKind": {
+      "type": "object", "required": ["max", "roles"], "additionalProperties": false,
+      "properties": {
+        "max": { "type": "integer", "minimum": 1 },
+        "roles": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "enum": ["character", "object", "style", "scene_view", "motion", "speech_lipsync", "music", "voice"] }
+        },
+        "weighted": { "type": "boolean", "description": "Per-reference weight supported" }
+      }
+    }
+  }
+}

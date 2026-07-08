@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package iris.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/awm33/iris/backend/gen/iris/v1;irisv1";
+
+// IDs are ULIDs rendered as lowercase strings, prefixed by type
+// (ws_, prj_, scn_, set_, view_, chr_, sht_, tk_, ast_, job_, mep_).
+
+message PageRequest {
+  int32 page_size = 1; // default 50, max 200
+  string page_token = 2;
+}
+
+message PageResponse {
+  string next_page_token = 1;
+}
+
+// A pinned-or-floating reference to an asset (HLD §4.3: pin vs float is explicit).
+message AssetRef {
+  string asset_id = 1;
+  // Empty = float to head version; set = pinned to a specific version.
+  string version_id = 2;
+}
+
+message Timestamps {
+  google.protobuf.Timestamp created_at = 1;
+  google.protobuf.Timestamp updated_at = 2;
+}

@@ -1,0 +1,12 @@
+[package]
+name = "engine-core"
+version = "0.1.0"
+edition.workspace = true
+description = "Iris render/playback engine core: frame-graph evaluation, decode scheduling, compositing. One codebase, two targets — WASM+WebGPU in the browser, native wgpu in the server renderer (TDD §2.3)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Dependencies land with the first migrated hot path (M5 checkpoint):
+# wgpu, wasm-bindgen (wasm32 target only), serde/serde_json for frame-graph IO.
+[dependencies]
