@@ -1,3 +1,4 @@
+import { Code, ConnectError } from "@connectrpc/connect";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef } from "react";
 import { AssetKind, type Asset } from "@iris/api-client";
@@ -56,9 +57,12 @@ function AssetCard({ asset }: { asset: Asset }) {
     queryKey: ["thumb", asset.headVersionId, isVideo ? "poster" : ""],
     enabled: (isImage || isVideo) && asset.headVersionId !== "",
     staleTime: 10 * 60 * 1000, // signed URLs live 15m
-    // Video posters appear once the ingest probe runs — retry NotFound briefly.
-    retry: isVideo ? 5 : 1,
-    retryDelay: 2000,
+    // Video posters appear once the ingest probe runs. Retry ONLY NotFound
+    // (poster-pending), long enough to cover queue latency (~2 min at 3s);
+    // other errors fail fast instead of hammering the API.
+    retry: (failureCount, error) =>
+      isVideo && isNotFound(error) && failureCount < 40,
+    retryDelay: 3000,
     queryFn: () =>
       assetClient.signDownload({
         versionId: asset.headVersionId,
@@ -77,6 +81,10 @@ function AssetCard({ asset }: { asset: Asset }) {
       <div className="meta">{AssetKind[asset.kind]?.toLowerCase() ?? "asset"}</div>
     </div>
   );
+}
+
+function isNotFound(error: unknown): boolean {
+  return error instanceof ConnectError && error.code === Code.NotFound;
 }
 
 function kindGlyph(kind: AssetKind): string {

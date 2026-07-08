@@ -3,19 +3,29 @@ package mediaworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 )
 
+// Uploaded bytes are untrusted: restrict the demuxer to plain network fetch
+// of the presigned URL so crafted playlists/containers (HLS, concat, …)
+// cannot reach file:// or internal hosts via nested protocol references.
+// "http" is required for dev MinIO; production presigners emit https.
+const protocolWhitelist = "http,https,tls,tcp"
+
 // ffprobeResult is the subset of `ffprobe -print_format json` output we use.
 type ffprobeResult struct {
 	Streams []struct {
-		CodecType  string `json:"codec_type"`
-		Width      int    `json:"width"`
-		Height     int    `json:"height"`
-		RFrameRate string `json:"r_frame_rate"` // "24/1"
+		CodecType   string `json:"codec_type"`
+		Width       int    `json:"width"`
+		Height      int    `json:"height"`
+		RFrameRate  string `json:"r_frame_rate"` // "24/1"
+		Disposition struct {
+			AttachedPic int `json:"attached_pic"`
+		} `json:"disposition"`
 	} `json:"streams"`
 	Format struct {
 		Duration string `json:"duration"` // "2.000000"
@@ -33,9 +43,13 @@ type ProbeInfo struct {
 // asset_versions row needs.
 func probeURL(ctx context.Context, url string) (*ProbeInfo, error) {
 	out, err := exec.CommandContext(ctx, "ffprobe",
-		"-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", url).Output()
+		"-v", "error",
+		"-protocol_whitelist", protocolWhitelist,
+		"-analyzeduration", "10000000", // 10s
+		"-probesize", "50000000", // 50MB
+		"-print_format", "json", "-show_format", "-show_streams", url).Output()
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe: %w", err)
+		return nil, fmt.Errorf("ffprobe: %w", withStderr(err))
 	}
 	return parseProbe(out)
 }
@@ -50,7 +64,9 @@ func parseProbe(raw []byte) (*ProbeInfo, error) {
 		info.DurationS = d
 	}
 	for _, s := range r.Streams {
-		if s.CodecType != "video" {
+		// Cover art in audio files reports as a video stream with
+		// attached_pic disposition — its dims/fps are not the media's.
+		if s.CodecType != "video" || s.Disposition.AttachedPic == 1 {
 			continue
 		}
 		info.HasVideo = true
@@ -84,6 +100,7 @@ func parseFrameRate(r string) float64 {
 func extractPoster(ctx context.Context, url string, offsetS float64) ([]byte, error) {
 	out, err := exec.CommandContext(ctx, "ffmpeg",
 		"-v", "error",
+		"-protocol_whitelist", protocolWhitelist,
 		"-ss", strconv.FormatFloat(offsetS, 'f', 3, 64),
 		"-i", url,
 		"-frames:v", "1",
@@ -91,10 +108,25 @@ func extractPoster(ctx context.Context, url string, offsetS float64) ([]byte, er
 		"-q:v", "3",
 		"-f", "image2", "pipe:1").Output()
 	if err != nil {
-		return nil, fmt.Errorf("ffmpeg poster: %w", err)
+		return nil, fmt.Errorf("ffmpeg poster: %w", withStderr(err))
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("ffmpeg produced no poster frame")
 	}
 	return out, nil
+}
+
+// withStderr surfaces the tool's stderr (captured by exec.Output into
+// ExitError.Stderr) — the parked job's error column is where failed ingests
+// get diagnosed.
+func withStderr(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		msg := strings.TrimSpace(string(exitErr.Stderr))
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+		return fmt.Errorf("%w: %s", err, msg)
+	}
+	return err
 }

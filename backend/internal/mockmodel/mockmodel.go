@@ -53,13 +53,13 @@ type server struct {
 }
 
 type job struct {
-	ID       string     `json:"id"`
-	State    string     `json:"state"` // queued|running|uploading|complete|failed|canceled
-	Progress float64    `json:"progress"`
-	EtaS     *int       `json:"eta_s"`
+	ID        string     `json:"id"`
+	State     string     `json:"state"` // queued|running|uploading|complete|failed|canceled
+	Progress  float64    `json:"progress"`
+	EtaS      *int       `json:"eta_s"`
 	Artifacts []artifact `json:"artifacts,omitempty"`
-	Error    *jobError  `json:"error,omitempty"`
-	Metrics  *metrics   `json:"metrics,omitempty"`
+	Error     *jobError  `json:"error,omitempty"`
+	Metrics   *metrics   `json:"metrics,omitempty"`
 }
 
 type artifact struct {

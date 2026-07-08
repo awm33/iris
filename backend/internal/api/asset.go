@@ -177,12 +177,12 @@ func kindFromContentType(ct string) string {
 }
 
 var kindToPB = map[string]irisv1.AssetKind{
-	"image": irisv1.AssetKind_ASSET_KIND_IMAGE,
-	"video": irisv1.AssetKind_ASSET_KIND_VIDEO,
-	"audio": irisv1.AssetKind_ASSET_KIND_AUDIO,
+	"image":    irisv1.AssetKind_ASSET_KIND_IMAGE,
+	"video":    irisv1.AssetKind_ASSET_KIND_VIDEO,
+	"audio":    irisv1.AssetKind_ASSET_KIND_AUDIO,
 	"model_3d": irisv1.AssetKind_ASSET_KIND_MODEL_3D,
-	"lut":   irisv1.AssetKind_ASSET_KIND_LUT,
-	"font":  irisv1.AssetKind_ASSET_KIND_FONT,
+	"lut":      irisv1.AssetKind_ASSET_KIND_LUT,
+	"font":     irisv1.AssetKind_ASSET_KIND_FONT,
 }
 
 func kindString(k irisv1.AssetKind) string {
