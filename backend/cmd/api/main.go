@@ -75,7 +75,12 @@ func main() {
 	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}))
 
 	slog.Info("iris-api listening", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // slowloris guard; no WriteTimeout (SSE streams)
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server exited", "err", err)
 		os.Exit(1)
 	}

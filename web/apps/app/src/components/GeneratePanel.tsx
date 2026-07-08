@@ -50,11 +50,21 @@ export function GeneratePanel(props: { projectId: string; onClose: () => void; o
   const [showRefPicker, setShowRefPicker] = useState(false);
 
   const activeTask = task && manifest?.tasks.includes(task) ? task : manifest?.tasks[0];
-  const activeProfile = profile && manifest?.profiles[profile] ? profile : "draft";
-  const profileSpec = manifest?.profiles[activeProfile];
+  // "draft" is convention, not contract — fall back to the manifest's first
+  // declared profile so the select and the submitted value can't diverge.
+  const profileKeys = manifest ? Object.keys(manifest.profiles) : [];
+  const activeProfile =
+    profile && manifest?.profiles[profile] ? profile : profileKeys.includes("draft") ? "draft" : profileKeys[0];
+  const profileSpec = activeProfile ? manifest?.profiles[activeProfile] : undefined;
   const isVideo = manifest?.modality === "video";
   const refDecl = manifest?.references?.image;
-  const estimate = manifest?.pricing?.estimates?.[activeProfile];
+  const estimate = activeProfile ? manifest?.pricing?.estimates?.[activeProfile] : undefined;
+
+  // Duration clamped to the manifest's declared range; an empty number input
+  // (NaN/0) must never submit — duration=0 would bypass video validation.
+  const durMin = manifest?.duration?.min_s ?? 1;
+  const durMax = manifest?.duration?.max_s ?? 60;
+  const durationValid = !isVideo || (Number.isFinite(durationS) && durationS >= durMin && durationS <= durMax);
 
   const create = useMutation({
     mutationFn: () =>
@@ -101,7 +111,17 @@ export function GeneratePanel(props: { projectId: string; onClose: () => void; o
 
       <label className="field">
         Model
-        <select value={endpoint.id} onChange={(e) => setEndpointId(e.target.value)}>
+        <select
+          value={endpoint.id}
+          onChange={(e) => {
+            // References are validated against the selected model's manifest;
+            // carrying them across a model switch would submit chips the
+            // panel no longer displays.
+            setEndpointId(e.target.value);
+            setRefs([]);
+            setShowRefPicker(false);
+          }}
+        >
           {healthy.map((ep) => (
             <option key={ep.id} value={ep.id}>
               {ep.displayName} · {modalityOf(ep)}
@@ -196,13 +216,18 @@ export function GeneratePanel(props: { projectId: string; onClose: () => void; o
 
       <button
         className="btn generate"
-        disabled={!prompt.trim() || create.isPending}
+        disabled={!prompt.trim() || !durationValid || !activeProfile || create.isPending}
         onClick={() => create.mutate()}
       >
         ⚡ Generate {count} {isVideo ? "take" : "candidate"}
         {count > 1 ? "s" : ""}
-        {estimate !== undefined ? ` · ~${(estimate * count).toFixed(1)} ${manifest.pricing?.unit === "gpu_second" ? "gpu·s" : ""}` : ""}
+        {formatEstimate(estimate, count, manifest.pricing?.unit)}
       </button>
+      {!durationValid && (
+        <div className="status error">
+          Duration must be between {durMin} and {durMax} seconds.
+        </div>
+      )}
       {create.isError && <div className="status error">{String(create.error)}</div>}
     </aside>
   );
@@ -217,6 +242,20 @@ function PanelHeader(props: { onClose: () => void }) {
       </button>
     </div>
   );
+}
+
+const unitLabels: Record<string, string> = {
+  gpu_second: "gpu·s",
+  usd_per_second: "USD",
+  usd_per_image: "USD",
+  usd_per_job: "USD",
+};
+
+function formatEstimate(estimate: number | undefined, count: number, unit?: string): string {
+  if (estimate === undefined || !Number.isFinite(estimate)) return "";
+  const total = estimate * count;
+  if (!Number.isFinite(total) || total < 0) return "";
+  return ` · ~${total.toFixed(1)} ${unitLabels[unit ?? ""] ?? unit ?? ""}`.trimEnd();
 }
 
 function modalityOf(ep: ModelEndpoint): string {

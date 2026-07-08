@@ -1,5 +1,6 @@
 import { Code, ConnectError } from "@connectrpc/connect";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { JobState, type GenerationJob } from "@iris/api-client";
 import { assetClient, generationClient } from "../api";
 
@@ -33,9 +34,11 @@ export function JobsPage(props: { projectId?: string }) {
 }
 
 const stateLabel: Partial<Record<JobState, string>> = {
+  [JobState.DRAFT]: "draft",
   [JobState.QUEUED]: "queued",
   [JobState.DISPATCHED]: "dispatched",
   [JobState.RUNNING]: "running",
+  [JobState.UPLOADING]: "uploading",
   [JobState.COMPLETE]: "complete",
   [JobState.FAILED]: "failed",
   [JobState.CANCELED]: "canceled",
@@ -100,8 +103,10 @@ function JobCard({ job }: { job: GenerationJob }) {
 
 // Artifact thumbnails: try the poster variant first (videos have one after
 // the probe; images 404) and fall back to the original object (correct for
-// images). Both queries stay cheap signed-URL lookups.
+// images; a pre-probe video's mp4 will fail to render as <img> and drops to
+// the placeholder via onError until the media event brings the poster).
 function ArtifactThumb({ versionId }: { versionId: string }) {
+  const [imgFailed, setImgFailed] = useState(false);
   const poster = useQuery({
     queryKey: ["artifact-thumb", versionId, "poster"],
     retry: false,
@@ -117,8 +122,14 @@ function ArtifactThumb({ versionId }: { versionId: string }) {
     queryFn: () => assetClient.signDownload({ versionId }),
   });
   const url = poster.data?.url ?? original.data?.url;
-  return url ? (
-    <img className="artifact-img" src={url} alt="artifact" />
+  return url && !imgFailed ? (
+    <img
+      className="artifact-img"
+      src={url}
+      alt="artifact"
+      onError={() => setImgFailed(true)}
+      onLoad={() => setImgFailed(false)}
+    />
   ) : (
     <div className="artifact-img placeholder">⟳</div>
   );

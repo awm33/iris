@@ -25,6 +25,15 @@ export function App() {
     queryKey: ["jobs", project?.id ?? ""],
     enabled: !!project,
     queryFn: () => generationClient.listJobs({ projectId: project!.id }),
+    // Slow-poll backstop while jobs are in flight: SSE is best-effort (a
+    // dropped terminal event or a bridge outage must not strand the UI).
+    refetchInterval: (query) =>
+      query.state.data?.jobs.some(
+        (j) =>
+          j.state === JobState.QUEUED || j.state === JobState.DISPATCHED || j.state === JobState.RUNNING,
+      )
+        ? 15_000
+        : false,
   });
   const activeJobs =
     jobs.data?.jobs.filter(

@@ -107,6 +107,7 @@ Export service v1 (server render of the frame graph — TS-shared-shader or earl
 - Artifact upload size ceiling (presigned PUT content-length range or post-hoc check).
 - Cost model cleanup: `cost_estimate` (manifest pricing units) vs `cost_actual` (gpu-seconds) aren't comparable; unify when billing becomes real.
 - Endpoint auth tokens to KMS/vault (auth_ref is plaintext in dev).
+- Event bridge (PR 3 review): workspace-scoped event filtering needs workspace id in NOTIFY payloads — decide the payload shape before more pg_notify call sites accrete (8 today); SSE per-write deadlines; connection sharing across tabs (BroadcastChannel/HTTP2); kind-aware artifact thumbnails in ListJobs (avoids poster-404 probing for images).
 
 ### M8+ — Phase 1 backlog (not planned in detail yet)
 Additional commercial adapters (`fal` first — one adapter, many models), nano-banana; capability-manifest UI polish; multi-view expansion; adjustment layers/clone/heal/filters; speed ramps; shot-match color; onboarding/Assist mode; project export; OSS IdP (Keycloak-class) replacing auth v0; review links. Re-plan after the M7 dogfood retro.

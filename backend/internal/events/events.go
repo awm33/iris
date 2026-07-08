@@ -3,6 +3,14 @@
 // through the normal API on receipt, so the bridge never becomes a second
 // source of truth.
 //
+// Delivery model: per-client COALESCED dirty flags, not a queue. A slow
+// client may miss intermediate events but can never miss "something changed
+// on channel X" — the flag stays set until written. On pg reconnect the
+// bridge broadcasts a synthetic event per channel (NOTIFYs fired during the
+// gap are unrecoverable; clients resync by refetching). The client side
+// mirrors this with an onopen invalidation and a slow poll while jobs are
+// active, so SSE is an accelerator, never load-bearing for correctness.
+//
 // SSE (not WebSocket) is deliberate for job events: one-way, auto-reconnect
 // built into EventSource, zero dependencies. The doc-sync service (M3) needs
 // bidirectional WS and will be its own endpoint; this bridge stays as-is.
@@ -25,16 +33,43 @@ type Bridge struct {
 	Channels []string // pg NOTIFY channels to relay
 
 	mu      sync.Mutex
-	clients map[chan []byte]struct{}
+	clients map[*client]struct{}
+}
+
+type client struct {
+	mu      sync.Mutex
+	pending map[string]string // channel -> latest payload (coalesced)
+	kick    chan struct{}     // cap 1; wakes the writer
+}
+
+func (c *client) mark(channel, id string) {
+	c.mu.Lock()
+	c.pending[channel] = id
+	c.mu.Unlock()
+	select {
+	case c.kick <- struct{}{}:
+	default: // writer already signaled
+	}
+}
+
+func (c *client) drain() map[string]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pending) == 0 {
+		return nil
+	}
+	out := c.pending
+	c.pending = map[string]string{}
+	return out
 }
 
 type event struct {
 	Channel string `json:"channel"`
-	ID      string `json:"id,omitempty"` // notify payload (job id), may be empty
+	ID      string `json:"id,omitempty"`
 }
 
 const (
-	clientBuffer      = 64
+	maxClients        = 256
 	keepaliveInterval = 25 * time.Second
 	reconnectDelay    = 2 * time.Second
 )
@@ -44,14 +79,22 @@ const (
 func (b *Bridge) Run(ctx context.Context) {
 	b.mu.Lock()
 	if b.clients == nil {
-		b.clients = map[chan []byte]struct{}{}
+		b.clients = map[*client]struct{}{}
 	}
 	b.mu.Unlock()
 
+	first := true
 	for ctx.Err() == nil {
+		if !first {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(reconnectDelay):
+			}
+		}
+		first = false
 		if err := b.listenOnce(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("event bridge connection lost; reconnecting", "err", err)
-			time.Sleep(reconnectDelay)
 		}
 	}
 }
@@ -67,24 +110,25 @@ func (b *Bridge) listenOnce(ctx context.Context) error {
 			return err
 		}
 	}
+	// NOTIFYs fired while we were disconnected are gone (LISTEN has no
+	// replay) — tell every client to resync each channel.
+	for _, ch := range b.Channels {
+		b.broadcast(ch, "")
+	}
 	for {
 		n, err := conn.WaitForNotification(ctx)
 		if err != nil {
 			return err
 		}
-		msg, _ := json.Marshal(event{Channel: n.Channel, ID: n.Payload})
-		b.broadcast(msg)
+		b.broadcast(n.Channel, n.Payload)
 	}
 }
 
-func (b *Bridge) broadcast(msg []byte) {
+func (b *Bridge) broadcast(channel, id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for ch := range b.clients {
-		select {
-		case ch <- msg:
-		default: // slow client: drop the event; the next one triggers refetch anyway
-		}
+	for c := range b.clients {
+		c.mark(channel, id)
 	}
 }
 
@@ -95,24 +139,28 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 
-	ch := make(chan []byte, clientBuffer)
+	c := &client{pending: map[string]string{}, kick: make(chan struct{}, 1)}
 	b.mu.Lock()
 	if b.clients == nil {
-		b.clients = map[chan []byte]struct{}{}
+		b.clients = map[*client]struct{}{}
 	}
-	b.clients[ch] = struct{}{}
-	clientCount := len(b.clients)
+	if len(b.clients) >= maxClients {
+		b.mu.Unlock()
+		http.Error(w, "too many event streams", http.StatusTooManyRequests)
+		return
+	}
+	b.clients[c] = struct{}{}
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
-		delete(b.clients, ch)
+		delete(b.clients, c)
 		b.mu.Unlock()
 	}()
-	slog.Debug("sse client connected", "clients", clientCount)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Accel-Buffering", "no") // nginx-class proxies must not buffer SSE
 
 	// Tell EventSource we're live, then relay until the client goes away.
 	fmt.Fprint(w, ": connected\n\n")
@@ -125,10 +173,17 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-keepalive.C:
-			fmt.Fprint(w, ": keepalive\n\n")
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
-		case msg := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", msg)
+		case <-c.kick:
+			for channel, id := range c.drain() {
+				msg, _ := json.Marshal(event{Channel: channel, ID: id})
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", msg); err != nil {
+					return
+				}
+			}
 			flusher.Flush()
 		}
 	}

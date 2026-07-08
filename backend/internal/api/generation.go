@@ -140,7 +140,13 @@ func (s *GenerationServer) toGenRequest(j *irisv1.GenerationJob, count int) (*st
 			FPS:       j.Output.Fps,
 		}
 		infReq.Output = &out
-		outJSON, _ := json.Marshal(out)
+		// A marshal failure (NaN/Inf reach here via proto3 JSON doubles)
+		// must reject the request — silently dropping the validated output
+		// block would dispatch the job without its dimensions.
+		outJSON, err := json.Marshal(out)
+		if err != nil {
+			return nil, nil, connect.NewError(connect.CodeInvalidArgument, errors.New("output contains non-finite numbers"))
+		}
 		genReq.Output = outJSON
 	}
 	for _, r := range j.References {

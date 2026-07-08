@@ -147,7 +147,7 @@ func (s *Store) ListGenJobs(ctx context.Context, projectID, state string) ([]*Ge
 		       COALESCE(art.ids, '{}') AS artifact_ids
 		FROM generation_jobs g
 		LEFT JOIN LATERAL (
-			SELECT array_agg(l.from_version_id ORDER BY l.created_at) AS ids
+			SELECT array_agg(l.from_version_id ORDER BY l.created_at, l.from_version_id) AS ids
 			FROM asset_links l
 			JOIN generation_jobs sub ON sub.id = l.to_entity_id
 			WHERE sub.parent_job_id = g.id AND l.role = 'generated_by'
