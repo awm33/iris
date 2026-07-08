@@ -115,7 +115,12 @@ message GetLineageResponse {
   repeated AssetLink downstream = 2;
 }
 
-message SignDownloadRequest { string version_id = 1; }
+message SignDownloadRequest {
+  string version_id = 1;
+  // "" = the original object. "poster" = the derived poster frame (video
+  // versions, present once the ingest probe has run — NotFound until then).
+  string variant = 2;
+}
 message SignDownloadResponse {
   string url = 1;
   int64 expires_unix = 2;

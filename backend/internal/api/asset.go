@@ -82,7 +82,10 @@ func (s *AssetServer) CompleteUpload(ctx context.Context, req *connect.Request[i
 		Kind:        kindFromContentType(u.ContentType),
 		Name:        u.Filename,
 	}
-	if err := s.Store.CreateAssetWithVersion(ctx, a, v); err != nil {
+	// Video/audio need the ffprobe pass (duration/fps/dims, poster); the job
+	// is enqueued in the same transaction as the asset rows.
+	needsProbe := a.Kind == "video" || a.Kind == "audio"
+	if err := s.Store.CreateAssetWithVersion(ctx, a, v, needsProbe); err != nil {
 		return nil, connectErr(err)
 	}
 	return connect.NewResponse(&irisv1.CompleteUploadResponse{
@@ -132,11 +135,23 @@ func (s *AssetServer) GetLineage(ctx context.Context, req *connect.Request[irisv
 }
 
 func (s *AssetServer) SignDownload(ctx context.Context, req *connect.Request[irisv1.SignDownloadRequest]) (*connect.Response[irisv1.SignDownloadResponse], error) {
-	sha, contentType, err := s.Store.GetVersionObjectInfo(ctx, req.Msg.VersionId)
+	info, err := s.Store.GetVersionObjectInfo(ctx, req.Msg.VersionId)
 	if err != nil {
 		return nil, connectErr(err)
 	}
-	url, err := s.Blob.PresignGet(ctx, blob.ContentKey(sha), contentType, getExpiry)
+	var key, contentType string
+	switch req.Msg.Variant {
+	case "":
+		key, contentType = blob.ContentKey(info.SHA256), info.ContentType
+	case "poster":
+		if info.PosterKey == "" {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("poster not generated yet"))
+		}
+		key, contentType = info.PosterKey, "image/jpeg"
+	default:
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unknown variant: "+req.Msg.Variant))
+	}
+	url, err := s.Blob.PresignGet(ctx, key, contentType, getExpiry)
 	if err != nil {
 		return nil, connectErr(err)
 	}
@@ -162,12 +177,12 @@ func kindFromContentType(ct string) string {
 }
 
 var kindToPB = map[string]irisv1.AssetKind{
-	"image": irisv1.AssetKind_ASSET_KIND_IMAGE,
-	"video": irisv1.AssetKind_ASSET_KIND_VIDEO,
-	"audio": irisv1.AssetKind_ASSET_KIND_AUDIO,
+	"image":    irisv1.AssetKind_ASSET_KIND_IMAGE,
+	"video":    irisv1.AssetKind_ASSET_KIND_VIDEO,
+	"audio":    irisv1.AssetKind_ASSET_KIND_AUDIO,
 	"model_3d": irisv1.AssetKind_ASSET_KIND_MODEL_3D,
-	"lut":   irisv1.AssetKind_ASSET_KIND_LUT,
-	"font":  irisv1.AssetKind_ASSET_KIND_FONT,
+	"lut":      irisv1.AssetKind_ASSET_KIND_LUT,
+	"font":     irisv1.AssetKind_ASSET_KIND_FONT,
 }
 
 func kindString(k irisv1.AssetKind) string {

@@ -97,6 +97,14 @@ func (s *Store) HashAndPromote(ctx context.Context, tempKey string) (hash string
 	return hash, size, rdr, nil
 }
 
+// PutObject writes derived artifacts (posters, proxies, waveforms) under
+// non-content-addressed keys owned by their producer.
+func (s *Store) PutObject(ctx context.Context, key, contentType string, r io.Reader, size int64) error {
+	_, err := s.client.PutObject(ctx, s.cfg.Bucket, key, r, size,
+		minio.PutObjectOptions{ContentType: contentType})
+	return err
+}
+
 func ContentKey(sha string) string { return "sha256/" + sha }
 
 func (s *Store) public(u *url.URL) string {

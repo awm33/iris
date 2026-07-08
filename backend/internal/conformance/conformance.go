@@ -181,9 +181,9 @@ func (c *checker) checkManifest(ctx context.Context) (string, error) {
 // targets. The endpoint under test must be able to reach it (same host for
 // the mock; a tunnel may be needed for remote endpoints).
 type artifactReceiver struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	got  map[string][]byte // path -> body
+	srv *httptest.Server
+	mu  sync.Mutex
+	got map[string][]byte // path -> body
 }
 
 func newArtifactReceiver() *artifactReceiver {
