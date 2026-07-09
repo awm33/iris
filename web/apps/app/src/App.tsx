@@ -3,7 +3,7 @@
 // Generate panel with shot targeting. Story board/Timelines/Canvases land
 // with M4–M5.
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { JobState } from "@iris/api-client";
 import { generationClient } from "./api";
 import { GeneratePanel, prefillFromRecipe, type GeneratePrefill } from "./components/GeneratePanel";
@@ -24,8 +24,9 @@ export function App() {
   const [project, setProject] = useState<{ id: string; name: string }>();
   const [sceneId, setSceneId] = useState<string>();
   const [generating, setGenerating] = useState<
-    { shotId: string; label: string; prefill?: GeneratePrefill } | true | false
+    { shotId: string; label: string; prefill?: GeneratePrefill; nonce: number } | true | false
   >(false);
+  const generateNonce = useRef(0);
 
   const jobs = useQuery({
     queryKey: ["jobs", project?.id ?? ""],
@@ -105,7 +106,12 @@ export function App() {
               setGenerating(false);
             }}
             onGenerateForShot={(shotId, label, recipeJson) =>
-              setGenerating({ shotId, label, prefill: recipeJson ? prefillFromRecipe(recipeJson) : undefined })
+              setGenerating({
+                shotId,
+                label,
+                prefill: recipeJson ? prefillFromRecipe(recipeJson) : undefined,
+                nonce: ++generateNonce.current,
+              })
             }
           />
         )}
@@ -117,9 +123,10 @@ export function App() {
       </main>
       {generating !== false && project && (
         <GeneratePanel
-          // Remount per intent: a regenerate prefill must not leak state
-          // into a subsequent plain open (and vice versa).
-          key={typeof generating === "object" ? `${generating.shotId}:${generating.prefill ? "r" : "g"}` : "library"}
+          // Remount per intent (nonce): two successive regenerates from
+          // DIFFERENT takes of the same shot must not share panel state —
+          // useState initializers only run on mount.
+          key={typeof generating === "object" ? `${generating.shotId}:${generating.nonce}` : "library"}
           projectId={project.id}
           target={typeof generating === "object" ? generating : undefined}
           prefill={typeof generating === "object" ? generating.prefill : undefined}

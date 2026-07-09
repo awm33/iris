@@ -29,7 +29,6 @@ export type GeneratePrefill = {
   prompt?: string;
   seed?: bigint;
   durationS?: number;
-  count?: number;
   refs?: RefChip[];
 };
 
@@ -44,7 +43,6 @@ export function prefillFromRecipe(recipeJson: string): GeneratePrefill | undefin
       profile?: string;
       request?: {
         prompt?: string;
-        seed?: number;
         output?: { duration_s?: number };
         references?: { kind?: string; role?: string; asset_id?: string }[];
       };
@@ -54,7 +52,7 @@ export function prefillFromRecipe(recipeJson: string): GeneratePrefill | undefin
       task: r.task,
       profile: r.profile,
       prompt: r.request?.prompt,
-      seed: r.request?.seed !== undefined ? BigInt(r.request.seed) : undefined,
+      seed: seedFromRecipeJSON(recipeJson),
       durationS: r.request?.output?.duration_s,
       refs: (r.request?.references ?? [])
         .filter((ref) => ref.kind === "image" && ref.asset_id)
@@ -63,6 +61,14 @@ export function prefillFromRecipe(recipeJson: string): GeneratePrefill | undefin
   } catch {
     return undefined;
   }
+}
+
+// Seeds are int64 in the recipe; JSON.parse coerces numbers to doubles, which
+// silently rounds anything above 2^53 — and the seed field itself permits
+// 18-digit values. Extract the digits from the raw JSON instead.
+export function seedFromRecipeJSON(recipeJson: string): bigint | undefined {
+  const m = recipeJson.match(/"seed"\s*:\s*(\d+)/);
+  return m ? BigInt(m[1]) : undefined;
 }
 
 export function GeneratePanel(props: {
@@ -98,7 +104,7 @@ export function GeneratePanel(props: {
   const [task, setTask] = useState<string | undefined>(props.prefill?.task);
   const [profile, setProfile] = useState<string | undefined>(props.prefill?.profile);
   const [prompt, setPrompt] = useState(props.prefill?.prompt ?? "");
-  const [count, setCount] = useState(props.prefill?.count ?? 4);
+  const [count, setCount] = useState(4);
   const [durationS, setDurationS] = useState(props.prefill?.durationS ?? 4);
   const [seed, setSeed] = useState<string>(props.prefill?.seed !== undefined ? String(props.prefill.seed) : "");
   const [refs, setRefs] = useState<RefChip[]>(props.prefill?.refs ?? []);
@@ -125,6 +131,11 @@ export function GeneratePanel(props: {
   const seedSupported = manifest?.features?.seed === true;
   const seedValue = seed.trim() === "" ? undefined : /^\d{1,18}$/.test(seed.trim()) ? BigInt(seed.trim()) : null;
   const seedValid = !seedSupported || seedValue !== null;
+  // Prefilled refs sanitized against the RESOLVED manifest — hidden inputs
+  // must never submit (an error about an invisible field is a dead end).
+  const effectiveRefs = refDecl
+    ? refs.filter((r) => refDecl.roles.includes(r.role)).slice(0, refDecl.max)
+    : [];
 
   const create = useMutation({
     mutationFn: () =>
@@ -136,7 +147,7 @@ export function GeneratePanel(props: {
           profile: activeProfile,
           prompt,
           count,
-          seed: seedValue ?? 0n,
+          seed: seedSupported ? (seedValue ?? 0n) : 0n,
           targetEntityId: props.target?.shotId ?? "",
           output: {
             width: profileSpec?.max_width ?? 512,
@@ -144,7 +155,7 @@ export function GeneratePanel(props: {
             durationS: isVideo ? durationS : 0,
             fps: isVideo ? 24 : 0,
           },
-          references: refs.map((r) => ({
+          references: effectiveRefs.map((r) => ({
             kind: "image",
             role: r.role,
             asset: { assetId: r.assetId, versionId: "" },
@@ -175,10 +186,29 @@ export function GeneratePanel(props: {
     );
   }
 
+  // Regenerate fallbacks must be LOUD: silently substituting a model or task
+  // while claiming "this take's recipe" would misattribute the spend.
+  const fallbackNotes: string[] = [];
+  if (props.prefill?.endpointId && endpoint.id !== props.prefill.endpointId) {
+    fallbackNotes.push(`Original model unavailable — using ${endpoint.displayName}.`);
+  }
+  if (props.prefill?.task && activeTask !== props.prefill.task) {
+    fallbackNotes.push(`Task "${props.prefill.task}" not supported here — using "${activeTask}".`);
+  }
+  if (effectiveRefs.length !== refs.length) {
+    fallbackNotes.push(`${refs.length - effectiveRefs.length} reference(s) not supported by this model were dropped.`);
+  }
+  if (!seedSupported && seed.trim() !== "") {
+    fallbackNotes.push("This model does not support seeds — generating unseeded.");
+  }
+
   return (
     <aside className="panel">
       <PanelHeader onClose={props.onClose} />
       {props.target && <div className="target-chip">Target: {props.target.label}</div>}
+      {fallbackNotes.length > 0 && (
+        <div className="status error">{fallbackNotes.join(" ")}</div>
+      )}
 
       <label className="field">
         Model
@@ -228,7 +258,7 @@ export function GeneratePanel(props: {
           <div className="chips">
             {refs.map((r, i) => (
               <span key={i} className="chip" title={r.role}>
-                {r.name} · {r.role}
+                {r.name === r.role ? r.role : `${r.name} · ${r.role}`}
                 <button onClick={() => setRefs(refs.filter((_, j) => j !== i))}>×</button>
               </span>
             ))}

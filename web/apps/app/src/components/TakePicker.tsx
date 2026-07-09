@@ -31,14 +31,31 @@ export function TakePicker(props: {
 
   const list = takes.data?.takes ?? [];
 
+  // Open on the currently selected take; clamp when the list shrinks.
+  useEffect(() => {
+    const i = list.findIndex((t) => t.id === props.selectedTakeId);
+    setHighlight((h) => (i >= 0 && h === 0 ? i : Math.min(h, Math.max(list.length - 1, 0))));
+  }, [list, props.selectedTakeId]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (list.length === 0 || select.isPending) return;
+      // Never hijack modified combos or typing contexts (focus is not
+      // trapped; background inputs remain tabbable).
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
       if (e.key >= "1" && e.key <= "9") {
         const i = Number(e.key) - 1;
-        if (i < list.length && list[i].id !== props.selectedTakeId) {
+        if (i < list.length) {
           setHighlight(i);
-          select.mutate(list[i].id);
+          if (list[i].id !== props.selectedTakeId) select.mutate(list[i].id);
         }
       } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
         e.preventDefault();
@@ -47,6 +64,10 @@ export function TakePicker(props: {
         e.preventDefault();
         setHighlight((h) => Math.max(h - 1, 0));
       } else if (e.key === "Enter") {
+        // A focused button owns its own Enter (Close, Regenerate, a take
+        // tile) — committing the highlight as well would double-act.
+        if (target?.closest("button")) return;
+        e.preventDefault();
         const t = list[highlight];
         if (t && t.id !== props.selectedTakeId) select.mutate(t.id);
       }
@@ -95,7 +116,7 @@ export function TakePicker(props: {
                 </button>
                 <button
                   className="btn secondary chip-add"
-                  title="Open the generate panel pre-filled with this take's exact recipe"
+                  title="Open the generate panel pre-filled from this take's recipe"
                   onClick={() => props.onRegenerate(t.recipeJson)}
                 >
                   ♻ Regenerate from this
@@ -112,10 +133,10 @@ export function TakePicker(props: {
 
 function recipeSummary(recipeJson: string): string {
   try {
-    const r = JSON.parse(recipeJson) as { model?: string; request?: { prompt?: string; seed?: number } };
-    return [r.model, r.request?.seed !== undefined ? `seed ${r.request.seed}` : "", r.request?.prompt ?? ""]
-      .filter(Boolean)
-      .join(" · ");
+    const r = JSON.parse(recipeJson) as { model?: string; request?: { prompt?: string } };
+    // Seed extracted from the raw JSON — parsing coerces int64 to a double.
+    const seed = recipeJson.match(/"seed"\s*:\s*(\d+)/)?.[1];
+    return [r.model, seed ? `seed ${seed}` : "", r.request?.prompt ?? ""].filter(Boolean).join(" · ");
   } catch {
     return "";
   }
