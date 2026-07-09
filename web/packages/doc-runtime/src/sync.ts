@@ -64,10 +64,16 @@ export class OpSync {
     } catch (err) {
       if (isConflict(err)) {
         // Another writer appended after baseSeq: pull what we missed, let the
-        // doc replay it, and retry our batch on the new head.
+        // doc replay it, and retry our batch on the new head. The "other
+        // writer" can be OUR OWN lost-ack append — an op that committed but
+        // whose response never arrived — so prune pending ops the refetch
+        // already contains, or a network blip would write them to the durable
+        // log twice.
         try {
           const { headSeq, payloads } = await this.transport.fetchSince(this.baseSeq);
           this.onRemoteOps?.(payloads);
+          const landed = new Set(payloads.map(payloadOpId).filter(Boolean));
+          this.pending = this.pending.filter((op) => !landed.has(op.op_id));
           this.baseSeq = headSeq;
         } catch (refetchErr) {
           this.fail(refetchErr);
@@ -94,9 +100,13 @@ export class OpSync {
   private fail(err: unknown) {
     this.inFlight = false;
     this.setStatus("error", String(err));
-    // Ops stay queued; a later enqueue or manual flush retries.
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => void this.flush(), 5000);
+    // The server rejected the batch as invalid: retrying the same bytes can
+    // never succeed — keep the ops (undo still works) but stop hammering.
+    // Everything else is presumed transient; ops stay queued and retry.
+    if (!isInvalid(err)) {
+      this.timer = setTimeout(() => void this.flush(), 5000);
+    }
   }
 
   private setStatus(s: SyncStatus, error?: string) {
@@ -114,4 +124,22 @@ export function isConflict(err: unknown): boolean {
     e?.code === 10 || // connect-es Code.Aborted
     (typeof e?.message === "string" && e.message.includes("[aborted]"))
   );
+}
+
+function isInvalid(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown };
+  return (
+    e?.code === "invalid_argument" ||
+    e?.code === 3 || // connect-es Code.InvalidArgument
+    (typeof e?.message === "string" && e.message.includes("[invalid_argument]"))
+  );
+}
+
+function payloadOpId(payload: string): string | undefined {
+  try {
+    const op = JSON.parse(payload) as { op_id?: string };
+    return typeof op?.op_id === "string" ? op.op_id : undefined;
+  } catch {
+    return undefined;
+  }
 }

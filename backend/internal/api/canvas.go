@@ -69,6 +69,9 @@ func (s *CanvasServer) ListCanvases(ctx context.Context, req *connect.Request[ir
 }
 
 func (s *CanvasServer) GetCanvas(ctx context.Context, req *connect.Request[irisv1.GetCanvasRequest]) (*connect.Response[irisv1.GetCanvasResponse], error) {
+	if req.Msg.AfterSeq < 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("after_seq must be >= 0"))
+	}
 	c, err := s.Store.GetCanvas(ctx, req.Msg.Id)
 	if err != nil {
 		return nil, connectErr(err)

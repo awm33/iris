@@ -97,7 +97,10 @@ export class CanvasDoc {
   private redoTargets: string[] = [];
 
   constructor(ops: CanvasOp[] = []) {
-    this.ops = ops;
+    // Dedup by op_id: the server appends at-least-once (a lost ack + retry
+    // can leave the same op in the log twice), so replay must be idempotent.
+    const seen = new Set<string>();
+    this.ops = ops.filter((op) => !seen.has(op.op_id) && (seen.add(op.op_id), true));
     this.state = reduce(this.ops);
   }
 

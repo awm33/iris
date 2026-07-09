@@ -108,6 +108,12 @@ describe("CanvasDoc undo/redo", () => {
     expect(seen).toEqual(["stroke", "undo", "undo"]);
   });
 
+  it("constructor dedups by op_id (at-least-once server log)", () => {
+    const doc = new CanvasDoc([addLayer("a"), stroke("s1", "a"), stroke("s1", "a")]);
+    expect(doc.ops).toHaveLength(2);
+    expect(doc.state.layers[0].strokes).toHaveLength(1);
+  });
+
   it("applyRemote dedups ops it already holds", () => {
     const doc = new CanvasDoc([addLayer("a")]);
     doc.applyRemote([addLayer("a"), stroke("s1", "a")]);

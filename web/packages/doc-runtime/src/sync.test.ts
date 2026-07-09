@@ -66,6 +66,32 @@ describe("OpSync", () => {
     expect(sync.status).toBe("saved");
   });
 
+  it("lost ack: prunes pending ops the refetch already contains (no duplicate append)", async () => {
+    // The op COMMITTED server-side but the response was lost; the retry
+    // conflicts, the refetch returns our own op — it must not be re-sent.
+    let call = 0;
+    const appended: string[][] = [];
+    const transport: OpSyncTransport = {
+      append: async (base, payloads) => {
+        call++;
+        if (call === 1) throw new ConnectAborted("[aborted] base_seq is stale"); // ack was lost
+        appended.push(payloads);
+        return base + payloads.length;
+      },
+      fetchSince: async () => ({
+        headSeq: 1,
+        payloads: [JSON.stringify(op("mine"))], // our own op, already landed
+      }),
+    };
+    const sync = new OpSync(transport, 0);
+    sync.enqueue(op("mine"));
+    await sync.flush();
+    expect(appended).toEqual([]); // nothing re-sent
+    expect(sync.pendingCount).toBe(0);
+    expect(sync.baseSeq).toBe(1);
+    expect(sync.status).toBe("saved");
+  });
+
   it("keeps ops queued on hard errors and reports status", async () => {
     const transport: OpSyncTransport = {
       append: async () => {

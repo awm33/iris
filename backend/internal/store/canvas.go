@@ -113,6 +113,9 @@ func (s *Store) ListCanvasOps(ctx context.Context, docID string, afterSeq int64,
 // succeeds when baseSeq is current, so seqs stay gapless and there is a
 // single effective writer per doc without advisory locks.
 func (s *Store) AppendCanvasOps(ctx context.Context, canvasID string, baseSeq int64, actorID string, payloads [][]byte) (int64, error) {
+	if len(payloads) == 0 {
+		return 0, errors.New("no ops to append")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -127,9 +130,13 @@ func (s *Store) AppendCanvasOps(ctx context.Context, canvasID string, baseSeq in
 		RETURNING head_seq, doc_id`,
 		canvasID, baseSeq, len(payloads)).Scan(&head, &docID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Distinguish a stale base_seq from a missing canvas.
+		// Distinguish a stale base_seq from a missing canvas. Read on the SAME
+		// tx (a 0-row UPDATE is not an error state, and READ COMMITTED takes a
+		// fresh per-statement snapshot): grabbing a second pool connection here
+		// while holding this one can self-deadlock the pool when many appends
+		// conflict at once.
 		var cur int64
-		if err2 := s.pool.QueryRow(ctx,
+		if err2 := tx.QueryRow(ctx,
 			`SELECT head_seq FROM canvases WHERE id = $1`, canvasID).Scan(&cur); err2 != nil {
 			return 0, wrapNotFound(err2)
 		}

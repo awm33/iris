@@ -12,6 +12,8 @@ import (
 	"os"
 	"time"
 
+	"connectrpc.com/connect"
+
 	"github.com/awm33/iris/backend/gen/iris/v1/irisv1connect"
 	"github.com/awm33/iris/backend/internal/api"
 	"github.com/awm33/iris/backend/internal/blob"
@@ -71,15 +73,19 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.Handle("GET /events", bridge)
-	mux.Handle(irisv1connect.NewWorkspaceServiceHandler(&api.WorkspaceServer{Store: st}))
+	// Body-size ceiling for every RPC: request payloads are otherwise fully
+	// buffered before the per-field caps run. 16MB clears the largest
+	// legitimate call (AppendOps: 200 ops × 64KB) with headroom.
+	opts := connect.WithReadMaxBytes(16 << 20)
+	mux.Handle(irisv1connect.NewWorkspaceServiceHandler(&api.WorkspaceServer{Store: st}, opts))
 	pex := pexels.New(os.Getenv("IRIS_PEXELS_API_KEY"))
 	if pex == nil {
 		slog.Info("pexels source not configured (IRIS_PEXELS_API_KEY unset)")
 	}
-	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl, Pexels: pex}))
-	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}))
-	mux.Handle(irisv1connect.NewStoryServiceHandler(&api.StoryServer{Store: st}))
-	mux.Handle(irisv1connect.NewCanvasServiceHandler(&api.CanvasServer{Store: st}))
+	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl, Pexels: pex}, opts))
+	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}, opts))
+	mux.Handle(irisv1connect.NewStoryServiceHandler(&api.StoryServer{Store: st}, opts))
+	mux.Handle(irisv1connect.NewCanvasServiceHandler(&api.CanvasServer{Store: st}, opts))
 
 	slog.Info("iris-api listening", "addr", addr)
 	srv := &http.Server{
