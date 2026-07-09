@@ -86,6 +86,19 @@ describe("reduce", () => {
   });
 });
 
+describe("text layers", () => {
+  it("carries text through add_layer and set_layer; undo restores", () => {
+    const t = { content: "Hello", x: 10, y: 20, size: 64, color: "#fff" };
+    const ops: CanvasOp[] = [
+      { op_id: "a1", type: "add_layer", layer: { id: "t1", name: "Text", kind: "text", text: t } },
+      { op_id: "a2", type: "set_layer", layer_id: "t1", props: { text: { ...t, content: "Bye" } } },
+    ];
+    expect(reduce(ops).layers[0].text?.content).toBe("Bye");
+    ops.push(undo("u1", "a2"));
+    expect(reduce(ops).layers[0].text?.content).toBe("Hello");
+  });
+});
+
 describe("CanvasDoc undo/redo", () => {
   it("round-trips undo→redo→undo and clears redo on new ops", () => {
     const doc = new CanvasDoc([addLayer("a")]);

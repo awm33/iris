@@ -3,7 +3,7 @@ import { type CanvasDoc, type LayerState, newOpId, type StrokeOp } from "@iris/d
 import { composite, drawLiveSegment, drawStroke, type LayerRasterCache, type ViewTransform } from "./renderer";
 import { type Selection, traceSelection } from "./genfill";
 
-export type CanvasTool = "pan" | "brush" | "eraser" | "marquee" | "lasso" | "subject";
+export type CanvasTool = "pan" | "brush" | "eraser" | "marquee" | "lasso" | "subject" | "text";
 
 /**
  * The drawing surface: composites the doc under a pan/zoom transform and
@@ -32,6 +32,8 @@ export function CanvasViewport(props: {
   overlayLayer?: LayerState;
   /** Subject tool: a click in doc coordinates (shiftKey = exclude region). */
   onSubjectClick?: (pt: [number, number], negative: boolean) => void;
+  /** Text tool: place a new text layer at the click point. */
+  onTextClick?: (pt: [number, number]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -195,6 +197,10 @@ export function CanvasViewport(props: {
     if (e.button !== 0) return;
     if (props.tool === "subject") {
       propsRef.current.onSubjectClick?.(toDoc(e), e.shiftKey);
+      return;
+    }
+    if (props.tool === "text") {
+      propsRef.current.onTextClick?.(toDoc(e));
       return;
     }
     if (props.tool === "marquee" || props.tool === "lasso") {

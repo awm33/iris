@@ -6,6 +6,7 @@ export interface LayerState {
   kind: LayerKind;
   versionId?: string;
   maskVersionId?: string;
+  text?: { content: string; x: number; y: number; size: number; color: string };
   opacity: number;
   visible: boolean;
   /** Active strokes in application order — the renderer rasterizes these. */
@@ -56,6 +57,7 @@ export function reduce(ops: CanvasOp[]): CanvasDocState {
           kind: op.layer.kind,
           versionId: op.layer.version_id,
           maskVersionId: op.layer.mask_version_id,
+          text: op.layer.text,
           opacity: op.layer.opacity ?? 1,
           visible: op.layer.visible ?? true,
           strokes: [],
@@ -76,6 +78,7 @@ export function reduce(ops: CanvasOp[]): CanvasDocState {
         if (op.props.name !== undefined) l.name = op.props.name;
         if (op.props.opacity !== undefined) l.opacity = Math.max(0, Math.min(1, op.props.opacity));
         if (op.props.visible !== undefined) l.visible = op.props.visible;
+        if (op.props.text !== undefined && l.kind === "text") l.text = op.props.text;
         if (op.props.index !== undefined) {
           const j = Math.max(0, Math.min(op.props.index, layers.length - 1));
           layers.splice(i, 1);

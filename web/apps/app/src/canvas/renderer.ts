@@ -79,6 +79,22 @@ export class LayerRasterCache {
       prefix = 0;
     }
 
+    if (layer.kind === "text" && layer.text) {
+      // Text re-rasterizes when its props change; the JSON doubles as the
+      // cache key via the rasterized list (one synthetic entry).
+      const key = "text:" + JSON.stringify(layer.text);
+      if (e.rasterized[0] !== key || e.rasterized.length !== 1) {
+        this.entriesReset(e);
+        e.ctx.fillStyle = layer.text.color;
+        e.ctx.font = `${layer.text.size}px Inter, system-ui, sans-serif`;
+        e.ctx.textBaseline = "top";
+        layer.text.content.split("\n").forEach((line, i) => {
+          e!.ctx.fillText(line, layer.text!.x, layer.text!.y + i * layer.text!.size * 1.25);
+        });
+        e.rasterized = [key];
+      }
+      return e.canvas;
+    }
     if (layer.kind === "image" && layer.versionId && !e.imageDrawn) {
       const img = this.getImage(layer.versionId);
       // A masked layer draws only when BOTH pixels and mask are loaded —
@@ -117,6 +133,13 @@ export class LayerRasterCache {
       }
     }
     return e.canvas;
+  }
+
+  private entriesReset(e: LayerEntry) {
+    e.ctx.clearRect(0, 0, this.docW, this.docH);
+    e.rasterized = [];
+    e.imageDrawn = false;
+    e.cleared = true;
   }
 
   /** The raw drawing surface for live (uncommitted) strokes. */
