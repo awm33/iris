@@ -306,26 +306,33 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	}
 
 	for _, ref := range req.References {
-		versionID := ref.VersionID
-		if versionID == "" {
-			// Float-to-head resolves at dispatch time (HLD pin-vs-float).
-			a, _, err := o.Store.GetAsset(ctx, ref.AssetID)
-			if err != nil {
-				return nil, "", &inference.ValidationError{Msg: fmt.Sprintf("reference asset %s not found", ref.AssetID)}
-			}
-			versionID = a.HeadVersionID
-		}
-		info, err := o.Store.GetVersionObjectInfo(ctx, versionID)
+		url, err := o.resolveRefURL(ctx, &ref)
 		if err != nil {
-			return nil, "", &inference.ValidationError{Msg: fmt.Sprintf("reference version %s not found", versionID)}
-		}
-		url, err := o.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
-		if err != nil {
-			return nil, "", fmt.Errorf("presign reference: %w", err)
+			return nil, "", err
 		}
 		infReq.References = append(infReq.References, inference.Reference{
 			Kind: ref.Kind, Role: ref.Role, URL: url, Weight: ref.Weight,
 		})
+	}
+
+	// Conditioning inputs resolve exactly like references: pin-or-head asset
+	// refs signed at dispatch time.
+	if c := req.Conditioning; c != nil {
+		infReq.Conditioning = &inference.Conditioning{}
+		if c.SourceImage != nil {
+			url, err := o.resolveRefURL(ctx, c.SourceImage)
+			if err != nil {
+				return nil, "", err
+			}
+			infReq.Conditioning.SourceImage = &inference.FrameRef{URL: url}
+		}
+		if c.Mask != nil {
+			url, err := o.resolveRefURL(ctx, c.Mask)
+			if err != nil {
+				return nil, "", err
+			}
+			infReq.Conditioning.Mask = &inference.FrameRef{URL: url}
+		}
 	}
 
 	// Per-ATTEMPT key: attempts can overlap (lease expiry → reclaim), and a
@@ -338,6 +345,28 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	}
 	infReq.Upload = &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: putURL, ContentType: expectedContentType(ep.Manifest.Modality)}}}
 	return infReq, artifactKey, nil
+}
+
+// resolveRefURL turns a stored asset ref into a signed GET URL, resolving
+// float-to-head at dispatch time (HLD pin-vs-float).
+func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef) (string, error) {
+	versionID := ref.VersionID
+	if versionID == "" {
+		a, _, err := o.Store.GetAsset(ctx, ref.AssetID)
+		if err != nil {
+			return "", &inference.ValidationError{Msg: fmt.Sprintf("reference asset %s not found", ref.AssetID)}
+		}
+		versionID = a.HeadVersionID
+	}
+	info, err := o.Store.GetVersionObjectInfo(ctx, versionID)
+	if err != nil {
+		return "", &inference.ValidationError{Msg: fmt.Sprintf("reference version %s not found", versionID)}
+	}
+	url, err := o.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
+	if err != nil {
+		return "", fmt.Errorf("presign reference: %w", err)
+	}
+	return url, nil
 }
 
 // expectedContentType is Iris's own decision — the endpoint's reported

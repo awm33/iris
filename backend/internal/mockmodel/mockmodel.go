@@ -28,7 +28,10 @@ import (
 	"hash/fnv"
 	"image"
 	"image/color"
+	"image/draw"
+	_ "image/jpeg"
 	"image/png"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -95,12 +98,20 @@ type createRequest struct {
 		Width  int `json:"width"`
 		Height int `json:"height"`
 	} `json:"output"`
+	Conditioning *struct {
+		SourceImage *urlRef `json:"source_image"`
+		Mask        *urlRef `json:"mask"`
+	} `json:"conditioning"`
 	Upload struct {
 		Artifacts []struct {
 			PutURL      string `json:"put_url"`
 			ContentType string `json:"content_type"`
 		} `json:"artifacts"`
 	} `json:"upload"`
+}
+
+type urlRef struct {
+	URL string `json:"url"`
 }
 
 // Handler returns the mock endpoint as an http.Handler (mountable under
@@ -228,12 +239,23 @@ func (s *server) makeAndUploadArtifact(req createRequest) (artifact, error) {
 		art  artifact
 	)
 	if s.opts.Modality == "image" {
-		w, h := req.Output.Width, req.Output.Height
-		if w == 0 || h == 0 {
-			w, h = 512, 512
+		if req.Task == "inpaint" && req.Conditioning != nil &&
+			req.Conditioning.SourceImage != nil && req.Conditioning.Mask != nil {
+			var w, h int
+			var err error
+			data, w, h, err = s.inpaintPNG(req)
+			if err != nil {
+				return artifact{}, err
+			}
+			art = artifact{ContentType: "image/png", Width: w, Height: h}
+		} else {
+			w, h := req.Output.Width, req.Output.Height
+			if w == 0 || h == 0 {
+				w, h = 512, 512
+			}
+			data = proceduralPNG(w, h, req.Prompt, req.Seed)
+			art = artifact{ContentType: "image/png", Width: w, Height: h}
 		}
-		data = proceduralPNG(w, h, req.Prompt, req.Seed)
-		art = artifact{ContentType: "image/png", Width: w, Height: h}
 	} else {
 		data = cannedMP4
 		art = artifact{ContentType: "video/mp4", Width: 640, Height: 360, DurationS: 2, FPS: 24}
@@ -258,6 +280,70 @@ func (s *server) makeAndUploadArtifact(req createRequest) (artifact, error) {
 		art.Uploaded = true
 	}
 	return art, nil
+}
+
+// inpaintPNG fetches the source image and mask from the request's
+// conditioning URLs and fills the masked region (white = generate, per spec)
+// with a deterministic seed-keyed checkerboard. Unmasked pixels pass through
+// UNTOUCHED — both masked landing and pixel preservation are visually
+// verifiable in the dev UI.
+func (s *server) inpaintPNG(req createRequest) ([]byte, int, int, error) {
+	src, err := s.fetchImage(req.Conditioning.SourceImage.URL)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("source_image: %w", err)
+	}
+	mask, err := s.fetchImage(req.Conditioning.Mask.URL)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("mask: %w", err)
+	}
+
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	mb := mask.Bounds()
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(out, out.Bounds(), src, b.Min, draw.Src)
+
+	hsh := fnv.New32a()
+	fmt.Fprintf(hsh, "%s|%d", req.Prompt, req.Seed)
+	k := hsh.Sum32()
+	c1 := color.RGBA{uint8(k), uint8(k >> 8), uint8(k >> 16), 255}
+	c2 := color.RGBA{uint8(k >> 16), uint8(k), uint8(k >> 8), 255}
+
+	for y := 0; y < h; y++ {
+		my := mb.Min.Y + y*mb.Dy()/h // nearest-neighbor sampling if dims differ
+		for x := 0; x < w; x++ {
+			mx := mb.Min.X + x*mb.Dx()/w
+			r, g, bl, _ := mask.At(mx, my).RGBA()
+			if (r+g+bl)/3 > 0x7fff { // white = generate
+				c := c1
+				if (x/24+y/24)%2 == 0 {
+					c = c2
+				}
+				out.SetRGBA(x, y, c)
+			}
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, out); err != nil {
+		return nil, 0, 0, err
+	}
+	return buf.Bytes(), w, h, nil
+}
+
+func (s *server) fetchImage(url string) (image.Image, error) {
+	if url == "" {
+		return nil, fmt.Errorf("missing url")
+	}
+	resp, err := s.client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GET %d", resp.StatusCode)
+	}
+	img, _, err := image.Decode(io.LimitReader(resp.Body, 64<<20))
+	return img, err
 }
 
 // proceduralPNG renders a deterministic two-tone gradient keyed by prompt+seed,
@@ -372,6 +458,9 @@ func Manifest(modality string) []byte {
 	}
 	if modality == "image" {
 		m["tasks"] = []string{"t2i", "i2i", "inpaint", "outpaint", "upscale"}
+		// Image conditioning: source + mask (gen-fill); the frame/video keys
+		// above are video-modality concepts.
+		m["conditioning"] = map[string]any{"source_image": true, "mask": true}
 		delete(m, "duration")
 	}
 	b, _ := json.Marshal(m)

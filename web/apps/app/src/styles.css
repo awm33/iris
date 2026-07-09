@@ -342,6 +342,51 @@ body {
 .layer-row.selected { border-color: var(--accent); background: var(--bg-hover); }
 .layer-opacity { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 
+/* Gen-fill bar + candidate strip */
+.genfill-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+.genfill-bar input[type="text"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 10px;
+  min-width: 200px;
+}
+.genfill-bar select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+}
+.genfill-strip { display: flex; gap: 6px; }
+.genfill-thumb {
+  all: unset;
+  cursor: pointer;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  width: 88px;
+  height: 55px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+.genfill-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.genfill-thumb.selected { border-color: var(--accent); }
+.genfill-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* Library promote */
 .promote-row { display: flex; gap: 6px; margin-top: 8px; }
 .promote-list {

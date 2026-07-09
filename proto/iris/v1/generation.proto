@@ -31,7 +31,8 @@ message Conditioning {
   repeated KeyframeAt keyframes = 3;
   AssetRef depth_sequence = 4;
   AssetRef source_video = 5;
-  AssetRef mask = 6;
+  AssetRef mask = 6;         // inpaint: white = generate, black = preserve
+  AssetRef source_image = 7; // i2i / inpaint / outpaint source
 }
 
 message KeyframeAt {

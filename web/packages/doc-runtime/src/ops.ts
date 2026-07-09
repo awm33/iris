@@ -11,6 +11,10 @@ export interface LayerInit {
   kind: LayerKind;
   /** Image layers: the content-addressed asset version rendered as pixels. */
   version_id?: string;
+  /** Optional alpha mask (white = visible) — gen-fill commits land as the
+   * candidate image masked to the selection; pixels outside the mask always
+   * come from the layers below (drift-proof by construction). */
+  mask_version_id?: string;
   opacity?: number; // 0..1, default 1
   visible?: boolean; // default true
 }

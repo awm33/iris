@@ -25,6 +25,10 @@ interface LayerEntry {
 
 export class LayerRasterCache {
   private entries = new Map<string, LayerEntry>();
+  /** Luminance→alpha conversions of mask images, keyed by version id —
+   * masks arrive as opaque black/white PNGs (spec: white = generate), but
+   * destination-in compositing needs the mask in the alpha channel. */
+  private alphaMasks = new Map<string, HTMLCanvasElement>();
   /** The in-progress stroke, if any: a mid-gesture rebuild (undo via
    * keyboard, image arriving) wipes its already-drawn pixels — the hook lets
    * the rebuild re-rasterize the partial stroke so nothing visibly vanishes
@@ -77,10 +81,20 @@ export class LayerRasterCache {
 
     if (layer.kind === "image" && layer.versionId && !e.imageDrawn) {
       const img = this.getImage(layer.versionId);
-      if (img) {
+      // A masked layer draws only when BOTH pixels and mask are loaded —
+      // an unmasked flash of the full candidate would be worse than a beat
+      // of nothing.
+      const mask = layer.maskVersionId ? this.getImage(layer.maskVersionId) : null;
+      if (img && (!layer.maskVersionId || mask)) {
         // Natural size, no stretch: the canvas is sized to the version's
         // dims on creation, and a dims-less fallback must not distort.
         e.ctx.drawImage(img, 0, 0);
+        if (mask) {
+          e.ctx.save();
+          e.ctx.globalCompositeOperation = "destination-in";
+          e.ctx.drawImage(this.alphaMask(layer.maskVersionId!, mask), 0, 0, this.docW, this.docH);
+          e.ctx.restore();
+        }
         e.imageDrawn = true;
       }
     }
@@ -111,10 +125,11 @@ export class LayerRasterCache {
     this.entries.get(layerId)?.rasterized.push(opId);
   }
 
-  /** An image finished loading — let its layer redraw. */
+  /** An image finished loading — let the layers that use it (as pixels OR
+   * as mask) redraw. */
   invalidateImage(versionId: string, state: CanvasDocState) {
     for (const layer of state.layers) {
-      if (layer.versionId !== versionId) continue;
+      if (layer.versionId !== versionId && layer.maskVersionId !== versionId) continue;
       const e = this.entries.get(layer.id);
       if (e && !e.imageDrawn) {
         // Force full rebuild so strokes land above the image.
@@ -123,6 +138,26 @@ export class LayerRasterCache {
         e.cleared = true;
       }
     }
+  }
+
+  /** White = visible: converts a black/white mask image into an alpha mask
+   * usable with destination-in. Cached per version (content-addressed). */
+  private alphaMask(versionId: string, mask: HTMLImageElement): HTMLCanvasElement {
+    let c = this.alphaMasks.get(versionId);
+    if (c) return c;
+    c = document.createElement("canvas");
+    c.width = mask.naturalWidth;
+    c.height = mask.naturalHeight;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(mask, 0, 0);
+    const data = ctx.getImageData(0, 0, c.width, c.height);
+    const px = data.data;
+    for (let i = 0; i < px.length; i += 4) {
+      px[i + 3] = (px[i] + px[i + 1] + px[i + 2]) / 3;
+    }
+    ctx.putImageData(data, 0, 0);
+    this.alphaMasks.set(versionId, c);
+    return c;
   }
 
   /** Drop rasters for layers no longer in the doc (a 1080p layer holds ~8MB;

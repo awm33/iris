@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"math/rand/v2"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -27,13 +28,14 @@ type GenJob struct {
 // GenRequest is the resolved request stored on each job row (asset ids, not
 // URLs — URLs are signed at dispatch time so they're never stale).
 type GenRequest struct {
-	Prompt         string          `json:"prompt"`
-	NegativePrompt string          `json:"negative_prompt,omitempty"`
-	Seed           int64           `json:"seed,omitempty"`
-	Count          int             `json:"count,omitempty"` // parent only
-	Output         json.RawMessage `json:"output,omitempty"`
-	References     []GenRef        `json:"references,omitempty"`
-	Params         json.RawMessage `json:"params,omitempty"`
+	Prompt         string           `json:"prompt"`
+	NegativePrompt string           `json:"negative_prompt,omitempty"`
+	Seed           int64            `json:"seed,omitempty"`
+	Count          int              `json:"count,omitempty"` // parent only
+	Output         json.RawMessage  `json:"output,omitempty"`
+	References     []GenRef         `json:"references,omitempty"`
+	Conditioning   *GenConditioning `json:"conditioning,omitempty"`
+	Params         json.RawMessage  `json:"params,omitempty"`
 }
 
 type GenRef struct {
@@ -42,6 +44,14 @@ type GenRef struct {
 	AssetID   string  `json:"asset_id"`
 	VersionID string  `json:"version_id,omitempty"` // "" = head at dispatch
 	Weight    float64 `json:"weight,omitempty"`
+}
+
+// GenConditioning stores conditioning inputs as asset refs (ids, not URLs —
+// URLs are signed at dispatch). Gen-fill (M4) uses source_image + mask; the
+// remaining spec conditioning keys wire up with the surfaces that need them.
+type GenConditioning struct {
+	SourceImage *GenRef `json:"source_image,omitempty"`
+	Mask        *GenRef `json:"mask,omitempty"`
 }
 
 // CreateGenerationFanout inserts the parent job + count sub-jobs in one
@@ -73,6 +83,12 @@ func (s *Store) CreateGenerationFanout(ctx context.Context, parent *GenJob, coun
 		sub.Count = 0
 		if req.Seed != 0 {
 			sub.Seed = req.Seed + int64(i)
+		} else {
+			// "Random" resolves to a CONCRETE seed here, not at the endpoint:
+			// every sub-job differs, the recipe records the real seed, and
+			// regenerate-from-this reproduces the exact take (spec: endpoints
+			// honor seeds deterministically).
+			sub.Seed = randSeed()
 		}
 		subJSON, _ := json.Marshal(sub)
 		id := ids.New("job")
@@ -92,6 +108,13 @@ func (s *Store) CreateGenerationFanout(ctx context.Context, parent *GenJob, coun
 		return nil, err
 	}
 	return subIDs, tx.Commit(ctx)
+}
+
+// randSeed: non-zero (zero means "random" in the request vocabulary) and
+// within JS safe-integer range — seeds round-trip through the web UI's
+// recipe JSON, and 2^53+ would corrupt there.
+func randSeed() int64 {
+	return rand.Int64N(1<<53-2) + 1
 }
 
 const genJobCols = `id, workspace_id, project_id, endpoint_id,

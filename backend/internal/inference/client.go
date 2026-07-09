@@ -58,6 +58,7 @@ type Conditioning struct {
 	Keyframes     []KeyframeAt `json:"keyframes,omitempty"`
 	DepthSequence *FrameRef    `json:"depth_sequence,omitempty"`
 	SourceVideo   *SourceVideo `json:"source_video,omitempty"`
+	SourceImage   *FrameRef    `json:"source_image,omitempty"`
 	Mask          *FrameRef    `json:"mask,omitempty"`
 }
 

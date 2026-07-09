@@ -44,7 +44,8 @@ GET    /v1/healthz             → liveness (200 = accepting jobs)
     "keyframes":     [ { "t": 0.0, "url": "..." }, { "t": 3.5, "url": "..." } ],   // multi-keyframe (superset of first/last)
     "depth_sequence":{ "url": "https://...zip-or-video..." },                      // per-frame depth maps
     "source_video":  { "url": "https://...", "strength": 0.6 },                    // v2v / restyle / extension input
-    "mask":          { "url": "https://..." }                                      // inpaint (image: static; video: mask video)
+    "source_image":  { "url": "https://..." },                                     // i2i / inpaint / outpaint source (requires manifest.conditioning.source_image)
+    "mask":          { "url": "https://..." }                                      // inpaint (image: static; video: mask video); white = generate, black = preserve
   },
   "params": { },                        // model-specific; validated against manifest.params_schema (JSON Schema)
   "upload": {                           // Iris-provided presigned PUT targets; endpoint uploads artifacts here

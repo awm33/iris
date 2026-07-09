@@ -187,6 +187,10 @@
           "type": "boolean",
           "description": "v2v / restyle / extend input"
         },
+        "source_image": {
+          "type": "boolean",
+          "description": "i2i / inpaint / outpaint source image"
+        },
         "multi_view": {
           "type": "boolean",
           "description": "Consistent multi-view generation from view refs"
