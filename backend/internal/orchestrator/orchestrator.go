@@ -338,6 +338,10 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 		req.Conditioning.FirstFrame = &store.GenRef{VersionID: dep.ArtifactVersionIDs[0]}
 		if newJSON, merr := json.Marshal(req); merr == nil {
 			job.Request = newJSON
+		} else {
+			// Landing would store a flag-only request → the take's recipe
+			// loses the resolved carry and its chain edge disappears.
+			slog.Error("carry write-back marshal failed", "job", job.ID, "err", merr)
 		}
 	}
 	if c := req.Conditioning; c != nil {

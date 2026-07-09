@@ -270,7 +270,7 @@ function PinToggle(props: { shot: Shot; sceneId: string }) {
       title={
         props.shot.pinned
           ? "Unpin (stale propagation and chain regeneration include this shot again)"
-          : "Pin — freeze this shot: never marked stale, chain regeneration stops here"
+          : "Pin — freeze this shot: stale propagation skips it and chain regeneration stops here"
       }
       disabled={pin.isPending}
       onClick={() => pin.mutate()}
@@ -453,6 +453,9 @@ function ChainInspector(props: {
             {regenChain.isSuccess && (
               <div className="meta" style={{ marginTop: 6 }}>
                 ⟳ {regenChain.data.jobIds.length} chained job{regenChain.data.jobIds.length !== 1 ? "s" : ""} queued — takes arrive in order.
+                {regenChain.data.error && (
+                  <span className="status error"> Chain cut short: {regenChain.data.error}</span>
+                )}
               </div>
             )}
             {regenChain.isError && <div className="status error">{String(regenChain.error)}</div>}

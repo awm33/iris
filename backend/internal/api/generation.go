@@ -315,20 +315,35 @@ func (s *GenerationServer) RegenerateChain(ctx context.Context, req *connect.Req
 		return nil, connectErr(err)
 	}
 
+	// Locate the start by IDENTITY in the scene snapshot — positions can
+	// duplicate (the board renumbers non-atomically), and GetShot/GetScene
+	// are two reads: matching by position would walk the wrong shots or
+	// miss the start entirely.
+	startIdx := -1
+	for i, sh := range shots {
+		if sh.ID == start.ID {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx == -1 {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("start shot vanished from its scene"))
+	}
+
 	// The chain: start shot, then following shots whose selected take was
 	// generated WITH a carry (recipe provenance), stopping at pins.
 	type link struct{ shot *store.ShotRow }
 	var chain []link
-	for _, sh := range shots {
-		if sh.Position < start.Position {
-			continue
-		}
+	for _, sh := range shots[startIdx:] {
 		if sh.ID != start.ID {
 			if sh.Pinned {
 				break
 			}
 			chained, err := s.Store.TakeWasCarried(ctx, sh.SelectedTakeID)
-			if err != nil || !chained {
+			if err != nil {
+				return nil, connectErr(err) // a DB blip must not read as "unchained"
+			}
+			if !chained {
 				break
 			}
 		}
@@ -344,10 +359,7 @@ func (s *GenerationServer) RegenerateChain(ctx context.Context, req *connect.Req
 	// Upstream carry input for the FIRST link: nearest earlier shot with a
 	// selected take (matches the generate panel's semantics).
 	var firstCarry string
-	for _, sh := range shots {
-		if sh.Position >= start.Position {
-			break
-		}
+	for _, sh := range shots[:startIdx] {
 		if sh.SelectedTakeVersionID != "" {
 			firstCarry = sh.SelectedTakeVersionID
 		}
@@ -374,8 +386,12 @@ func (s *GenerationServer) RegenerateChain(ctx context.Context, req *connect.Req
 		created, cerr := s.createJobMsg(ctx, j)
 		if cerr != nil {
 			// Mid-chain failure: earlier links already run — report what
-			// was created rather than pretending atomicity we don't have.
+			// was created rather than pretending atomicity we don't have,
+			// but SAY the walk was cut short (silent truncation reads as a
+			// legitimately shorter chain).
 			if len(resp.JobIds) > 0 {
+				resp.Error = cerr.Error()
+				resp.FailedShotId = l.shot.ID
 				return connect.NewResponse(resp), nil
 			}
 			return nil, cerr
@@ -403,6 +419,7 @@ func (s *GenerationServer) jobFromTakeRecipe(ctx context.Context, sh *store.Shot
 			NegativePrompt string          `json:"negative_prompt"`
 			Output         json.RawMessage `json:"output"`
 			References     []store.GenRef  `json:"references"`
+			Params         json.RawMessage `json:"params"`
 		} `json:"request"`
 	}
 	if err := json.Unmarshal(recipe, &r); err != nil || r.EndpointID == "" {
@@ -417,6 +434,11 @@ func (s *GenerationServer) jobFromTakeRecipe(ctx context.Context, sh *store.Shot
 		Prompt:          r.Request.Prompt,
 		NegativePrompt:  r.Request.NegativePrompt,
 		TargetEntityId:  sh.ID,
+	}
+	if len(r.Request.Params) > 0 && string(r.Request.Params) != "null" {
+		// Dropping params would silently replay with different generation
+		// semantics (guidance, motion) than the take being regenerated.
+		j.ParamsJson = string(r.Request.Params)
 	}
 	if len(r.Request.Output) > 0 {
 		var out struct {

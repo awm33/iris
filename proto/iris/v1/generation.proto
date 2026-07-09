@@ -96,7 +96,13 @@ service GenerationService {
 
 message CreateJobRequest { GenerationJob job = 1; }
 message RegenerateChainRequest { string start_shot_id = 1; }
-message RegenerateChainResponse { repeated string job_ids = 1; }
+message RegenerateChainResponse {
+  repeated string job_ids = 1;
+  // Set when the chain was cut short by a create failure: the jobs in
+  // job_ids ARE queued; this says the walk didn't finish and why.
+  string error = 2;
+  string failed_shot_id = 3;
+}
 message CreateJobResponse { GenerationJob job = 1; }
 
 message GetJobRequest { string id = 1; }
