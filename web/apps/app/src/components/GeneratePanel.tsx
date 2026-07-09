@@ -14,15 +14,63 @@ type Manifest = {
   profiles: Record<string, { max_width: number; max_height: number }>;
   duration?: { min_s: number; max_s: number };
   references?: { image?: { max: number; roles: string[] } };
+  features?: { seed?: boolean };
   pricing?: { unit: string; estimates?: Record<string, number> };
 };
 
 type RefChip = { assetId: string; name: string; role: string };
 
+// Prefill for the regenerate-from-this loop (UX doc §3.5: every take exposes
+// its recipe as a launchpad). Parsed from a take's recipe JSON.
+export type GeneratePrefill = {
+  endpointId?: string;
+  task?: string;
+  profile?: string;
+  prompt?: string;
+  seed?: bigint;
+  durationS?: number;
+  count?: number;
+  refs?: RefChip[];
+};
+
+// prefillFromRecipe maps a stored take recipe onto panel state. Unknown or
+// missing fields fall back to panel defaults; ref chips carry role labels
+// (asset names aren't in the recipe — the id is the identity).
+export function prefillFromRecipe(recipeJson: string): GeneratePrefill | undefined {
+  try {
+    const r = JSON.parse(recipeJson) as {
+      endpoint_id?: string;
+      task?: string;
+      profile?: string;
+      request?: {
+        prompt?: string;
+        seed?: number;
+        output?: { duration_s?: number };
+        references?: { kind?: string; role?: string; asset_id?: string }[];
+      };
+    };
+    return {
+      endpointId: r.endpoint_id,
+      task: r.task,
+      profile: r.profile,
+      prompt: r.request?.prompt,
+      seed: r.request?.seed !== undefined ? BigInt(r.request.seed) : undefined,
+      durationS: r.request?.output?.duration_s,
+      refs: (r.request?.references ?? [])
+        .filter((ref) => ref.kind === "image" && ref.asset_id)
+        .map((ref) => ({ assetId: ref.asset_id!, name: `${ref.role ?? "ref"}`, role: ref.role ?? "character" })),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function GeneratePanel(props: {
   projectId: string;
   // When set, generated candidates land as this shot's takes.
   target?: { shotId: string; label: string };
+  // Regenerate-from-this: initial state from a take's recipe.
+  prefill?: GeneratePrefill;
   onClose: () => void;
   onSubmitted: () => void;
 }) {
@@ -36,7 +84,7 @@ export function GeneratePanel(props: {
     [endpoints.data],
   );
 
-  const [endpointId, setEndpointId] = useState<string>();
+  const [endpointId, setEndpointId] = useState<string | undefined>(props.prefill?.endpointId);
   const endpoint = healthy.find((e) => e.id === endpointId) ?? healthy[0];
   const manifest = useMemo<Manifest | undefined>(() => {
     if (!endpoint) return undefined;
@@ -47,12 +95,13 @@ export function GeneratePanel(props: {
     }
   }, [endpoint]);
 
-  const [task, setTask] = useState<string>();
-  const [profile, setProfile] = useState<string>();
-  const [prompt, setPrompt] = useState("");
-  const [count, setCount] = useState(4);
-  const [durationS, setDurationS] = useState(4);
-  const [refs, setRefs] = useState<RefChip[]>([]);
+  const [task, setTask] = useState<string | undefined>(props.prefill?.task);
+  const [profile, setProfile] = useState<string | undefined>(props.prefill?.profile);
+  const [prompt, setPrompt] = useState(props.prefill?.prompt ?? "");
+  const [count, setCount] = useState(props.prefill?.count ?? 4);
+  const [durationS, setDurationS] = useState(props.prefill?.durationS ?? 4);
+  const [seed, setSeed] = useState<string>(props.prefill?.seed !== undefined ? String(props.prefill.seed) : "");
+  const [refs, setRefs] = useState<RefChip[]>(props.prefill?.refs ?? []);
   const [showRefPicker, setShowRefPicker] = useState(false);
 
   const activeTask = task && manifest?.tasks.includes(task) ? task : manifest?.tasks[0];
@@ -71,6 +120,11 @@ export function GeneratePanel(props: {
   const durMin = manifest?.duration?.min_s ?? 1;
   const durMax = manifest?.duration?.max_s ?? 60;
   const durationValid = !isVideo || (Number.isFinite(durationS) && durationS >= durMin && durationS <= durMax);
+  // Seed: empty = random; otherwise a non-negative integer (only offered
+  // when the manifest declares seed support).
+  const seedSupported = manifest?.features?.seed === true;
+  const seedValue = seed.trim() === "" ? undefined : /^\d{1,18}$/.test(seed.trim()) ? BigInt(seed.trim()) : null;
+  const seedValid = !seedSupported || seedValue !== null;
 
   const create = useMutation({
     mutationFn: () =>
@@ -82,6 +136,7 @@ export function GeneratePanel(props: {
           profile: activeProfile,
           prompt,
           count,
+          seed: seedValue ?? 0n,
           targetEntityId: props.target?.shotId ?? "",
           output: {
             width: profileSpec?.max_width ?? 512,
@@ -228,11 +283,23 @@ export function GeneratePanel(props: {
             />
           </label>
         )}
+        {seedSupported && (
+          <label className="field">
+            Seed
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="random"
+              value={seed}
+              onChange={(e) => setSeed(e.target.value)}
+            />
+          </label>
+        )}
       </div>
 
       <button
         className="btn generate"
-        disabled={!prompt.trim() || !durationValid || !activeProfile || create.isPending}
+        disabled={!prompt.trim() || !durationValid || !seedValid || !activeProfile || create.isPending}
         onClick={() => create.mutate()}
       >
         ⚡ Generate {count} {isVideo ? "take" : "candidate"}
@@ -244,6 +311,7 @@ export function GeneratePanel(props: {
           Duration must be between {durMin} and {durMax} seconds.
         </div>
       )}
+      {!seedValid && <div className="status error">Seed must be a whole number (or empty for random).</div>}
       {create.isError && <div className="status error">{String(create.error)}</div>}
     </aside>
   );

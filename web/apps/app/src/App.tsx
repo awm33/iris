@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { JobState } from "@iris/api-client";
 import { generationClient } from "./api";
-import { GeneratePanel } from "./components/GeneratePanel";
+import { GeneratePanel, prefillFromRecipe, type GeneratePrefill } from "./components/GeneratePanel";
 import { CharactersPage } from "./pages/CharactersPage";
 import { JobsPage } from "./pages/JobsPage";
 import { LibraryPage } from "./pages/LibraryPage";
@@ -23,7 +23,9 @@ export function App() {
   const [view, setView] = useState<View>("projects");
   const [project, setProject] = useState<{ id: string; name: string }>();
   const [sceneId, setSceneId] = useState<string>();
-  const [generating, setGenerating] = useState<{ shotId: string; label: string } | true | false>(false);
+  const [generating, setGenerating] = useState<
+    { shotId: string; label: string; prefill?: GeneratePrefill } | true | false
+  >(false);
 
   const jobs = useQuery({
     queryKey: ["jobs", project?.id ?? ""],
@@ -102,7 +104,9 @@ export function App() {
               setSceneId(undefined);
               setGenerating(false);
             }}
-            onGenerateForShot={(shotId, label) => setGenerating({ shotId, label })}
+            onGenerateForShot={(shotId, label, recipeJson) =>
+              setGenerating({ shotId, label, prefill: recipeJson ? prefillFromRecipe(recipeJson) : undefined })
+            }
           />
         )}
         {view === "characters" && <CharactersPage projectId={project?.id} />}
@@ -113,8 +117,12 @@ export function App() {
       </main>
       {generating !== false && project && (
         <GeneratePanel
+          // Remount per intent: a regenerate prefill must not leak state
+          // into a subsequent plain open (and vice versa).
+          key={typeof generating === "object" ? `${generating.shotId}:${generating.prefill ? "r" : "g"}` : "library"}
           projectId={project.id}
           target={typeof generating === "object" ? generating : undefined}
+          prefill={typeof generating === "object" ? generating.prefill : undefined}
           onClose={() => setGenerating(false)}
           onSubmitted={() => {
             const wasShot = typeof generating === "object";
