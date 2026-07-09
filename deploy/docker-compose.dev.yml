@@ -40,7 +40,7 @@ services:
     environment:
       MOCK_MODEL_ADDR: ":8900"
       MOCK_MODEL_MODALITY: "video"
-    ports: ["8900:8900"]
+    ports: ["127.0.0.1:8900:8900"] # loopback: model endpoints must not be LAN-drivable
 
   mock-model-image:
     build:
@@ -49,7 +49,16 @@ services:
     environment:
       MOCK_MODEL_ADDR: ":8901"
       MOCK_MODEL_MODALITY: "image"
-    ports: ["8901:8901"]
+    ports: ["127.0.0.1:8901:8901"]
+
+  # LaMa removal endpoint — first REAL local model (spec-conformant inpaint
+  # specialist; the Remove tool's fast tier). Weights (~200MB, Apache-2.0)
+  # download into the lama-models volume on first start.
+  lama:
+    build:
+      context: ../deploy/lama
+    ports: ["127.0.0.1:8902:8900"]
+    volumes: [lama-models:/models]
 
   # keycloak: deferred — auth v0 is session-cookie against a seeded user (M1);
   # OSS IdP lands per plan §M8/backlog.
@@ -57,3 +66,4 @@ services:
 volumes:
   pgdata:
   miniodata:
+  lama-models:

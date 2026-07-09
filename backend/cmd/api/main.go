@@ -56,8 +56,9 @@ func main() {
 
 	reg := registry.New(st.Pool())
 	if err := reg.SeedDevEndpoints(ctx, store.DevWorkspaceID, map[string]string{
-		"Mock Video (dev)": getenv("IRIS_MOCK_VIDEO_URL", "http://localhost:8900"),
-		"Mock Image (dev)": getenv("IRIS_MOCK_IMAGE_URL", "http://localhost:8901"),
+		"Mock Video (dev)":  getenv("IRIS_MOCK_VIDEO_URL", "http://localhost:8900"),
+		"Mock Image (dev)":  getenv("IRIS_MOCK_IMAGE_URL", "http://localhost:8901"),
+		"LaMa Remove (dev)": getenv("IRIS_LAMA_URL", "http://localhost:8902"),
 	}); err != nil {
 		slog.Error("endpoint seed", "err", err)
 		os.Exit(1)

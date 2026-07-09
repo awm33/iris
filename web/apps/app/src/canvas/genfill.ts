@@ -21,8 +21,12 @@ export function traceSelection(ctx: CanvasRenderingContext2D, sel: Selection) {
   }
 }
 
-/** Render the selection as a black/white mask PNG at doc resolution. */
-export function renderMaskBlob(sel: Selection, docW: number, docH: number): Promise<Blob> {
+/** Render the selection as a black/white mask PNG at doc resolution.
+ * dilatePx > 0 grows the mask outward (stroke + fill ≈ morphological
+ * dilation) — removal wants this (Photoshop does it too): it covers object
+ * fringes and slight under-selection, and gives the model clean background
+ * as boundary context instead of amputated object edges. */
+export function renderMaskBlob(sel: Selection, docW: number, docH: number, dilatePx = 0): Promise<Blob> {
   const c = document.createElement("canvas");
   c.width = docW;
   c.height = docH;
@@ -32,14 +36,42 @@ export function renderMaskBlob(sel: Selection, docW: number, docH: number): Prom
   ctx.fillStyle = "#fff";
   traceSelection(ctx, sel);
   ctx.fill();
+  if (dilatePx > 0) {
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = dilatePx * 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    traceSelection(ctx, sel);
+    ctx.stroke();
+  }
   return new Promise((resolve, reject) => {
     c.toBlob((b) => (b ? resolve(b) : reject(new Error("mask encode failed"))), "image/png");
   });
 }
 
+/** Removal dilation: scale with the selection, bounded sanely. */
+export function removalDilation(sel: Selection): number {
+  let w = 0;
+  let h = 0;
+  if (sel.kind === "rect") {
+    w = sel.w;
+    h = sel.h;
+  } else {
+    const xs = sel.points.map((p) => p[0]);
+    const ys = sel.points.map((p) => p[1]);
+    w = Math.max(...xs) - Math.min(...xs);
+    h = Math.max(...ys) - Math.min(...ys);
+  }
+  return Math.min(48, Math.max(8, Math.round(Math.max(w, h) * 0.04)));
+}
+
 export interface GenFillEndpoint {
   id: string;
   name: string;
+  /** features.prompt !== false — prompt-ignoring specialists (removal-only
+   * inpainters like LaMa) are never offered for prompted generation, and are
+   * PREFERRED for Remove (they're the fast tier). */
+  promptable: boolean;
   profiles: { name: string; maxW: number; maxH: number }[];
 }
 
@@ -53,6 +85,7 @@ export function genFillEndpoints(endpoints: ModelEndpoint[]): GenFillEndpoint[] 
       const m = JSON.parse(ep.manifestJson) as {
         tasks?: string[];
         conditioning?: { mask?: boolean; source_image?: boolean };
+        features?: { prompt?: boolean };
         profiles?: Record<string, { max_width?: number; max_height?: number }>;
       };
       if (!m.tasks?.includes("inpaint") || !m.conditioning?.mask || !m.conditioning?.source_image) continue;
@@ -61,12 +94,23 @@ export function genFillEndpoints(endpoints: ModelEndpoint[]): GenFillEndpoint[] 
         maxW: p.max_width ?? 0,
         maxH: p.max_height ?? 0,
       }));
-      out.push({ id: ep.id, name: ep.displayName, profiles });
+      out.push({ id: ep.id, name: ep.displayName, promptable: m.features?.prompt !== false, profiles });
     } catch {
       /* unparseable manifest → not offered */
     }
   }
   return out;
+}
+
+/** Removal routing (Photoshop Mode:Auto spirit): prefer a prompt-ignoring
+ * specialist that fits the canvas; fall back to any fitting endpoint. */
+export function pickRemovalEndpoint(
+  endpoints: GenFillEndpoint[],
+  w: number,
+  h: number,
+): GenFillEndpoint | undefined {
+  const fits = (e: GenFillEndpoint) => pickProfile(e, w, h) !== null;
+  return endpoints.find((e) => !e.promptable && fits(e)) ?? endpoints.find(fits);
 }
 
 /** Cheapest profile that fits the canvas; null when none does. */

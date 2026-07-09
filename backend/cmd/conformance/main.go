@@ -24,6 +24,7 @@ func main() {
 	token := flag.String("token", "dev", "bearer token")
 	failureInjection := flag.Bool("failure-injection", false, "run FAIL:*/SLOW magic-prompt checks (endpoint must implement the injection hooks; the mock does)")
 	timeout := flag.Duration("timeout", 10*time.Minute, "per-check timeout (real video endpoints are slow)")
+	receiverHost := flag.String("receiver-host", "", "hostname the endpoint uses to reach this machine's artifact receiver (e.g. host.docker.internal for a dockerized endpoint)")
 	flag.Parse()
 
 	if *url == "" {
@@ -36,6 +37,7 @@ func main() {
 		Token:            *token,
 		FailureInjection: *failureInjection,
 		Timeout:          *timeout,
+		ReceiverHost:     *receiverHost,
 	})
 
 	failed := 0

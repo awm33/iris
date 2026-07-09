@@ -20,8 +20,10 @@ import (
 	"image/draw"
 	"image/png"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,10 @@ type Config struct {
 	FailureInjection bool          // run the FAIL:*/SLOW magic-prompt checks (mock, or endpoints implementing them)
 	PollInterval     time.Duration // default 250ms
 	Timeout          time.Duration // per-check; default 120s
+	// ReceiverHost: hostname the endpoint under test uses to reach this
+	// machine's artifact receiver (e.g. "host.docker.internal" for a
+	// dockerized endpoint). Empty = loopback (in-process/native endpoints).
+	ReceiverHost string
 }
 
 type Result struct {
@@ -88,6 +94,7 @@ func Run(ctx context.Context, cfg Config) []Result {
 type checker struct {
 	cfg  Config
 	http *http.Client
+	man  *manifestLite // lazy manifest cache for job-body building
 }
 
 func (c *checker) url(p string) string { return strings.TrimSuffix(c.cfg.BaseURL, "/") + p }
@@ -164,15 +171,28 @@ func (c *checker) checkManifest(ctx context.Context) (string, error) {
 // targets. The endpoint under test must be able to reach it (same host for
 // the mock; a tunnel may be needed for remote endpoints).
 type artifactReceiver struct {
-	srv    *httptest.Server
-	mu     sync.Mutex
-	got    map[string][]byte // path -> body (PUT targets)
-	inputs map[string][]byte // path -> body served on GET (conditioning inputs)
+	srv           *httptest.Server
+	advertiseHost string
+	mu            sync.Mutex
+	got           map[string][]byte // path -> body (PUT targets)
+	inputs        map[string][]byte // path -> body served on GET (conditioning inputs)
 }
 
-func newArtifactReceiver() *artifactReceiver {
-	r := &artifactReceiver{got: map[string][]byte{}, inputs: map[string][]byte{}}
-	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+// base rewrites the listener URL to the advertised host when set.
+func (r *artifactReceiver) base() string {
+	if r.advertiseHost == "" {
+		return r.srv.URL
+	}
+	u, _ := url.Parse(r.srv.URL)
+	return "http://" + net.JoinHostPort(r.advertiseHost, u.Port())
+}
+
+// newArtifactReceiver binds loopback-only when advertiseHost is empty;
+// otherwise it listens on all interfaces and advertises URLs at
+// advertiseHost so a containerized endpoint can reach it.
+func newArtifactReceiver(advertiseHost string) *artifactReceiver {
+	r := &artifactReceiver{got: map[string][]byte{}, inputs: map[string][]byte{}, advertiseHost: advertiseHost}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch req.Method {
 		case http.MethodPut:
 			body, _ := io.ReadAll(io.LimitReader(req.Body, 256<<20))
@@ -193,7 +213,17 @@ func newArtifactReceiver() *artifactReceiver {
 		default:
 			w.WriteHeader(405)
 		}
-	}))
+	})
+	if advertiseHost == "" {
+		r.srv = httptest.NewServer(handler)
+	} else {
+		ln, err := net.Listen("tcp", "0.0.0.0:0")
+		if err != nil {
+			panic(err) // dev tool; same failure mode as httptest
+		}
+		r.srv = &httptest.Server{Listener: ln, Config: &http.Server{Handler: handler}}
+		r.srv.Start()
+	}
 	return r
 }
 
@@ -202,10 +232,10 @@ func (r *artifactReceiver) serveInput(path string, body []byte) string {
 	r.mu.Lock()
 	r.inputs[path] = body
 	r.mu.Unlock()
-	return r.srv.URL + path
+	return r.base() + path
 }
 
-func (r *artifactReceiver) putURL(path string) string { return r.srv.URL + path }
+func (r *artifactReceiver) putURL(path string) string { return r.base() + path }
 func (r *artifactReceiver) body(path string) []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -213,13 +243,106 @@ func (r *artifactReceiver) body(path string) []byte {
 }
 func (r *artifactReceiver) Close() { r.srv.Close() }
 
-func (c *checker) createAndPoll(ctx context.Context, id, prompt string, putURL string) (map[string]any, error) {
-	body := map[string]any{
-		"id": id, "task": "t2v", "profile": "draft", "prompt": prompt,
-		"output": map[string]any{"width": 640, "height": 360, "duration_s": 2, "fps": 24},
+// manifestLite is the slice of the manifest the suite needs to build jobs an
+// endpoint actually declares — a removal-only inpainter must not be asked
+// for t2v (spec: undeclared capabilities are rejected).
+type manifestLite struct {
+	Tasks        []string `json:"tasks"`
+	Conditioning struct {
+		Mask        bool `json:"mask"`
+		SourceImage bool `json:"source_image"`
+	} `json:"conditioning"`
+	Features struct {
+		Prompt *bool `json:"prompt"`
+	} `json:"features"`
+}
+
+func (m *manifestLite) has(task string) bool {
+	for _, t := range m.Tasks {
+		if t == task {
+			return true
+		}
 	}
-	if putURL != "" {
-		body["upload"] = map[string]any{"artifacts": []map[string]any{{"put_url": putURL, "content_type": "application/octet-stream"}}}
+	return false
+}
+func (m *manifestLite) promptOK() bool { return m.Features.Prompt == nil || *m.Features.Prompt }
+
+func (c *checker) manifestLite(ctx context.Context) (*manifestLite, error) {
+	if c.man != nil {
+		return c.man, nil
+	}
+	_, data, err := c.do(ctx, "GET", "/v1/manifest", nil, true)
+	if err != nil {
+		return nil, err
+	}
+	m := &manifestLite{}
+	if err := json.Unmarshal(data, m); err != nil {
+		return nil, fmt.Errorf("manifest unparseable: %w", err)
+	}
+	c.man = m
+	return m, nil
+}
+
+// buildJobBody assembles a create-job request for a task the endpoint
+// declares (preferring generative tasks, falling back to inpaint with
+// conditioning fixtures served from recv). Prompt is dropped for
+// prompt-ignoring specialists.
+func (c *checker) buildJobBody(ctx context.Context, id, prompt string, recv *artifactReceiver) (map[string]any, error) {
+	m, err := c.manifestLite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{"id": id, "profile": "draft"}
+	if prompt != "" && m.promptOK() {
+		body["prompt"] = prompt
+	}
+	switch {
+	case m.has("t2v"):
+		body["task"] = "t2v"
+		body["output"] = map[string]any{"width": 640, "height": 360, "duration_s": 2, "fps": 24}
+	case m.has("t2i"):
+		body["task"] = "t2i"
+		body["output"] = map[string]any{"width": 512, "height": 512}
+	case m.has("inpaint") && m.Conditioning.Mask && m.Conditioning.SourceImage:
+		if recv == nil {
+			return nil, fmt.Errorf("inpaint-only endpoint needs conditioning fixtures for this check")
+		}
+		src, mask := tinyInpaintFixture()
+		body["task"] = "inpaint"
+		body["output"] = map[string]any{"width": 64, "height": 64}
+		body["conditioning"] = map[string]any{
+			"source_image": map[string]any{"url": recv.serveInput("/inputs/"+id+"-src.png", src)},
+			"mask":         map[string]any{"url": recv.serveInput("/inputs/"+id+"-mask.png", mask)},
+		}
+	default:
+		return nil, fmt.Errorf("no task this suite can drive (tasks=%v)", m.Tasks)
+	}
+	return body, nil
+}
+
+// tinyInpaintFixture: flat background, red object inside the white-masked
+// center square (an object to remove — see checkMaskSemantics).
+func tinyInpaintFixture() (src, mask []byte) {
+	const dim, lo, hi = 64, 16, 48
+	s := image.NewRGBA(image.Rect(0, 0, dim, dim))
+	draw.Draw(s, s.Bounds(), &image.Uniform{color.RGBA{90, 120, 150, 255}}, image.Point{}, draw.Src)
+	draw.Draw(s, image.Rect(lo+2, lo+2, hi-2, hi-2), &image.Uniform{color.RGBA{200, 40, 40, 255}}, image.Point{}, draw.Src)
+	m := image.NewGray(image.Rect(0, 0, dim, dim))
+	for y := lo; y < hi; y++ {
+		for x := lo; x < hi; x++ {
+			m.SetGray(x, y, color.Gray{255})
+		}
+	}
+	return encodePNG(s), encodePNG(m)
+}
+
+func (c *checker) createAndPoll(ctx context.Context, id, prompt string, recv *artifactReceiver, artifactPath string) (map[string]any, error) {
+	body, err := c.buildJobBody(ctx, id, prompt, recv)
+	if err != nil {
+		return nil, err
+	}
+	if recv != nil && artifactPath != "" {
+		body["upload"] = map[string]any{"artifacts": []map[string]any{{"put_url": recv.putURL(artifactPath), "content_type": "application/octet-stream"}}}
 	}
 	resp, data, err := c.do(ctx, "POST", "/v1/jobs", body, true)
 	if err != nil {
@@ -258,11 +381,11 @@ func (c *checker) poll(ctx context.Context, id string) (map[string]any, error) {
 }
 
 func (c *checker) checkLifecycle(ctx context.Context) (string, error) {
-	recv := newArtifactReceiver()
+	recv := newArtifactReceiver(c.cfg.ReceiverHost)
 	defer recv.Close()
 
 	id := fmt.Sprintf("j_conf_%d", time.Now().UnixNano())
-	j, err := c.createAndPoll(ctx, id, "conformance lifecycle", recv.putURL("/a0"))
+	j, err := c.createAndPoll(ctx, id, "conformance lifecycle", recv, "/a0")
 	if err != nil {
 		return "", err
 	}
@@ -290,7 +413,12 @@ func (c *checker) checkLifecycle(ctx context.Context) (string, error) {
 
 func (c *checker) checkIdempotency(ctx context.Context) (string, error) {
 	id := fmt.Sprintf("j_conf_idem_%d", time.Now().UnixNano())
-	body := map[string]any{"id": id, "task": "t2v", "prompt": "idempotency check"}
+	recv := newArtifactReceiver(c.cfg.ReceiverHost)
+	defer recv.Close()
+	body, err := c.buildJobBody(ctx, id, "idempotency check", recv)
+	if err != nil {
+		return "", err
+	}
 	resp1, _, err := c.do(ctx, "POST", "/v1/jobs", body, true)
 	if err != nil {
 		return "", err
@@ -313,93 +441,97 @@ func (c *checker) checkIdempotency(ctx context.Context) (string, error) {
 // 8-bit channel for codec round-trips). Runs only when the manifest declares
 // inpaint + mask + source_image.
 func (c *checker) checkMaskSemantics(ctx context.Context) (string, error) {
-	_, data, err := c.do(ctx, "GET", "/v1/manifest", nil, true)
+	m, err := c.manifestLite(ctx)
 	if err != nil {
 		return "", err
 	}
-	var m struct {
-		Tasks        []string `json:"tasks"`
-		Conditioning struct {
-			Mask        bool `json:"mask"`
-			SourceImage bool `json:"source_image"`
-		} `json:"conditioning"`
-	}
-	_ = json.Unmarshal(data, &m)
-	declared := false
-	for _, t := range m.Tasks {
-		if t == "inpaint" {
-			declared = true
-		}
-	}
-	if !declared || !m.Conditioning.Mask || !m.Conditioning.SourceImage {
+	if !m.has("inpaint") || !m.Conditioning.Mask || !m.Conditioning.SourceImage {
 		return "inpaint/mask/source_image not declared — nothing to check", nil
 	}
 
-	recv := newArtifactReceiver()
+	recv := newArtifactReceiver(c.cfg.ReceiverHost)
 	defer recv.Close()
 
-	// Source: flat background with a red "object" sitting inside the white
-	// mask region. The object matters for the removal assertion — on a
+	// Fixture: flat background with a red "object" inside the white mask
+	// region. The object matters for the removal assertion — on a
 	// featureless source, a PERFECT background reconstruction is
 	// byte-identical to the input and would read as "unchanged".
 	const dim, lo, hi = 64, 16, 48
-	src := image.NewRGBA(image.Rect(0, 0, dim, dim))
-	draw.Draw(src, src.Bounds(), &image.Uniform{color.RGBA{90, 120, 150, 255}}, image.Point{}, draw.Src)
-	draw.Draw(src, image.Rect(lo+2, lo+2, hi-2, hi-2), &image.Uniform{color.RGBA{200, 40, 40, 255}}, image.Point{}, draw.Src)
-	mask := image.NewGray(image.Rect(0, 0, dim, dim))
-	for y := lo; y < hi; y++ {
-		for x := lo; x < hi; x++ {
-			mask.SetGray(x, y, color.Gray{255})
-		}
-	}
-	srcURL := recv.serveInput("/inputs/source.png", encodePNG(src))
-	maskURL := recv.serveInput("/inputs/mask.png", encodePNG(mask))
-
-	id := fmt.Sprintf("j_conf_mask_%d", time.Now().UnixNano())
-	body := map[string]any{
-		"id": id, "task": "inpaint", "profile": "draft",
-		"prompt": "conformance mask semantics",
-		"output": map[string]any{"width": dim, "height": dim},
-		"conditioning": map[string]any{
-			"source_image": map[string]any{"url": srcURL},
-			"mask":         map[string]any{"url": maskURL},
-		},
-		"upload": map[string]any{"artifacts": []map[string]any{{"put_url": recv.putURL("/a0"), "content_type": "image/png"}}},
-	}
-	resp, data, err := c.do(ctx, "POST", "/v1/jobs", body, true)
+	srcPNG, maskPNG := tinyInpaintFixture()
+	src, _, err := image.Decode(bytes.NewReader(srcPNG))
 	if err != nil {
 		return "", err
 	}
-	if resp.StatusCode != 202 && resp.StatusCode != 200 {
-		return "", fmt.Errorf("create: want 202/200, got %d: %s", resp.StatusCode, data)
-	}
-	j, err := c.poll(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	if j["state"] != "complete" {
-		return "", fmt.Errorf("want complete, got %v (error: %v)", j["state"], j["error"])
-	}
-	out, _, err := image.Decode(bytes.NewReader(recv.body("/a0")))
-	if err != nil {
-		return "", fmt.Errorf("artifact does not decode as an image: %w", err)
-	}
-	if !out.Bounds().Eq(src.Bounds()) {
-		return "", fmt.Errorf("artifact bounds %v != source %v", out.Bounds(), src.Bounds())
-	}
+	srcURL := recv.serveInput("/inputs/source.png", srcPNG)
+	maskURL := recv.serveInput("/inputs/mask.png", maskPNG)
 	near := func(a, b uint32) bool { d := int(a>>8) - int(b>>8); return d >= -2 && d <= 2 }
-	for _, p := range [][2]int{{4, 4}, {dim - 4, 4}, {4, dim - 4}, {dim - 4, dim - 4}} {
-		r1, g1, b1, _ := src.At(p[0], p[1]).RGBA()
-		r2, g2, b2, _ := out.At(p[0], p[1]).RGBA()
-		if !near(r1, r2) || !near(g1, g2) || !near(b1, b2) {
-			return "", fmt.Errorf("black-mask pixel at %v was modified — masks must preserve unselected regions", p)
-		}
-	}
 	cx := (lo + hi) / 2
-	r1, g1, b1, _ := src.At(cx, cx).RGBA()
-	r2, g2, b2, _ := out.At(cx, cx).RGBA()
-	if near(r1, r2) && near(g1, g2) && near(b1, b2) {
-		return "", fmt.Errorf("white-mask pixel at (%d,%d) unchanged — masked region was not generated", cx, cx)
+
+	runOne := func(id, prompt, artifactPath string) (image.Image, error) {
+		body := map[string]any{
+			"id": id, "task": "inpaint", "profile": "draft",
+			"output": map[string]any{"width": dim, "height": dim},
+			"conditioning": map[string]any{
+				"source_image": map[string]any{"url": srcURL},
+				"mask":         map[string]any{"url": maskURL},
+			},
+			"upload": map[string]any{"artifacts": []map[string]any{{"put_url": recv.putURL(artifactPath), "content_type": "image/png"}}},
+		}
+		if prompt != "" {
+			body["prompt"] = prompt
+		}
+		resp, data, err := c.do(ctx, "POST", "/v1/jobs", body, true)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != 202 && resp.StatusCode != 200 {
+			return nil, fmt.Errorf("create: want 202/200, got %d: %s", resp.StatusCode, data)
+		}
+		j, err := c.poll(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if j["state"] != "complete" {
+			return nil, fmt.Errorf("want complete, got %v (error: %v)", j["state"], j["error"])
+		}
+		out, _, err := image.Decode(bytes.NewReader(recv.body(artifactPath)))
+		if err != nil {
+			return nil, fmt.Errorf("artifact does not decode as an image: %w", err)
+		}
+		if !out.Bounds().Eq(src.Bounds()) {
+			return nil, fmt.Errorf("artifact bounds %v != source %v", out.Bounds(), src.Bounds())
+		}
+		return out, nil
+	}
+	assertMask := func(out image.Image, label string) error {
+		for _, p := range [][2]int{{4, 4}, {dim - 4, 4}, {4, dim - 4}, {dim - 4, dim - 4}} {
+			r1, g1, b1, _ := src.At(p[0], p[1]).RGBA()
+			r2, g2, b2, _ := out.At(p[0], p[1]).RGBA()
+			if !near(r1, r2) || !near(g1, g2) || !near(b1, b2) {
+				return fmt.Errorf("%s: black-mask pixel at %v was modified — masks must preserve unselected regions", label, p)
+			}
+		}
+		r1, g1, b1, _ := src.At(cx, cx).RGBA()
+		r2, g2, b2, _ := out.At(cx, cx).RGBA()
+		if near(r1, r2) && near(g1, g2) && near(b1, b2) {
+			return fmt.Errorf("%s: white-mask pixel at (%d,%d) unchanged — masked region was not generated", label, cx, cx)
+		}
+		return nil
+	}
+
+	// Prompted generation variant — only for endpoints that condition on
+	// prompts (a removal specialist rejects prompted jobs by contract).
+	detail := "removal"
+	if m.promptOK() {
+		id := fmt.Sprintf("j_conf_mask_%d", time.Now().UnixNano())
+		out, err := runOne(id, "conformance mask semantics", "/a0")
+		if err != nil {
+			return "", err
+		}
+		if err := assertMask(out, "prompted"); err != nil {
+			return "", err
+		}
+		detail = "generation + removal"
 	}
 
 	// Removal contract (spec §2): an inpaint job with the prompt OMITTED must
@@ -407,46 +539,14 @@ func (c *checker) checkMaskSemantics(ctx context.Context) (string, error) {
 	// in the white region, black region untouched. (What fills the region is
 	// the model's business; that it changes and preserves is the contract.)
 	rid := fmt.Sprintf("j_conf_removal_%d", time.Now().UnixNano())
-	rbody := map[string]any{
-		"id": rid, "task": "inpaint", "profile": "draft",
-		"output": map[string]any{"width": dim, "height": dim},
-		"conditioning": map[string]any{
-			"source_image": map[string]any{"url": srcURL},
-			"mask":         map[string]any{"url": maskURL},
-		},
-		"upload": map[string]any{"artifacts": []map[string]any{{"put_url": recv.putURL("/a1"), "content_type": "image/png"}}},
-	}
-	resp, data, err = c.do(ctx, "POST", "/v1/jobs", rbody, true)
+	rout, err := runOne(rid, "", "/a1")
 	if err != nil {
+		return "", fmt.Errorf("removal (no prompt): %w", err)
+	}
+	if err := assertMask(rout, "removal"); err != nil {
 		return "", err
 	}
-	if resp.StatusCode != 202 && resp.StatusCode != 200 {
-		return "", fmt.Errorf("removal create (no prompt): want 202/200, got %d: %s", resp.StatusCode, data)
-	}
-	rj, err := c.poll(ctx, rid)
-	if err != nil {
-		return "", err
-	}
-	if rj["state"] != "complete" {
-		return "", fmt.Errorf("removal (empty prompt): want complete, got %v (error: %v)", rj["state"], rj["error"])
-	}
-	rout, _, err := image.Decode(bytes.NewReader(recv.body("/a1")))
-	if err != nil {
-		return "", fmt.Errorf("removal artifact does not decode as an image: %w", err)
-	}
-	for _, p := range [][2]int{{4, 4}, {dim - 4, dim - 4}} {
-		r1, g1, b1, _ := src.At(p[0], p[1]).RGBA()
-		r2, g2, b2, _ := rout.At(p[0], p[1]).RGBA()
-		if !near(r1, r2) || !near(g1, g2) || !near(b1, b2) {
-			return "", fmt.Errorf("removal modified a black-mask pixel at %v", p)
-		}
-	}
-	r1, g1, b1, _ = src.At(cx, cx).RGBA()
-	r2, g2, b2, _ = rout.At(cx, cx).RGBA()
-	if near(r1, r2) && near(g1, g2) && near(b1, b2) {
-		return "", fmt.Errorf("removal left the white-mask region unchanged")
-	}
-	return "generation + removal: black regions preserved, white regions changed", nil
+	return detail + ": black regions preserved, white regions changed", nil
 }
 
 func encodePNG(img image.Image) []byte {
@@ -457,7 +557,12 @@ func encodePNG(img image.Image) []byte {
 
 func (c *checker) checkCancel(ctx context.Context) (string, error) {
 	id := fmt.Sprintf("j_conf_cancel_%d", time.Now().UnixNano())
-	body := map[string]any{"id": id, "task": "t2v", "prompt": "SLOW conformance cancel"}
+	recv := newArtifactReceiver(c.cfg.ReceiverHost)
+	defer recv.Close()
+	body, err := c.buildJobBody(ctx, id, "SLOW conformance cancel", recv)
+	if err != nil {
+		return "", err
+	}
 	if resp, data, err := c.do(ctx, "POST", "/v1/jobs", body, true); err != nil {
 		return "", err
 	} else if resp.StatusCode != 202 {
@@ -491,7 +596,7 @@ func (c *checker) checkCancel(ctx context.Context) (string, error) {
 
 func (c *checker) checkSafetyBlocked(ctx context.Context) (string, error) {
 	id := fmt.Sprintf("j_conf_safety_%d", time.Now().UnixNano())
-	j, err := c.createAndPoll(ctx, id, "FAIL:safety conformance", "")
+	j, err := c.createAndPoll(ctx, id, "FAIL:safety conformance", nil, "")
 	if err != nil {
 		return "", err
 	}
@@ -513,7 +618,7 @@ func (c *checker) checkTransient(ctx context.Context) (string, error) {
 	// endpoints (the injection keys transient failure on the exact prompt).
 	id := fmt.Sprintf("j_conf_trans_%d", time.Now().UnixNano())
 	prompt := "FAIL:transient conformance " + id
-	j, err := c.createAndPoll(ctx, id, prompt, "")
+	j, err := c.createAndPoll(ctx, id, prompt, nil, "")
 	if err != nil {
 		return "", err
 	}
@@ -525,7 +630,7 @@ func (c *checker) checkTransient(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("transient must be retryable")
 	}
 	// Orchestrator retry shape: NEW job id, same request. Must succeed.
-	j2, err := c.createAndPoll(ctx, id+"_retry", prompt, "")
+	j2, err := c.createAndPoll(ctx, id+"_retry", prompt, nil, "")
 	if err != nil {
 		return "", err
 	}

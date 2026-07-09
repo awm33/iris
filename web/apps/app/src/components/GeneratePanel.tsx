@@ -14,7 +14,7 @@ type Manifest = {
   profiles: Record<string, { max_width: number; max_height: number }>;
   duration?: { min_s: number; max_s: number };
   references?: { image?: { max: number; roles: string[] } };
-  features?: { seed?: boolean };
+  features?: { seed?: boolean; prompt?: boolean };
   pricing?: { unit: string; estimates?: Record<string, number> };
 };
 
@@ -86,7 +86,18 @@ export function GeneratePanel(props: {
     queryFn: () => generationClient.listModelEndpoints({}),
   });
   const healthy = useMemo(
-    () => (endpoints.data?.endpoints ?? []).filter((e) => e.healthy && e.manifestJson),
+    () =>
+      (endpoints.data?.endpoints ?? []).filter((e) => {
+        if (!e.healthy || !e.manifestJson) return false;
+        // Prompt-ignoring specialists (features.prompt === false, e.g. the
+        // LaMa remover) are never offered here — this panel is prompted
+        // generation by construction, and every submit would be rejected.
+        try {
+          return (JSON.parse(e.manifestJson) as Manifest).features?.prompt !== false;
+        } catch {
+          return false;
+        }
+      }),
     [endpoints.data],
   );
 

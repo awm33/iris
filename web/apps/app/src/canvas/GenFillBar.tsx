@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { assetClient } from "../api";
-import type { GenFillEndpoint } from "./genfill";
+import { type GenFillEndpoint, pickRemovalEndpoint } from "./genfill";
 
 export type GenFillState =
   | { phase: "submitting" }
@@ -23,6 +23,9 @@ export type GenFillState =
  */
 export function GenFillBar(props: {
   endpoints: GenFillEndpoint[];
+  /** Canvas dims — removal auto-routing must pick an endpoint that fits. */
+  docW: number;
+  docH: number;
   state?: GenFillState;
   progress?: number;
   error?: string;
@@ -35,7 +38,11 @@ export function GenFillBar(props: {
   const [count, setCount] = useState(4);
   const [endpointId, setEndpointId] = useState<string>();
   const st = props.state;
-  const endpoint = props.endpoints.find((e) => e.id === endpointId) ?? props.endpoints[0];
+  // Prompted generation only offers endpoints that condition on prompts;
+  // Remove auto-routes (specialist first — the fast tier).
+  const promptable = props.endpoints.filter((e) => e.promptable);
+  const endpoint = promptable.find((e) => e.id === endpointId) ?? promptable[0];
+  const removalEndpoint = pickRemovalEndpoint(props.endpoints, props.docW, props.docH);
 
   if (st?.phase === "choosing") {
     return (
@@ -93,12 +100,14 @@ export function GenFillBar(props: {
         value={prompt}
         autoFocus
         onChange={(e) => setPrompt(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && prompt.trim() && props.onGenerate(prompt.trim(), count, endpoint)}
+        onKeyDown={(e) =>
+          e.key === "Enter" && prompt.trim() && endpoint && props.onGenerate(prompt.trim(), count, endpoint)
+        }
         style={{ flex: 1 }}
       />
-      {props.endpoints.length > 1 && (
-        <select value={endpoint.id} onChange={(e) => setEndpointId(e.target.value)} aria-label="Model">
-          {props.endpoints.map((e) => (
+      {promptable.length > 1 && (
+        <select value={endpoint?.id} onChange={(e) => setEndpointId(e.target.value)} aria-label="Model">
+          {promptable.map((e) => (
             <option key={e.id} value={e.id}>
               {e.name}
             </option>
@@ -112,13 +121,23 @@ export function GenFillBar(props: {
           </option>
         ))}
       </select>
-      <button className="btn" disabled={!prompt.trim()} onClick={() => props.onGenerate(prompt.trim(), count, endpoint)}>
+      <button
+        className="btn"
+        disabled={!prompt.trim() || !endpoint}
+        title={endpoint ? undefined : "No prompt-conditioned endpoint is available — only removal specialists are up"}
+        onClick={() => endpoint && props.onGenerate(prompt.trim(), count, endpoint)}
+      >
         ⚡ Generate
       </button>
       <button
         className="btn secondary"
-        title="Remove: reconstruct the background under the selection (no prompt)"
-        onClick={() => props.onGenerate("", 1, endpoint)}
+        disabled={!removalEndpoint}
+        title={
+          removalEndpoint
+            ? `Remove: reconstruct the background under the selection (${removalEndpoint.name})`
+            : "No endpoint fits this canvas for removal"
+        }
+        onClick={() => removalEndpoint && props.onGenerate("", 1, removalEndpoint)}
       >
         ✂ Remove
       </button>
