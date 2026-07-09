@@ -68,6 +68,41 @@ service AssetService {
 
   // Short-lived signed GET for display/refs.
   rpc SignDownload(SignDownloadRequest) returns (SignDownloadResponse);
+
+  // Stock-photo sources (Pexels first): search externally, import into the
+  // library as a normal content-addressed asset with attribution metadata.
+  rpc SearchStock(SearchStockRequest) returns (SearchStockResponse);
+  rpc ImportStock(ImportStockRequest) returns (ImportStockResponse);
+}
+
+message StockPhoto {
+  string source = 1; // "pexels"
+  string id = 2;     // source-native id
+  string thumb_url = 3;
+  int32 width = 4;
+  int32 height = 5;
+  string alt = 6;
+  string photographer = 7;
+  string photographer_url = 8;
+}
+
+message SearchStockRequest {
+  string query = 1;
+  int32 page = 2; // 1-based; default 1
+}
+message SearchStockResponse {
+  repeated StockPhoto photos = 1;
+  bool has_more = 2;
+}
+
+message ImportStockRequest {
+  string project_id = 1;
+  string source = 2; // "pexels"
+  string id = 3;     // the server resolves the download URL itself
+}
+message ImportStockResponse {
+  Asset asset = 1;
+  AssetVersion version = 2;
 }
 
 message StartUploadRequest {

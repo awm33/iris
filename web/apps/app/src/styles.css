@@ -250,6 +250,10 @@ body {
   gap: 12px;
 }
 .picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.modal-wide { width: min(960px, 94vw); }
+.stock-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.stock-credit { font-size: 11px; }
+.stock-credit a { color: var(--text-dim); }
 .picker-cell {
   all: unset;
   cursor: pointer;

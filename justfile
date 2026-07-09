@@ -1,3 +1,4 @@
+set dotenv-load := true
 # Iris dev commands. Install `just`: https://github.com/casey/just
 
 # Bring up the dev stack (Postgres+pgvector, MinIO, mock model servers)

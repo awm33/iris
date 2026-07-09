@@ -569,6 +569,21 @@ func (s *Store) RemoveCharacterRef(ctx context.Context, characterID, role, asset
 	return c, nil
 }
 
+// AnnotateVersion merges metadata into a version's meta (source attribution,
+// import provenance).
+func (s *Store) AnnotateVersion(ctx context.Context, versionID string, meta any) error {
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE asset_versions SET meta = meta || $2 WHERE id = $1`, versionID, metaJSON)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return err
+}
+
 // VersionBelongsToAsset validates a client-supplied (asset, version) pair —
 // plate_ref/character refs store version ids without FKs.
 func (s *Store) VersionBelongsToAsset(ctx context.Context, versionID, assetID string) (bool, error) {

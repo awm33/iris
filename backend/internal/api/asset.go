@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,12 +17,15 @@ import (
 
 	irisv1 "github.com/awm33/iris/backend/gen/iris/v1"
 	"github.com/awm33/iris/backend/internal/blob"
+	"github.com/awm33/iris/backend/internal/ids"
+	"github.com/awm33/iris/backend/internal/sources/pexels"
 	"github.com/awm33/iris/backend/internal/store"
 )
 
 type AssetServer struct {
-	Store *store.Store
-	Blob  *blob.Store
+	Store  *store.Store
+	Blob   *blob.Store
+	Pexels *pexels.Client // nil = source not configured
 }
 
 const (
@@ -159,6 +164,114 @@ func (s *AssetServer) SignDownload(ctx context.Context, req *connect.Request[iri
 		Url:         url,
 		ExpiresUnix: time.Now().Add(getExpiry).Unix(),
 	}), nil
+}
+
+// ── stock sources ─────────────────────────────────────────────────────────────
+
+const maxStockQueryLen = 200
+
+func (s *AssetServer) SearchStock(ctx context.Context, req *connect.Request[irisv1.SearchStockRequest]) (*connect.Response[irisv1.SearchStockResponse], error) {
+	if s.Pexels == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("no stock source configured — set IRIS_PEXELS_API_KEY and restart the api"))
+	}
+	q := strings.TrimSpace(req.Msg.Query)
+	if q == "" || len([]rune(q)) > maxStockQueryLen {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("query is required (max 200 chars)"))
+	}
+	photos, hasMore, err := s.Pexels.Search(ctx, q, int(req.Msg.Page))
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	resp := &irisv1.SearchStockResponse{HasMore: hasMore}
+	for _, p := range photos {
+		resp.Photos = append(resp.Photos, &irisv1.StockPhoto{
+			Source: "pexels", Id: strconv.FormatInt(p.ID, 10),
+			ThumbUrl: p.ThumbURL, Width: int32(p.Width), Height: int32(p.Height),
+			Alt: p.Alt, Photographer: p.Photographer, PhotographerUrl: p.PhotographerURL,
+		})
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *AssetServer) ImportStock(ctx context.Context, req *connect.Request[irisv1.ImportStockRequest]) (*connect.Response[irisv1.ImportStockResponse], error) {
+	if s.Pexels == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("no stock source configured — set IRIS_PEXELS_API_KEY and restart the api"))
+	}
+	if req.Msg.Source != "pexels" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unknown stock source"))
+	}
+	id, err := strconv.ParseInt(req.Msg.Id, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("bad photo id"))
+	}
+
+	// The server resolves the download URL from the Pexels API itself — the
+	// client only names an id; no user-supplied URL is ever fetched.
+	photo, err := s.Pexels.Resolve(ctx, id)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	rc, err := s.Pexels.Download(ctx, photo)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	defer rc.Close()
+
+	tempKey := "uploads/stock/" + ids.New("imp")
+	if err := s.Blob.PutObject(ctx, tempKey, "image/jpeg", rc, -1); err != nil {
+		return nil, connectErr(err)
+	}
+	hash, size, open, err := s.Blob.HashAndPromote(ctx, tempKey)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+
+	v := &store.AssetVersion{SHA256: hash, ContentType: "image/jpeg", SizeBytes: size}
+	if rcImg, err := open(); err == nil {
+		if cfg, _, err := image.DecodeConfig(rcImg); err == nil {
+			v.Width, v.Height = int32(cfg.Width), int32(cfg.Height)
+		}
+		rcImg.Close()
+	}
+
+	name := photo.Alt
+	if name == "" {
+		name = "pexels " + req.Msg.Id
+	}
+	if photo.Photographer != "" {
+		name = fmt.Sprintf("%s — %s", name, photo.Photographer)
+	}
+	a := &store.Asset{
+		WorkspaceID: store.DevWorkspaceID,
+		ProjectID:   req.Msg.ProjectId,
+		Kind:        "image",
+		Name:        truncateRunes(name, 200),
+	}
+	if err := s.Store.CreateAssetWithVersion(ctx, a, v, false); err != nil {
+		return nil, connectErr(err)
+	}
+	// Attribution rides on the version (Pexels guidelines: credit the
+	// photographer and Pexels where possible).
+	_ = s.Store.AnnotateVersion(ctx, v.ID, map[string]any{
+		"source":           "pexels",
+		"source_id":        req.Msg.Id,
+		"photographer":     photo.Photographer,
+		"photographer_url": photo.PhotographerURL,
+	})
+	return connect.NewResponse(&irisv1.ImportStockResponse{
+		Asset:   assetPB(a),
+		Version: versionPB(v),
+	}), nil
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 // ── mapping helpers ───────────────────────────────────────────────────────────
