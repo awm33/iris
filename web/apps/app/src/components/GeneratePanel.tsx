@@ -6,7 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AssetKind, type ModelEndpoint } from "@iris/api-client";
-import { assetClient, generationClient } from "../api";
+import { assetClient, generationClient, storyClient } from "../api";
 
 type Manifest = {
   modality: "image" | "video";
@@ -19,7 +19,13 @@ type Manifest = {
 
 type RefChip = { assetId: string; name: string; role: string };
 
-export function GeneratePanel(props: { projectId: string; onClose: () => void; onSubmitted: () => void }) {
+export function GeneratePanel(props: {
+  projectId: string;
+  // When set, generated candidates land as this shot's takes.
+  target?: { shotId: string; label: string };
+  onClose: () => void;
+  onSubmitted: () => void;
+}) {
   const qc = useQueryClient();
   const endpoints = useQuery({
     queryKey: ["endpoints"],
@@ -76,6 +82,7 @@ export function GeneratePanel(props: { projectId: string; onClose: () => void; o
           profile: activeProfile,
           prompt,
           count,
+          targetEntityId: props.target?.shotId ?? "",
           output: {
             width: profileSpec?.max_width ?? 512,
             height: profileSpec?.max_height ?? 512,
@@ -96,6 +103,14 @@ export function GeneratePanel(props: { projectId: string; onClose: () => void; o
   });
 
   if (endpoints.isLoading) return <aside className="panel">Loading models…</aside>;
+  if (endpoints.isError) {
+    return (
+      <aside className="panel">
+        <PanelHeader onClose={props.onClose} />
+        <div className="status error">Failed to load model endpoints: {String(endpoints.error)}</div>
+      </aside>
+    );
+  }
   if (!endpoint || !manifest) {
     return (
       <aside className="panel">
@@ -108,6 +123,7 @@ export function GeneratePanel(props: { projectId: string; onClose: () => void; o
   return (
     <aside className="panel">
       <PanelHeader onClose={props.onClose} />
+      {props.target && <div className="target-chip">Target: {props.target.label}</div>}
 
       <label className="field">
         Model
@@ -277,8 +293,44 @@ function RefPicker(props: {
     queryKey: ["assets", props.projectId, "ref-picker"],
     queryFn: () => assetClient.listAssets({ projectId: props.projectId, kind: AssetKind.IMAGE }),
   });
+  // Characters resolve to their first image ref (turnaround preferred) —
+  // the library-backed consistency loop, pending @-mention polish.
+  const characters = useQuery({
+    queryKey: ["characters", props.projectId],
+    enabled: props.roles.includes("character"),
+    queryFn: () => storyClient.listCharacters({ projectId: props.projectId }),
+  });
+
+  const characterChip = (name: string, refs: { role: string; asset?: { assetId: string } }[]): RefChip | null => {
+    const best =
+      refs.find((r) => r.role === "turnaround" && r.asset?.assetId) ??
+      refs.find((r) => r.role !== "voice" && r.asset?.assetId);
+    return best?.asset ? { assetId: best.asset.assetId, name, role: "character" } : null;
+  };
+
   return (
     <div className="ref-picker">
+      {props.roles.includes("character") && (characters.data?.characters.length ?? 0) > 0 && (
+        <>
+          <span className="field">Characters</span>
+          <div className="ref-picker-list">
+            {characters.data!.characters.map((c) => {
+              const chip = characterChip(c.name, c.refs);
+              return (
+                <button
+                  key={c.id}
+                  className="btn secondary"
+                  disabled={!chip}
+                  title={chip ? undefined : "No image reference yet — add one on the Characters page"}
+                  onClick={() => chip && props.onPick(chip)}
+                >
+                  @{c.name}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
       <label className="field">
         Role
         <select value={role} onChange={(e) => setRole(e.target.value)}>

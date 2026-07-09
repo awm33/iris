@@ -59,6 +59,9 @@ message Shot {
   bool continuity_stale = 9;
   bool pinned = 10;
   int32 take_count = 11;
+  // Resolved server-side so shot cards render their face without a per-shot
+  // ListTakes round trip.
+  string selected_take_version_id = 12;
   Timestamps timestamps = 15;
 }
 
