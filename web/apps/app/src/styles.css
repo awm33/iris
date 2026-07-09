@@ -397,3 +397,9 @@ body {
   border-top: 1px solid var(--border);
   padding-top: 8px;
 }
+
+/* Text layer props */
+.layers-panel textarea {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 6px 8px; font: inherit; font-size: 13px; resize: vertical;
+}

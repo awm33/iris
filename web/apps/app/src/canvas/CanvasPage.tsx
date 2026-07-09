@@ -337,6 +337,27 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     }
   }
 
+  function textClick(pt: [number, number]) {
+    const id = `lyr_${newOpId().slice(3)}`;
+    doc.apply({
+      op_id: newOpId(),
+      type: "add_layer",
+      layer: {
+        id,
+        name: "Text",
+        kind: "text",
+        text: {
+          content: "Text",
+          x: Math.round(Math.min(Math.max(pt[0], 0), canvas.width)),
+          y: Math.round(Math.min(Math.max(pt[1], 0), canvas.height)),
+          size: 64,
+          color,
+        },
+      },
+    });
+    setActiveLayerId(id);
+  }
+
   const addLayer = () => {
     const id = `lyr_${newOpId().slice(3)}`;
     doc.apply({
@@ -518,6 +539,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         {toolButton("marquee", "▭ Select")}
         {toolButton("lasso", "◯ Lasso")}
         {toolButton("subject", subjectBusy ? "✨ …" : "✨ Subject")}
+        {toolButton("text", "T Text")}
         <input
           type="color"
           value={color}
@@ -601,6 +623,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           }}
           overlayLayer={overlayLayer}
           onSubjectClick={(pt, neg) => void subjectClick(pt, neg)}
+          onTextClick={textClick}
         />
         <aside className="layers-panel">
           <div className="section-head">
@@ -668,8 +691,68 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           {active?.kind === "image" && (
             <div className="meta">Image layers are pixels from the Library — paint on a paint layer above.</div>
           )}
+          {active?.kind === "text" && active.text && (
+            <TextProps
+              key={active.id}
+              value={active.text}
+              onCommit={(text) =>
+                doc.apply({ op_id: newOpId(), type: "set_layer", layer_id: active.id, props: { text } })
+              }
+            />
+          )}
         </aside>
       </div>
+    </div>
+  );
+}
+
+/** Text layer props (v0): commit on blur/change-end as single ops — a
+ * keystroke-per-op would spam the log and shred undo granularity. */
+function TextProps(props: {
+  value: { content: string; x: number; y: number; size: number; color: string };
+  onCommit: (t: { content: string; x: number; y: number; size: number; color: string }) => void;
+}) {
+  const [draft, setDraft] = useState(props.value);
+  // Resync on external change (undo/remote): a stale draft re-committed on
+  // blur would silently revert the user's undo and destroy the redo chain.
+  const valueJson = JSON.stringify(props.value);
+  useEffect(() => {
+    setDraft(props.value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valueJson]);
+  const commit = () => {
+    // Cap defensively too: one >64KB op would poison the whole save queue.
+    const next = { ...draft, content: draft.content.slice(0, 10_000) };
+    if (JSON.stringify(next) !== valueJson) props.onCommit(next);
+  };
+  return (
+    <div className="layer-opacity">
+      <span className="meta">text</span>
+      <textarea
+        rows={3}
+        maxLength={10000}
+        value={draft.content}
+        onChange={(e) => setDraft({ ...draft, content: e.target.value })}
+        onBlur={commit}
+      />
+      <label className="meta">
+        size
+        <input
+          type="range"
+          min={8}
+          max={400}
+          value={draft.size}
+          onChange={(e) => setDraft({ ...draft, size: Number(e.target.value) })}
+          onPointerUp={commit}
+          onBlur={commit}
+        />
+      </label>
+      <input
+        type="color"
+        value={draft.color}
+        onChange={(e) => setDraft({ ...draft, color: e.target.value })}
+        onBlur={commit}
+      />
     </div>
   );
 }

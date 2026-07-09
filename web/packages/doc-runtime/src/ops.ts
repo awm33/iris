@@ -3,7 +3,7 @@
 // generalize: the envelope + undo-as-op semantics are shared with the
 // timeline doc (M5); only the op types differ.
 
-export type LayerKind = "image" | "paint";
+export type LayerKind = "image" | "paint" | "text";
 
 export interface LayerInit {
   id: string;
@@ -17,6 +17,8 @@ export interface LayerInit {
   mask_version_id?: string;
   opacity?: number; // 0..1, default 1
   visible?: boolean; // default true
+  /** Text layers (v0: one family, fill color, size; \n wraps lines). */
+  text?: { content: string; x: number; y: number; size: number; color: string };
 }
 
 export interface StrokeOp {
@@ -36,7 +38,13 @@ export type CanvasOp =
       op_id: string;
       type: "set_layer";
       layer_id: string;
-      props: { name?: string; opacity?: number; visible?: boolean; index?: number };
+      props: {
+        name?: string;
+        opacity?: number;
+        visible?: boolean;
+        index?: number;
+        text?: { content: string; x: number; y: number; size: number; color: string };
+      };
     }
   | StrokeOp
   /**

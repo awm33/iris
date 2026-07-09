@@ -86,6 +86,31 @@ describe("reduce", () => {
   });
 });
 
+describe("text layers", () => {
+  it("carries text through add_layer and set_layer; undo restores", () => {
+    const t = { content: "Hello", x: 10, y: 20, size: 64, color: "#fff" };
+    const ops: CanvasOp[] = [
+      { op_id: "a1", type: "add_layer", layer: { id: "t1", name: "Text", kind: "text", text: t } },
+      { op_id: "a2", type: "set_layer", layer_id: "t1", props: { text: { ...t, content: "Bye" } } },
+    ];
+    expect(reduce(ops).layers[0].text?.content).toBe("Bye");
+    ops.push(undo("u1", "a2"));
+    expect(reduce(ops).layers[0].text?.content).toBe("Hello");
+  });
+
+  it("set_layer text on non-text layers and strokes on text layers are ignored", () => {
+    const t = { content: "x", x: 0, y: 0, size: 10, color: "#fff" };
+    const state = reduce([
+      addLayer("p"),
+      { op_id: "s1", type: "set_layer", layer_id: "p", props: { text: t } },
+      { op_id: "a1", type: "add_layer", layer: { id: "t1", name: "T", kind: "text", text: t } },
+      stroke("st", "t1"),
+    ]);
+    expect(state.layers[0].text).toBeUndefined();
+    expect(state.layers[1].strokes).toEqual([]);
+  });
+});
+
 describe("CanvasDoc undo/redo", () => {
   it("round-trips undo→redo→undo and clears redo on new ops", () => {
     const doc = new CanvasDoc([addLayer("a")]);
