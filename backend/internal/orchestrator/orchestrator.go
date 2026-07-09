@@ -425,7 +425,7 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	assetID, versionID := ids.New("ast"), ids.New("astv")
-	name := generatedName(req.Prompt, ep.Manifest.Modality)
+	name := generatedName(req.Prompt, job.Task, ep.Manifest.Modality)
 	kind := "video"
 	if ep.Manifest.Modality == "image" {
 		kind = "image"
@@ -588,13 +588,18 @@ func (o *Orchestrator) meterUsage(job *queue.GenerationJob, status *inference.Jo
 	}
 }
 
-func generatedName(prompt, modality string) string {
+func generatedName(prompt, task, modality string) string {
 	p := strings.TrimSpace(prompt)
 	if r := []rune(p); len(r) > 48 { // rune-safe: byte slicing can split UTF-8
 		p = string(r[:48]) + "…"
 	}
 	if p == "" {
-		p = "untitled"
+		// Empty inpaint prompt is a removal by contract (spec §2).
+		if task == "inpaint" {
+			p = "removal"
+		} else {
+			p = "untitled"
+		}
 	}
 	return fmt.Sprintf("gen: %s (%s)", p, modality)
 }

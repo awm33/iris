@@ -29,7 +29,7 @@ GET    /v1/healthz             → liveness (200 = accepting jobs)
   "id": "j_9f2c...",                    // client-generated ULID; idempotency key (repeat POST with same id → same job, 200)
   "task": "t2v",                        // one of manifest.tasks: t2i | i2i | t2v | i2v | v2v | inpaint | outpaint | upscale | lipsync_post | ...
   "profile": "draft",                   // manifest.profiles key (draft | master | ...)
-  "prompt": "Mara slides the plate across the counter...",
+  "prompt": "Mara slides the plate across the counter...",  // OPTIONAL for task "inpaint": empty prompt = removal — reconstruct background, insert nothing
   "negative_prompt": null,              // optional; only if manifest.features.negative_prompt
   "seed": 123456789,                    // optional; endpoints MUST honor it deterministically if manifest.features.seed
   "output": { "width": 1280, "height": 720, "duration_s": 6.0, "fps": 24 },  // duration/fps video-only; must fit manifest limits
@@ -55,6 +55,8 @@ GET    /v1/healthz             → liveness (200 = accepting jobs)
   "webhook": { "url": "https://iris.../v1/callbacks/j_9f2c", "secret": "..." }     // optional; polling is the baseline
 }
 ```
+
+**Removal contract:** endpoints declaring `inpaint` MUST accept an empty or omitted `prompt` and treat it as removal — reconstruct plausible background in the masked region, insert nothing. (The `mask_semantics` conformance check exercises this.)
 
 **Response `202`:** `{ "id": "j_9f2c...", "state": "queued", "queue_position": 3, "estimated_start_s": 40 }`
 

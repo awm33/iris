@@ -315,26 +315,72 @@ func (s *server) inpaintPNG(req createRequest) ([]byte, int, int, error) {
 	out := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(out, out.Bounds(), src, b.Min, draw.Src)
 
-	hsh := fnv.New32a()
-	fmt.Fprintf(hsh, "%s|%d", req.Prompt, req.Seed)
-	k := hsh.Sum32()
-	c1 := color.RGBA{uint8(k), uint8(k >> 8), uint8(k >> 16), 255}
-	c2 := color.RGBA{uint8(k >> 16), uint8(k), uint8(k >> 8), 255}
-
-	for y := 0; y < h; y++ {
+	inMask := func(x, y int) bool {
+		// RGBA() is alpha-premultiplied: a white-but-transparent mask pixel
+		// reads as "preserve" — fine for opaque masks (the only kind Iris
+		// emits), noted so parity tests don't chase it.
+		mx := mb.Min.X + x*mb.Dx()/w
 		my := mb.Min.Y + y*mb.Dy()/h // nearest-neighbor sampling if dims differ
-		for x := 0; x < w; x++ {
-			mx := mb.Min.X + x*mb.Dx()/w
-			// RGBA() is alpha-premultiplied: a white-but-transparent mask
-			// pixel reads as "preserve" — fine for opaque masks (the only
-			// kind Iris emits), noted so parity tests don't chase it.
-			r, g, bl, _ := mask.At(mx, my).RGBA()
-			if (r+g+bl)/3 > 0x7fff { // white = generate
-				c := c1
-				if (x/24+y/24)%2 == 0 {
-					c = c2
+		r, g, bl, _ := mask.At(mx, my).RGBA()
+		return (r+g+bl)/3 > 0x7fff // white = generate
+	}
+
+	if req.Prompt == "" {
+		// REMOVAL (spec §2: empty inpaint prompt = reconstruct background).
+		// Parody of content-aware fill: flood the masked region with the
+		// average of the unmasked pixels bordering it — visually plausible
+		// "the object is gone" for dev, and clearly distinct from the
+		// checkerboard so removal vs generation is tellable at a glance.
+		var rs, gs, bs, n uint64
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				if inMask(x, y) {
+					continue
 				}
-				out.SetRGBA(x, y, c)
+				// Border = unmasked pixel with a masked 8-neighbor.
+				border := false
+				for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, 1}, {-1, 1}, {1, -1}} {
+					nx, ny := x+d[0], y+d[1]
+					if nx >= 0 && ny >= 0 && nx < w && ny < h && inMask(nx, ny) {
+						border = true
+						break
+					}
+				}
+				if border {
+					c := out.RGBAAt(x, y)
+					rs += uint64(c.R)
+					gs += uint64(c.G)
+					bs += uint64(c.B)
+					n++
+				}
+			}
+		}
+		fill := color.RGBA{128, 128, 128, 255}
+		if n > 0 {
+			fill = color.RGBA{uint8(rs / n), uint8(gs / n), uint8(bs / n), 255}
+		}
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				if inMask(x, y) {
+					out.SetRGBA(x, y, fill)
+				}
+			}
+		}
+	} else {
+		hsh := fnv.New32a()
+		fmt.Fprintf(hsh, "%s|%d", req.Prompt, req.Seed)
+		k := hsh.Sum32()
+		c1 := color.RGBA{uint8(k), uint8(k >> 8), uint8(k >> 16), 255}
+		c2 := color.RGBA{uint8(k >> 16), uint8(k), uint8(k >> 8), 255}
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				if inMask(x, y) {
+					c := c1
+					if (x/24+y/24)%2 == 0 {
+						c = c2
+					}
+					out.SetRGBA(x, y, c)
+				}
 			}
 		}
 	}

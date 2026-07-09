@@ -5,7 +5,7 @@ import type { GenFillEndpoint } from "./genfill";
 
 export type GenFillState =
   | { phase: "submitting" }
-  | { phase: "generating"; jobId: string; maskVersionId: string; maskAssetId: string }
+  | { phase: "generating"; jobId: string; maskVersionId: string; maskAssetId: string; removal?: boolean }
   | {
       phase: "choosing";
       jobId: string;
@@ -13,6 +13,7 @@ export type GenFillState =
       maskAssetId: string;
       candidates: string[]; // artifact version ids
       index: number;
+      removal?: boolean;
     };
 
 /**
@@ -40,7 +41,9 @@ export function GenFillBar(props: {
     return (
       <div className="genfill-bar">
         <span className="meta">
-          Candidate {st.index + 1}/{st.candidates.length} — ←/→ to compare, Enter to commit
+          {st.candidates.length > 1
+            ? `Candidate ${st.index + 1}/${st.candidates.length} — ←/→ to compare, Enter to commit`
+            : `${st.removal ? "Removal" : "Result"} — Enter to commit`}
         </span>
         <div className="genfill-strip">
           {st.candidates.map((v, i) => (
@@ -111,6 +114,13 @@ export function GenFillBar(props: {
       </select>
       <button className="btn" disabled={!prompt.trim()} onClick={() => props.onGenerate(prompt.trim(), count, endpoint)}>
         ⚡ Generate
+      </button>
+      <button
+        className="btn secondary"
+        title="Remove: reconstruct the background under the selection (no prompt)"
+        onClick={() => props.onGenerate("", 1, endpoint)}
+      >
+        ✂ Remove
       </button>
       {props.error && <span className="status error">{props.error}</span>}
     </div>
