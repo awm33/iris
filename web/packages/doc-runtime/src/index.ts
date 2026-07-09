@@ -18,4 +18,6 @@ export {
   reduceTimeline,
   timelineDuration,
   clipAt,
+  bladeOps,
+  snapTime,
 } from "./timeline";
