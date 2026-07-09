@@ -55,6 +55,8 @@ export interface TimelineState {
   tracks: TrackState[];
 }
 
+export const MIN_CLIP_S = 0.04; // one 24fps frame — reducer floor, shared by editing helpers
+
 export function reduceTimeline(ops: TimelineOp[]): TimelineState {
   const tracks: TrackState[] = [];
   const findTrack = (id: string) => tracks.find((t) => t.id === id);
@@ -96,7 +98,7 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
           versionId: op.clip.version_id,
           shotId: op.clip.shot_id,
           start: Math.max(0, op.clip.start),
-          duration: Math.max(0.04, op.clip.duration),
+          duration: Math.max(MIN_CLIP_S, op.clip.duration),
           inPoint: Math.max(0, op.clip.in_point ?? 0),
         });
         sort(t);
@@ -131,7 +133,7 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
         if (!hit) break;
         const clip = hit[1];
         if (op.start !== undefined) clip.start = Math.max(0, op.start);
-        if (op.duration !== undefined) clip.duration = Math.max(0.04, op.duration);
+        if (op.duration !== undefined) clip.duration = Math.max(MIN_CLIP_S, op.duration);
         if (op.in_point !== undefined) clip.inPoint = Math.max(0, op.in_point);
         sort(hit[0]);
         break;
@@ -148,6 +150,74 @@ export function timelineDuration(state: TimelineState): number {
     for (const c of t.clips) end = Math.max(end, c.start + c.duration);
   }
   return end;
+}
+
+/** Ops that split a clip at absolute time t: trim the original to the left
+ * half, add the right half (in_point advanced so content stays put). Returns
+ * null when t isn't strictly inside the clip or a side would collapse below
+ * one frame. NOTE: a blade is two ops, so it takes two undos to fully revert
+ * — op grouping is a future vocabulary change if that stings in practice. */
+export function bladeOps(state: TimelineState, clipId: string, t: number, newClipId: string): TimelineOp[] | null {
+  // Round the cut point once so both halves abut exactly and the raw
+  // playhead float never reaches the persisted log.
+  const rt = Math.round(t * 100) / 100;
+  for (const track of state.tracks) {
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (!clip) continue;
+    const left = rt - clip.start;
+    const right = clip.start + clip.duration - rt;
+    if (left < MIN_CLIP_S || right < MIN_CLIP_S) return null;
+    return [
+      { op_id: newOpId(), type: "trim_clip", clip_id: clip.id, duration: left },
+      {
+        op_id: newOpId(),
+        type: "add_clip",
+        track_id: track.id,
+        clip: {
+          id: newClipId,
+          name: clip.name,
+          version_id: clip.versionId,
+          shot_id: clip.shotId,
+          start: rt,
+          // Placeholders have no source: content anchoring is meaningless,
+          // and a nonzero in_point would skew their left-trim clamp.
+          duration: right,
+          in_point: clip.versionId ? clip.inPoint + left : 0,
+        },
+      },
+    ];
+  }
+  return null;
+}
+
+/** Snap t to the nearest clip edge or extra candidate (playhead, 0) within
+ * thresholdS; returns null when nothing is close enough — an explicit miss,
+ * so an exact hit (distance 0) is distinguishable from no target, which a
+ * return-input-unchanged sentinel cannot express. excludeClipId keeps a
+ * dragged clip from snapping to itself. */
+export function snapTime(
+  state: TimelineState,
+  t: number,
+  opts: { thresholdS: number; excludeClipId?: string; extra?: number[] },
+): number | null {
+  let best: number | null = null;
+  let bestDist = opts.thresholdS;
+  const consider = (cand: number) => {
+    const d = Math.abs(cand - t);
+    if (d <= bestDist) {
+      best = cand;
+      bestDist = d;
+    }
+  };
+  for (const track of state.tracks) {
+    for (const c of track.clips) {
+      if (c.id === opts.excludeClipId) continue;
+      consider(c.start);
+      consider(c.start + c.duration);
+    }
+  }
+  for (const cand of opts.extra ?? [0]) consider(cand);
+  return best;
 }
 
 /** Topmost video clip covering time t (track order = priority). */

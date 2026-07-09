@@ -2,10 +2,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type { Timeline } from "@iris/api-client";
 import {
+  bladeOps,
   clipAt,
+  MIN_CLIP_S,
   newOpId as oid,
   OpSync,
   type OpSyncTransport,
+  snapTime,
   TimelineDoc,
   type TimelineOp,
   timelineDuration,
@@ -17,6 +20,7 @@ import { useEscape } from "../components/AssetThumb";
 
 const PX_PER_SEC = 40;
 const TRACK_H = 56;
+const SNAP_S = 8 / PX_PER_SEC; // 8px feel regardless of zoom (zoom lands later)
 
 
 
@@ -42,9 +46,37 @@ export function TimelinePage(props: {
   const [status, setStatus] = useState<SyncStatus>("saved");
   const [, tick] = useState(0);
   const [time, setTime] = useState(0);
-  const [picking, setPicking] = useState<"media" | "shots" | null>(null);
-  const dragRef = useRef<{ clipId: string; startX: number; origStart: number; previewStart?: number } | null>(null);
-  const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number } | null>(null);
+  const [picking, setPickingState] = useState<"media" | "shots" | null>(null);
+  const pickingRef = useRef<"media" | "shots" | null>(null);
+  const setPicking = (v: "media" | "shots" | null) => {
+    pickingRef.current = v;
+    setPickingState(v);
+  };
+  const [selected, setSelected] = useState<string | null>(null);
+  // Refs mirror playhead/selection for the window keydown handler — reading
+  // render state there would either go stale or re-bind the listener per
+  // pointermove (the TakePicker lesson).
+  const timeRef = useRef(0);
+  const selectedRef = useRef<string | null>(null);
+  const seek = (t: number) => {
+    timeRef.current = t;
+    setTime(t);
+  };
+  const select = (id: string | null) => {
+    selectedRef.current = id;
+    setSelected(id);
+  };
+  type DragMode = "move" | "trim-l" | "trim-r";
+  const dragRef = useRef<{
+    mode: DragMode;
+    clipId: string;
+    startX: number;
+    hasSource: boolean;
+    orig: { start: number; duration: number; inPoint: number };
+    preview?: { start: number; duration: number; inPoint: number };
+  } | null>(null);
+  const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number; duration: number } | null>(null);
+  const bladeRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     let cancelled = false;
@@ -119,15 +151,56 @@ export function TimelinePage(props: {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      // <select> type-ahead ("b"…) and sibling panels' form fields must
+      // never reach doc-mutating hotkeys.
+      if (t.isContentEditable || t.closest?.("input,textarea,select,[contenteditable]")) return;
+      // No doc mutation while a picker modal is open (the edit would land
+      // invisibly behind the overlay — and Escape belongs to the modal) or
+      // mid-drag (the pending gesture would commit from a stale orig).
+      if (pickingRef.current || dragRef.current) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? session?.doc.redo() : session?.doc.undo();
+        return;
       }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "b" || e.key === "B") bladeRef.current?.();
+      else if (e.key === "Delete" || e.key === "Backspace") {
+        const id = selectedRef.current;
+        if (id && session) {
+          session.doc.apply({ op_id: oid(), type: "remove_clip", clip_id: id });
+          select(null);
+        }
+      } else if (e.key === "Escape") select(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [session]);
+
+  const blade = () => {
+    const bdoc = session?.doc;
+    if (!bdoc) return;
+    const st = bdoc.state;
+    const t = timeRef.current;
+    const inSel = (id: string | null) => {
+      if (!id) return undefined;
+      for (const tr of st.tracks) {
+        const c = tr.clips.find((c) => c.id === id);
+        if (c && t > c.start && t < c.start + c.duration) return c;
+      }
+      return undefined;
+    };
+    const target = inSel(selectedRef.current) ?? clipAt(st, t, "video") ?? clipAt(st, t, "audio");
+    if (!target) return;
+    const ops = bladeOps(st, target.id, t, `cl_${oid().slice(3)}`);
+    if (ops) for (const op of ops) bdoc.apply(op);
+  };
+  // Assigned in an effect, not during render: a discarded concurrent render
+  // must not leave its closure behind. Declared before the early returns so
+  // the effect never sees an uninitialized binding on loading renders.
+  useEffect(() => {
+    bladeRef.current = blade;
+  });
 
   if (loadError) return <div className="status error">Couldn’t open timeline: {loadError}</div>;
   if (!session) return <div className="empty">Opening timeline…</div>;
@@ -145,25 +218,92 @@ export function TimelinePage(props: {
       /* uncaptured drag still works over the element */
     }
   };
-  const onClipDown = (e: React.PointerEvent, clipId: string, start: number) => {
-    dragRef.current = { clipId, startX: e.clientX, origStart: start };
+  const onClipDown = (
+    e: React.PointerEvent,
+    mode: DragMode,
+    c: { id: string; start: number; duration: number; inPoint: number; versionId?: string },
+  ) => {
+    select(c.id);
+    if (e.button !== 0) return; // right-click opens the context menu, which can swallow pointerup
+    dragRef.current = {
+      mode,
+      clipId: c.id,
+      startX: e.clientX,
+      hasSource: !!c.versionId,
+      orig: { start: c.start, duration: c.duration, inPoint: c.inPoint },
+    };
     capture(e);
   };
   const onClipMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
+    if (e.buttons === 0) {
+      // The gesture's pointerup landed elsewhere (failed capture, clip
+      // unmounted by a remote op) — a hover must not drag a phantom.
+      dragRef.current = null;
+      setDragPreview(null);
+      return;
+    }
+    const dx = (e.clientX - d.startX) / PX_PER_SEC;
+    // Alt disables snapping (NLE convention); the playhead is a snap target.
+    // doc.state/timeRef, not render scope — the refs-not-render-state rule.
+    const snap = (t: number) =>
+      e.altKey ? null : snapTime(doc.state, t, { thresholdS: SNAP_S, excludeClipId: d.clipId, extra: [timeRef.current, 0] });
+    let p = d.preview ?? d.orig;
+    if (d.mode === "move") {
+      const raw = Math.max(0, d.orig.start + dx);
+      // Snap whichever clip edge found a target; both hit → smaller distance.
+      const byLead = snap(raw);
+      const trailHit = snap(raw + d.orig.duration);
+      const byTrail = trailHit === null ? null : trailHit - d.orig.duration;
+      let lead = byLead ?? byTrail ?? raw;
+      if (byLead !== null && byTrail !== null && Math.abs(byTrail - raw) < Math.abs(byLead - raw)) lead = byTrail;
+      p = { start: Math.max(0, lead), duration: d.orig.duration, inPoint: d.orig.inPoint };
+    } else if (d.mode === "trim-r") {
+      // No far cap: the model carries no source duration, so a media clip
+      // can extend past its source (preview freezes on the last frame);
+      // render policy for that overhang is deferred with the compositor.
+      const rawEnd = d.orig.start + Math.max(MIN_CLIP_S, d.orig.duration + dx);
+      const end = snap(rawEnd) ?? rawEnd;
+      p = { ...d.orig, duration: Math.max(MIN_CLIP_S, end - d.orig.start) };
+    } else {
+      // trim-l slips the in-point so content stays anchored; clamped so no
+      // source before 0 is revealed and at least one frame remains. Clips
+      // without a source (shot placeholders) have nothing to anchor: they
+      // extend freely to the timeline origin with in_point pinned at 0.
+      const lo = d.hasSource ? d.orig.start - d.orig.inPoint : 0;
+      const hi = d.orig.start + d.orig.duration - MIN_CLIP_S;
+      const rawNs = d.orig.start + dx;
+      const ns = Math.min(hi, Math.max(Math.max(0, lo), snap(rawNs) ?? rawNs));
+      const delta = ns - d.orig.start;
+      p = { start: ns, duration: d.orig.duration - delta, inPoint: d.hasSource ? d.orig.inPoint + delta : 0 };
+    }
     // The ref is the source of truth for the drop — dragPreview state can be
     // a frame stale on a fast release (continuous-priority updates).
-    d.previewStart = Math.max(0, d.origStart + (e.clientX - d.startX) / PX_PER_SEC);
-    setDragPreview({ clipId: d.clipId, start: d.previewStart });
+    d.preview = p;
+    setDragPreview({ clipId: d.clipId, start: p.start, duration: p.duration });
   };
+  const r2 = (n: number) => Math.round(n * 100) / 100;
   const onClipUp = () => {
     const d = dragRef.current;
     dragRef.current = null;
-    if (d && d.previewStart !== undefined && Math.abs(d.previewStart - d.origStart) > 0.01) {
-      doc.apply({ op_id: oid(), type: "move_clip", clip_id: d.clipId, start: Math.round(d.previewStart * 100) / 100 });
-    }
     setDragPreview(null);
+    if (!d?.preview) return;
+    const { mode, clipId, orig, preview: p } = d;
+    if (mode === "move" && Math.abs(p.start - orig.start) > 0.01) {
+      doc.apply({ op_id: oid(), type: "move_clip", clip_id: clipId, start: r2(p.start) });
+    } else if (mode === "trim-r" && Math.abs(p.duration - orig.duration) > 0.01) {
+      doc.apply({ op_id: oid(), type: "trim_clip", clip_id: clipId, duration: r2(p.duration) });
+    } else if (mode === "trim-l" && Math.abs(p.start - orig.start) > 0.01) {
+      doc.apply({
+        op_id: oid(),
+        type: "trim_clip",
+        clip_id: clipId,
+        start: r2(p.start),
+        duration: r2(p.duration),
+        in_point: r2(p.inPoint),
+      });
+    }
   };
 
   return (
@@ -176,6 +316,7 @@ export function TimelinePage(props: {
         <button className="btn secondary" onClick={() => setPicking("shots")}>⧉ Scene shots</button>
         <button className="btn secondary" disabled={!doc.canUndo} onClick={() => doc.undo()}>↩</button>
         <button className="btn secondary" disabled={!doc.canRedo} onClick={() => doc.redo()}>↪</button>
+        <button className="btn secondary" title="Blade at playhead (B)" onClick={blade}>🔪</button>
         <span className={`status${status === "error" ? " error" : ""}`}>{status === "saved" ? "saved" : status === "error" ? "save failed — ops kept locally" : "…"}</span>
       </div>
 
@@ -186,13 +327,13 @@ export function TimelinePage(props: {
         style={{ width: dur * PX_PER_SEC }}
         onPointerDown={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
-          setTime(Math.max(0, (e.clientX - r.left) / PX_PER_SEC));
+          seek(Math.max(0, (e.clientX - r.left) / PX_PER_SEC));
           capture(e);
         }}
         onPointerMove={(e) => {
           if (e.buttons !== 1) return;
           const r = e.currentTarget.getBoundingClientRect();
-          setTime(Math.max(0, (e.clientX - r.left) / PX_PER_SEC));
+          seek(Math.max(0, (e.clientX - r.left) / PX_PER_SEC));
         }}
       >
         {Array.from({ length: Math.ceil(dur) + 1 }, (_, i) => (
@@ -206,18 +347,30 @@ export function TimelinePage(props: {
           <div key={track.id} className={`tl-track tl-${track.kind}`} style={{ height: TRACK_H }}>
             <span className="tl-track-label">{track.name}</span>
             {track.clips.map((c) => {
-              const start = dragPreview?.clipId === c.id ? dragPreview.start : c.start;
+              const preview = dragPreview?.clipId === c.id ? dragPreview : undefined;
+              const start = preview?.start ?? c.start;
+              const width = (preview?.duration ?? c.duration) * PX_PER_SEC;
+              const handle = (mode: DragMode, cls: string) => (
+                <div
+                  className={`tl-handle ${cls}`}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    onClipDown(e, mode, c);
+                  }}
+                />
+              );
               return (
                 <div
                   key={c.id}
-                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${active?.id === c.id ? " tl-active" : ""}`}
-                  style={{ left: start * PX_PER_SEC, width: c.duration * PX_PER_SEC }}
-                  onPointerDown={(e) => onClipDown(e, c.id, c.start)}
+                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${active?.id === c.id ? " tl-active" : ""}${selected === c.id ? " tl-selected" : ""}`}
+                  style={{ left: start * PX_PER_SEC, width }}
+                  onPointerDown={(e) => onClipDown(e, "move", c)}
                   onPointerMove={onClipMove}
                   onPointerUp={onClipUp}
                   onPointerCancel={onClipUp}
                   title={`${c.name} · ${c.duration.toFixed(1)}s`}
                 >
+                  {handle("trim-l", "tl-handle-l")}
                   <span className="truncate">{c.shotId ? `🎬 ${c.name}` : c.name}</span>
                   <button
                     className="chip-x"
@@ -226,6 +379,7 @@ export function TimelinePage(props: {
                   >
                     ×
                   </button>
+                  {handle("trim-r", "tl-handle-r")}
                 </div>
               );
             })}
