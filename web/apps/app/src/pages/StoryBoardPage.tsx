@@ -4,12 +4,14 @@ import { JobState, type Shot } from "@iris/api-client";
 import { generationClient, storyClient } from "../api";
 import { VersionThumb } from "../components/AssetThumb";
 import { TakePicker } from "../components/TakePicker";
+import { truncate } from "./ScenePage";
 
 // Story board (UX doc §3.1): the writers'-room board — scenes as columns,
 // shots as cards with selected-take thumbs and state badges. Deferred from
 // the spec: continuity-chain arrows + chain inspector (chains land with the
-// carry-last-frame flow) and "Open in Timeline" (the timeline's Scene-shots
-// picker already covers assembly).
+// carry-last-frame flow), "Open in Timeline" (the timeline's Scene-shots
+// picker already covers assembly), cast chips on cards, hover-to-scrub
+// thumbs, and the set-status "⚠ no views" header treatment.
 export function StoryBoardPage(props: {
   projectId: string;
   onOpenScene: (sceneId: string) => void;
@@ -49,6 +51,7 @@ export function StoryBoardPage(props: {
   };
 
   if (scenes.isError) return <div className="status error">Couldn’t load the board: {String(scenes.error)}</div>;
+  if (scenes.isPending) return <div className="empty">Loading board…</div>;
 
   return (
     <div>
@@ -66,11 +69,11 @@ export function StoryBoardPage(props: {
         </button>
       </div>
       {createScene.isError && <div className="status error">{String(createScene.error)}</div>}
-      {scenes.data?.scenes.length === 0 && (
+      {scenes.data.scenes.length === 0 && (
         <div className="empty">No scenes yet — a scene is a place and a beat; shots live inside it.</div>
       )}
       <div className="board">
-        {scenes.data?.scenes.map((sc, i) => (
+        {scenes.data.scenes.map((sc, i) => (
           <SceneColumn
             key={sc.id}
             index={i}
@@ -118,10 +121,26 @@ function SceneColumn(props: {
   const reorder = useMutation({
     // Positions are plain ints with no server-side shifting: renumber every
     // shot whose position changed, then refetch the authoritative order.
+    // (Backlog: a transactional ReorderShots RPC — atomicity and 1 round
+    // trip instead of N.)
     mutationFn: async (ordered: Shot[]) => {
       for (const [i, sh] of ordered.entries()) {
         if (sh.position !== i) await storyClient.updateShot({ id: sh.id, position: i });
       }
+    },
+    // Optimistic: the card must land where it was dropped immediately, not
+    // snap back for the length of N round trips. cancelQueries also stops
+    // the 30s poll writing the pre-drop order back mid-renumber.
+    onMutate: async (ordered) => {
+      await qc.cancelQueries({ queryKey: ["scene", props.sceneId] });
+      const prev = qc.getQueryData<typeof scene.data>(["scene", props.sceneId]);
+      qc.setQueryData<typeof scene.data>(["scene", props.sceneId], (old) =>
+        old?.scene ? { ...old, scene: { ...old.scene, shots: ordered } } : old,
+      );
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev !== undefined) qc.setQueryData(["scene", props.sceneId], ctx.prev);
     },
     onSettled: () => void qc.invalidateQueries({ queryKey: ["scene", props.sceneId] }),
   });
@@ -131,14 +150,16 @@ function SceneColumn(props: {
   };
 
   const drop = () => {
-    if (dragId === null || dropIndex === null) return;
-    const from = shots.findIndex((s) => s.id === dragId);
+    const id = dragId;
+    const gap = dropIndex;
     setDragId(null);
     setDropIndex(null);
+    if (id === null || gap === null) return;
+    const from = shots.findIndex((s) => s.id === id);
     if (from === -1 || reorder.isPending) return;
-    // dropIndex is the gap index in the ORIGINAL list; removing the dragged
-    // card first shifts gaps after it down by one.
-    const to = dropIndex > from ? dropIndex - 1 : dropIndex;
+    // The gap index is in the ORIGINAL list; removing the dragged card
+    // first shifts gaps after it down by one.
+    const to = gap > from ? gap - 1 : gap;
     if (to === from) return;
     const next = [...shots];
     const [moved] = next.splice(from, 1);
@@ -153,7 +174,8 @@ function SceneColumn(props: {
           Scene {props.index + 1} · {props.name}
         </span>
         <span className="meta">
-          {scene.data?.scene?.views.length ?? 0} views · {shots.length} shots
+          {scene.isPending ? "…" : `${scene.data?.scene?.views.length ?? 0} views · ${shots.length} shots`}
+          {reorder.isPending ? " · reordering…" : ""}
         </span>
       </button>
       {scene.isError && <div className="status error">Scene failed to load.</div>}
@@ -164,7 +186,10 @@ function SceneColumn(props: {
           if (!dragId) return;
           e.preventDefault(); // required for drop to fire
         }}
-        onDrop={drop}
+        onDrop={(e) => {
+          e.preventDefault(); // with dragstart data set, default drop handling (e.g. link navigation) must not run
+          drop();
+        }}
         onDragLeave={(e) => {
           // Only clear when leaving the whole list, not moving between cards.
           if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropIndex(null);
@@ -179,6 +204,7 @@ function SceneColumn(props: {
               sceneId={props.sceneId}
               generating={props.generatingShots.has(sh.id)}
               dragging={dragId === sh.id}
+              dragActive={dragId !== null}
               onDragStart={() => setDragId(sh.id)}
               onDragEnd={() => {
                 setDragId(null);
@@ -188,7 +214,7 @@ function SceneColumn(props: {
               onGenerate={() =>
                 props.onGenerateForShot(
                   sh.id,
-                  `Shot ${i + 1}${sh.description ? ` · ${sh.description.slice(0, 40)}` : ""}`,
+                  `Shot ${i + 1}${sh.description ? ` · ${truncate(sh.description, 40)}` : ""}`,
                 )
               }
             />
@@ -216,6 +242,7 @@ function BoardShotCard(props: {
   sceneId: string;
   generating: boolean;
   dragging: boolean;
+  dragActive: boolean;
   onDragStart: () => void;
   onDragEnd: () => void;
   onDragOverCard: (before: boolean) => void;
@@ -228,13 +255,19 @@ function BoardShotCard(props: {
   return (
     <div
       className={`board-shot${props.dragging ? " board-dragging" : ""}`}
-      draggable
+      draggable={!pickingTakes /* a drag started inside the open modal would drag (and fade) the card */}
       onDragStart={(e) => {
+        // Firefox aborts drags with an empty data store — setData is load-bearing.
+        e.dataTransfer.setData("text/plain", sh.id);
         e.dataTransfer.effectAllowed = "move";
         props.onDragStart();
       }}
       onDragEnd={props.onDragEnd}
       onDragOver={(e) => {
+        // Only while THIS column owns a drag: unconditional preventDefault
+        // would advertise cross-column drops (unsupported) and accept
+        // foreign content (files, links) the drop handler ignores.
+        if (!props.dragActive) return;
         e.preventDefault();
         const r = e.currentTarget.getBoundingClientRect();
         props.onDragOverCard(e.clientY < r.top + r.height / 2);
