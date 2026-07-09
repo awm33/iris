@@ -5,7 +5,11 @@ import { AssetKind, type Asset } from "@iris/api-client";
 import { assetClient, storyClient, uploadFile } from "../api";
 import { StockPicker } from "../components/StockPicker";
 
-export function LibraryPage(props: { projectId?: string; onGenerate?: () => void }) {
+export function LibraryPage(props: {
+  projectId?: string;
+  onGenerate?: () => void;
+  onEditInCanvas?: (assetId: string) => void;
+}) {
   const qc = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
   const [stockOpen, setStockOpen] = useState(false);
@@ -56,16 +60,27 @@ export function LibraryPage(props: { projectId?: string; onGenerate?: () => void
         <div className="empty">Library is empty — upload an image, video, or audio file.</div>
       )}
       <div className="grid">
-        {assets.data?.assets.map((a) => <AssetCard key={a.id} asset={a} projectId={props.projectId} />)}
+        {assets.data?.assets.map((a) => (
+          <AssetCard key={a.id} asset={a} projectId={props.projectId} onEditInCanvas={props.onEditInCanvas} />
+        ))}
       </div>
       {stockOpen && props.projectId && <StockPicker projectId={props.projectId} onClose={() => setStockOpen(false)} />}
     </div>
   );
 }
 
-function AssetCard({ asset, projectId }: { asset: Asset; projectId?: string }) {
+function AssetCard({
+  asset,
+  projectId,
+  onEditInCanvas,
+}: {
+  asset: Asset;
+  projectId?: string;
+  onEditInCanvas?: (assetId: string) => void;
+}) {
   const qc = useQueryClient();
   const [promoting, setPromoting] = useState<"view" | "character" | null>(null);
+  const [openingCanvas, setOpeningCanvas] = useState(false);
   const isImage = asset.kind === AssetKind.IMAGE;
   const isVideo = asset.kind === AssetKind.VIDEO;
 
@@ -129,6 +144,18 @@ function AssetCard({ asset, projectId }: { asset: Asset; projectId?: string }) {
           <button className="btn secondary chip-add" onClick={() => setPromoting("character")}>
             → Character
           </button>
+          {onEditInCanvas && (
+            <button
+              className="btn secondary chip-add"
+              disabled={openingCanvas}
+              onClick={() => {
+                setOpeningCanvas(true);
+                onEditInCanvas(asset.id);
+              }}
+            >
+              {openingCanvas ? "…" : "🎨 Canvas"}
+            </button>
+          )}
         </div>
       )}
       {promoting === "view" && (

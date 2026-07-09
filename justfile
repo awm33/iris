@@ -21,7 +21,7 @@ check:
     cd backend && go vet ./... && go build ./... && go test ./...
     cd engine && cargo check --workspace && cargo test --workspace
     cd proto && buf lint
-    cd web && pnpm install --frozen-lockfile && pnpm typecheck
+    cd web && pnpm install --frozen-lockfile && pnpm typecheck && pnpm test
 
 # Check an inference endpoint against spec/inference-api.md (R&D runs this too)
 conformance url token="dev":

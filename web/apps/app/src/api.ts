@@ -1,6 +1,6 @@
 import { createClient } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
-import { AssetService, GenerationService, StoryService, WorkspaceService } from "@iris/api-client";
+import { AssetService, CanvasService, GenerationService, StoryService, WorkspaceService } from "@iris/api-client";
 
 // Same-origin; vite proxies /iris.v1* to the Go api in dev.
 const transport = createConnectTransport({ baseUrl: "/" });
@@ -9,6 +9,16 @@ export const workspaceClient = createClient(WorkspaceService, transport);
 export const assetClient = createClient(AssetService, transport);
 export const generationClient = createClient(GenerationService, transport);
 export const storyClient = createClient(StoryService, transport);
+export const canvasClient = createClient(CanvasService, transport);
+
+// keepalive lets a final autosave batch survive tab close/hide (browsers
+// kill ordinary fetches on unload). Only for small unload-time appends —
+// keepalive bodies are capped at 64KB by the platform.
+const keepaliveTransport = createConnectTransport({
+  baseUrl: "/",
+  fetch: (input, init) => fetch(input, { ...init, keepalive: true }),
+});
+export const canvasKeepaliveClient = createClient(CanvasService, keepaliveTransport);
 
 /** Full presigned upload flow: StartUpload → PUT bytes → CompleteUpload. */
 export async function uploadFile(file: File, projectId?: string) {

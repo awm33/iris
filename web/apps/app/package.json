@@ -16,6 +16,7 @@
     "react-dom": "^19.0.0",
     "zustand": "^5.0.0",
     "@iris/api-client": "workspace:*",
+    "@iris/doc-runtime": "workspace:*",
     "@bufbuild/protobuf": "^2.2.0"
   },
   "devDependencies": {

@@ -1,0 +1,17 @@
+{
+  "name": "@iris/doc-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Op-log document runtime (TDD §4): canvas op vocabulary, replay reducer, undo-as-op, autosave batching. Framework-free — the app injects transport.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

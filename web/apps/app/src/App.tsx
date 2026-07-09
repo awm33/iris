@@ -1,11 +1,14 @@
 // App shell: left-rail IA per docs/design/02-ui-ux-design.md §2.
-// Live: Projects, Scenes (+ scene detail), Characters, Library, Jobs, and the
-// Generate panel with shot targeting. Story board/Timelines/Canvases land
-// with M4–M5.
-import { useQuery } from "@tanstack/react-query";
+// Live: Projects, Scenes (+ scene detail), Characters, Canvases (+ canvas
+// editor), Library, Jobs, and the Generate panel with shot targeting.
+// Story board/Timelines land with M5.
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { JobState } from "@iris/api-client";
 import { generationClient } from "./api";
+import { CanvasesPage } from "./canvas/CanvasesPage";
+import { CanvasPage } from "./canvas/CanvasPage";
+import { createCanvasFromAsset } from "./canvas/createFromAsset";
 import { GeneratePanel, prefillFromRecipe, type GeneratePrefill } from "./components/GeneratePanel";
 import { CharactersPage } from "./pages/CharactersPage";
 import { JobsPage } from "./pages/JobsPage";
@@ -15,14 +18,17 @@ import { ScenePage } from "./pages/ScenePage";
 import { ScenesPage } from "./pages/ScenesPage";
 import { useEvents } from "./useEvents";
 
-type View = "projects" | "scenes" | "characters" | "library" | "jobs";
-const comingSoon = ["Story", "Timelines", "Canvases"] as const;
+type View = "projects" | "scenes" | "characters" | "canvases" | "library" | "jobs";
+const comingSoon = ["Story", "Timelines"] as const;
 
 export function App() {
   useEvents();
+  const qc = useQueryClient();
   const [view, setView] = useState<View>("projects");
   const [project, setProject] = useState<{ id: string; name: string }>();
   const [sceneId, setSceneId] = useState<string>();
+  const [canvasId, setCanvasId] = useState<string>();
+  const [canvasError, setCanvasError] = useState<string>();
   const [generating, setGenerating] = useState<
     { shotId: string; label: string; prefill?: GeneratePrefill; nonce: number } | true | false
   >(false);
@@ -55,10 +61,11 @@ export function App() {
       title={project ? undefined : "Open a project first"}
       onClick={() => {
         setView(v);
-        // Nav always returns Scenes to the list, and closes the generate
-        // panel: a shot-targeted panel surviving navigation would submit
-        // into a shot the user is no longer looking at.
+        // Nav always returns Scenes/Canvases to their lists, and closes the
+        // generate panel: a shot-targeted panel surviving navigation would
+        // submit into a shot the user is no longer looking at.
         setSceneId(undefined);
+        setCanvasId(undefined);
         setGenerating(false);
       }}
     >
@@ -80,6 +87,7 @@ export function App() {
         ))}
         {navButton("scenes", "Scenes")}
         {navButton("characters", "Characters")}
+        {navButton("canvases", "Canvases")}
         {navButton("library", "Library")}
         {navButton("jobs", activeJobs > 0 ? `Jobs ⟳${activeJobs}` : "Jobs")}
       </nav>
@@ -116,8 +124,47 @@ export function App() {
           />
         )}
         {view === "characters" && <CharactersPage projectId={project?.id} />}
+        {view === "canvases" && project && !canvasId && (
+          <>
+            {canvasError && <div className="status error">{canvasError}</div>}
+            <CanvasesPage projectId={project.id} onOpen={(id) => setCanvasId(id)} />
+          </>
+        )}
+        {view === "canvases" && project && canvasId && (
+          <CanvasPage
+            // Session identity is per-canvas: never reuse a mounted editor
+            // across canvas ids.
+            key={canvasId}
+            canvasId={canvasId}
+            projectId={project.id}
+            onBack={() => {
+              setCanvasId(undefined);
+              void qc.invalidateQueries({ queryKey: ["canvases"] });
+            }}
+          />
+        )}
         {view === "library" && (
-          <LibraryPage projectId={project?.id} onGenerate={project ? () => setGenerating(true) : undefined} />
+          <LibraryPage
+            projectId={project?.id}
+            onGenerate={project ? () => setGenerating(true) : undefined}
+            onEditInCanvas={
+              project
+                ? (assetId) => {
+                    setCanvasError(undefined);
+                    createCanvasFromAsset(project.id, assetId)
+                      .then((id) => {
+                        setCanvasId(id);
+                        setView("canvases");
+                        setGenerating(false);
+                      })
+                      .catch((e) => {
+                        setCanvasError(`Couldn’t open in canvas: ${String(e)}`);
+                        setView("canvases");
+                      });
+                  }
+                : undefined
+            }
+          />
         )}
         {view === "jobs" && <JobsPage projectId={project?.id} />}
       </main>

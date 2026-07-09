@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package iris.v1;
+
+import "iris/v1/common.proto";
+
+option go_package = "github.com/awm33/iris/backend/gen/iris/v1;irisv1";
+
+// Canvas documents (Image Studio, M4). A canvas is an op-log document:
+// clients append typed ops (brush strokes, layer edits…) and rebuild state
+// by replay. The server assigns gapless per-doc sequence numbers and is the
+// single ordering authority; op *payloads* are a client-owned vocabulary
+// carried as JSON strings so the op design can iterate without proto churn
+// (contracts-as-working-drafts). The server validates shape and size only —
+// payload semantics live in web/packages/doc-runtime.
+
+message Canvas {
+  string id = 1;
+  string project_id = 2;
+  string doc_id = 3;
+  string name = 4;
+  int32 width = 5;
+  int32 height = 6;
+  // Seq of the last appended op. Clients pass this back as base_seq when
+  // appending (optimistic concurrency).
+  int64 head_seq = 7;
+  Timestamps timestamps = 15;
+}
+
+message DocOp {
+  int64 seq = 1;
+  string actor_id = 2;
+  // JSON object with at least {"op_id": "<client ulid>", "type": "<op type>"}.
+  string payload = 3;
+}
+
+service CanvasService {
+  rpc CreateCanvas(CreateCanvasRequest) returns (CreateCanvasResponse);
+  rpc ListCanvases(ListCanvasesRequest) returns (ListCanvasesResponse);
+  // Returns metadata plus ops with seq > after_seq (capped; page by
+  // re-requesting with the last seq received until head_seq is reached).
+  rpc GetCanvas(GetCanvasRequest) returns (GetCanvasResponse);
+  // Appends ops after base_seq. Fails with ABORTED when base_seq no longer
+  // matches head_seq — the client must refetch and replay before retrying.
+  rpc AppendOps(AppendOpsRequest) returns (AppendOpsResponse);
+  rpc UpdateCanvas(UpdateCanvasRequest) returns (UpdateCanvasResponse);
+  rpc DeleteCanvas(DeleteCanvasRequest) returns (DeleteCanvasResponse);
+}
+
+message CreateCanvasRequest {
+  string project_id = 1;
+  string name = 2;
+  int32 width = 3;  // 16..16384
+  int32 height = 4; // 16..16384
+}
+
+message CreateCanvasResponse {
+  Canvas canvas = 1;
+}
+
+message ListCanvasesRequest {
+  string project_id = 1;
+}
+
+message ListCanvasesResponse {
+  repeated Canvas canvases = 1;
+}
+
+message GetCanvasRequest {
+  string id = 1;
+  int64 after_seq = 2;
+}
+
+message GetCanvasResponse {
+  Canvas canvas = 1;
+  repeated DocOp ops = 2;
+}
+
+message AppendOpsRequest {
+  string canvas_id = 1;
+  int64 base_seq = 2;
+  repeated string payloads = 3; // JSON op objects; ≤200 per call, ≤64KB each
+}
+
+message AppendOpsResponse {
+  int64 head_seq = 1;
+}
+
+message UpdateCanvasRequest {
+  string id = 1;
+  string name = 2;
+}
+
+message UpdateCanvasResponse {
+  Canvas canvas = 1;
+}
+
+message DeleteCanvasRequest {
+  string id = 1;
+}
+
+message DeleteCanvasResponse {}

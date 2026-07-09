@@ -110,6 +110,10 @@ func connectErr(err error) error {
 			return connect.NewError(connect.CodeInvalidArgument, errors.New("referenced entity does not exist"))
 		case "23505":
 			return connect.NewError(connect.CodeAlreadyExists, errors.New("already exists"))
+		case "22P05":
+			// jsonb rejects escaped NUL (Go's JSON accepts it) — a client
+			// error, and one a client must not blind-retry.
+			return connect.NewError(connect.CodeInvalidArgument, errors.New("text contains characters postgres cannot store (\\u0000)"))
 		}
 	}
 	return connect.NewError(connect.CodeInternal, err)
