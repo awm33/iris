@@ -306,7 +306,7 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	}
 
 	for _, ref := range req.References {
-		url, err := o.resolveRefURL(ctx, &ref)
+		url, err := o.resolveRefURL(ctx, &ref, "")
 		if err != nil {
 			return nil, "", err
 		}
@@ -316,18 +316,20 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	}
 
 	// Conditioning inputs resolve exactly like references: pin-or-head asset
-	// refs signed at dispatch time.
+	// refs signed at dispatch time. Kind IS validated here — a video version
+	// as a mask would otherwise burn every retry attempt on an endpoint
+	// decode failure before parking mislabeled "internal".
 	if c := req.Conditioning; c != nil {
 		infReq.Conditioning = &inference.Conditioning{}
 		if c.SourceImage != nil {
-			url, err := o.resolveRefURL(ctx, c.SourceImage)
+			url, err := o.resolveRefURL(ctx, c.SourceImage, "image/")
 			if err != nil {
 				return nil, "", err
 			}
 			infReq.Conditioning.SourceImage = &inference.FrameRef{URL: url}
 		}
 		if c.Mask != nil {
-			url, err := o.resolveRefURL(ctx, c.Mask)
+			url, err := o.resolveRefURL(ctx, c.Mask, "image/")
 			if err != nil {
 				return nil, "", err
 			}
@@ -348,8 +350,10 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 }
 
 // resolveRefURL turns a stored asset ref into a signed GET URL, resolving
-// float-to-head at dispatch time (HLD pin-vs-float).
-func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef) (string, error) {
+// float-to-head at dispatch time (HLD pin-vs-float). A non-empty
+// wantCTPrefix constrains the version's content type (ValidationError →
+// invalid_input park, no retries).
+func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef, wantCTPrefix string) (string, error) {
 	versionID := ref.VersionID
 	if versionID == "" {
 		a, _, err := o.Store.GetAsset(ctx, ref.AssetID)
@@ -361,6 +365,10 @@ func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef) (st
 	info, err := o.Store.GetVersionObjectInfo(ctx, versionID)
 	if err != nil {
 		return "", &inference.ValidationError{Msg: fmt.Sprintf("reference version %s not found", versionID)}
+	}
+	if wantCTPrefix != "" && !strings.HasPrefix(info.ContentType, wantCTPrefix) {
+		return "", &inference.ValidationError{Msg: fmt.Sprintf(
+			"input %s is %s — want %s*", versionID, info.ContentType, wantCTPrefix)}
 	}
 	url, err := o.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
 	if err != nil {
@@ -453,6 +461,22 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 			VALUES ($1, $2, 'reference_of')
 			ON CONFLICT DO NOTHING`, ref.VersionID, job.ID); err != nil {
 			return err
+		}
+	}
+	// Conditioning inputs (gen-fill source + mask) get the same treatment —
+	// "what conditioned it" must be walkable from the graph, not only
+	// recoverable by parsing the job-row request JSON.
+	if req.Conditioning != nil {
+		for _, ref := range []*store.GenRef{req.Conditioning.SourceImage, req.Conditioning.Mask} {
+			if ref == nil || ref.VersionID == "" {
+				continue
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO asset_links (from_version_id, to_entity_id, role)
+				VALUES ($1, $2, 'conditioning_frame_of')
+				ON CONFLICT DO NOTHING`, ref.VersionID, job.ID); err != nil {
+				return err
+			}
 		}
 	}
 	// Probe for BOTH modalities: it is the sole trusted source of

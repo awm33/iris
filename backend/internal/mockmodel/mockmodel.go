@@ -24,6 +24,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"image"
@@ -113,6 +114,10 @@ type createRequest struct {
 type urlRef struct {
 	URL string `json:"url"`
 }
+
+// errInvalidInput marks failures caused by the CALLER's inputs (unfetchable
+// or undecodable conditioning) — spec §4: invalid_input, not retryable.
+var errInvalidInput = errors.New("invalid input")
 
 // Handler returns the mock endpoint as an http.Handler (mountable under
 // httptest for in-process conformance runs).
@@ -219,6 +224,13 @@ func (s *server) run(j *job, req createRequest) {
 	}
 	art, err := s.makeAndUploadArtifact(req)
 	if err != nil {
+		// Taxonomy matters — this is the reference implementation R&D
+		// conforms against: undecodable/unfetchable INPUTS are the caller's
+		// problem (invalid_input, no retry); only the artifact PUT is ours.
+		if errors.Is(err, errInvalidInput) {
+			s.fail(j, "invalid_input", err.Error(), false)
+			return
+		}
 		s.fail(j, "internal", fmt.Sprintf("artifact upload: %v", err), true)
 		return
 	}
@@ -290,11 +302,11 @@ func (s *server) makeAndUploadArtifact(req createRequest) (artifact, error) {
 func (s *server) inpaintPNG(req createRequest) ([]byte, int, int, error) {
 	src, err := s.fetchImage(req.Conditioning.SourceImage.URL)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("source_image: %w", err)
+		return nil, 0, 0, fmt.Errorf("%w: source_image: %v", errInvalidInput, err)
 	}
 	mask, err := s.fetchImage(req.Conditioning.Mask.URL)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("mask: %w", err)
+		return nil, 0, 0, fmt.Errorf("%w: mask: %v", errInvalidInput, err)
 	}
 
 	b := src.Bounds()
@@ -313,6 +325,9 @@ func (s *server) inpaintPNG(req createRequest) ([]byte, int, int, error) {
 		my := mb.Min.Y + y*mb.Dy()/h // nearest-neighbor sampling if dims differ
 		for x := 0; x < w; x++ {
 			mx := mb.Min.X + x*mb.Dx()/w
+			// RGBA() is alpha-premultiplied: a white-but-transparent mask
+			// pixel reads as "preserve" — fine for opaque masks (the only
+			// kind Iris emits), noted so parity tests don't chase it.
 			r, g, bl, _ := mask.At(mx, my).RGBA()
 			if (r+g+bl)/3 > 0x7fff { // white = generate
 				c := c1

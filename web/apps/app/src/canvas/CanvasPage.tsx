@@ -199,12 +199,24 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         }
         return;
       }
-      if (e.key === "Escape" && selection) setSelection(undefined);
+      // Esc never clears the selection while a gen-fill is in flight — the
+      // vanishing marching ants would read as a cancel the flow didn't do.
+      if (e.key === "Escape" && selection && !genFill) setSelection(undefined);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  // Gen-fill stances, stated once (v1, single-user):
+  // - Navigating away mid-generation cancels nothing: the job completes and
+  //   its candidates land in the Library (reachable via Jobs), but the
+  //   choosing UI does not reattach on return.
+  // - Editing while generating is allowed; the eventual commit is a masked
+  //   layer over the doc AS IT IS THEN — "fill this region as it was when I
+  //   asked". Strokes painted inside the selection meanwhile end up occluded
+  //   (undo or hide-layer reveals them).
+  // - Esc in choosing returns to the prompt bar with the selection armed
+  //   (retry loop); a second Esc clears the selection.
   // Gen-fill capable endpoints (manifest-negotiated).
   const endpoints = useQuery({
     queryKey: ["endpoints"],
@@ -234,6 +246,11 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         candidates: j.artifactVersionIds,
         index: 0,
       });
+    } else if (j.state === JobState.COMPLETE) {
+      // Terminal with nothing to choose — without this branch the poll would
+      // spin on a complete job forever with the UI stuck at "Generating…".
+      setGenFillError("generation completed without candidates");
+      setGenFill(undefined);
     } else if (j.state === JobState.FAILED || j.state === JobState.CANCELED) {
       setGenFillError(j.errorMessage || `generation ${j.state === JobState.FAILED ? "failed" : "was canceled"}`);
       setGenFill(undefined);
@@ -269,10 +286,14 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   };
 
   // Flatten the current composite to a PNG File (shared by export, gen-fill
-  // source, and promote-to-View). Throws while image layers are loading.
+  // source, and promote-to-View). Throws while image layers are loading —
+  // masks included: the renderer draws a masked layer only when BOTH are
+  // loaded, so a missing mask would silently drop the whole layer from the
+  // flatten.
   async function flattenToFile(suffix: string): Promise<File> {
+    const notLoaded = (versionId?: string) => versionId && !images.current.get(versionId)?.loaded;
     const stillLoading = doc.state.layers.some(
-      (l) => l.kind === "image" && l.visible && l.versionId && !images.current.get(l.versionId)?.loaded,
+      (l) => l.kind === "image" && l.visible && (notLoaded(l.versionId) || notLoaded(l.maskVersionId)),
     );
     if (stillLoading) throw new Error("layer images are still loading — try again in a moment");
     await session!.sync.flush();
@@ -283,7 +304,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   }
 
   async function submitGenFill(prompt: string, count: number, ep: GenFillEndpoint) {
-    if (!selection) return;
+    // The genFill guard doubles as a re-entrancy lock: a second submit would
+    // overwrite the first job's id — never polled, never cancelable, billed.
+    if (!selection || genFill) return;
     setGenFillError(undefined);
     setGenFill({ phase: "submitting" });
     try {
@@ -344,11 +367,14 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   }
 
   async function discardGenFill() {
-    if (genFill?.phase === "generating") {
-      // Best-effort: stop paying for candidates nobody will look at.
-      await generationClient.cancelJob({ id: genFill.jobId }).catch(() => {});
-    }
+    const jobId = genFill?.phase === "generating" ? genFill.jobId : undefined;
+    // Clear state BEFORE the cancel roundtrip: if the poll fetches CANCELED
+    // mid-await, the effect would surface the user's own cancel as an error.
     setGenFill(undefined);
+    if (jobId) {
+      // Best-effort: stop paying for candidates nobody will look at.
+      await generationClient.cancelJob({ id: jobId }).catch(() => {});
+    }
   }
 
   async function promoteToView(sceneId: string) {

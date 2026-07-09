@@ -102,7 +102,7 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 		TargetEntityID: j.TargetEntityId,
 		CostEstimate:   ep.Manifest.Pricing.Estimates[j.Profile] * float64(count),
 	}
-	if _, err := s.Store.CreateGenerationFanout(ctx, parent, count); err != nil {
+	if _, err := s.Store.CreateGenerationFanout(ctx, parent, count, ep.Manifest.Features.Seed); err != nil {
 		return nil, connectErr(err)
 	}
 	created, err := s.Store.GetGenJob(ctx, parent.ID)
@@ -328,7 +328,13 @@ func (s *GenerationServer) RetryJob(ctx context.Context, req *connect.Request[ir
 		TargetEntityID: prev.TargetEntityID,
 		CostEstimate:   prev.CostEstimate,
 	}
-	if _, err := s.Store.CreateGenerationFanout(ctx, parent, count); err != nil {
+	// Same seed-resolution rule as CreateJob; an endpoint gone from the
+	// registry resolves conservatively (seeds stay random-at-endpoint).
+	resolveSeeds := false
+	if ep, ok := s.Registry.Get(prev.EndpointID); ok && ep.Manifest != nil {
+		resolveSeeds = ep.Manifest.Features.Seed
+	}
+	if _, err := s.Store.CreateGenerationFanout(ctx, parent, count, resolveSeeds); err != nil {
 		return nil, connectErr(err)
 	}
 	created, err := s.Store.GetGenJob(ctx, parent.ID)
@@ -402,6 +408,23 @@ func genJobPB(j *store.GenJob) *irisv1.GenerationJob {
 	}
 	if len(genReq.Params) > 0 {
 		pb.ParamsJson = string(genReq.Params)
+	}
+	// Echo the full recipe: a client must be able to reconstruct (and
+	// re-submit) a job from GetJob alone.
+	for _, r := range genReq.References {
+		pb.References = append(pb.References, &irisv1.Reference{
+			Kind: r.Kind, Role: r.Role, Weight: r.Weight,
+			Asset: &irisv1.AssetRef{AssetId: r.AssetID, VersionId: r.VersionID},
+		})
+	}
+	if c := genReq.Conditioning; c != nil {
+		pb.Conditioning = &irisv1.Conditioning{}
+		if c.SourceImage != nil {
+			pb.Conditioning.SourceImage = &irisv1.AssetRef{AssetId: c.SourceImage.AssetID, VersionId: c.SourceImage.VersionID}
+		}
+		if c.Mask != nil {
+			pb.Conditioning.Mask = &irisv1.AssetRef{AssetId: c.Mask.AssetID, VersionId: c.Mask.VersionID}
+		}
 	}
 	return pb
 }

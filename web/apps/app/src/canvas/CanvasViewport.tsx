@@ -49,7 +49,12 @@ export function CanvasViewport(props: {
     size: number;
   } | null>(null);
   const panning = useRef<{ startX: number; startY: number; vtX: number; vtY: number } | null>(null);
-  const selecting = useRef<{ kind: "rect"; anchor: [number, number] } | { kind: "lasso" } | null>(null);
+  // Gesture-owned selection points: accumulating through props.selection
+  // would read back a render-stale array and drop points between frames
+  // (state read-modify-write across the async render boundary).
+  const selecting = useRef<
+    { kind: "rect"; anchor: [number, number] } | { kind: "lasso"; points: [number, number][] } | null
+  >(null);
 
   // Strokes split at this many points: a single unbounded scribble would
   // blow the server's 64KB per-op cap and poison the save queue.
@@ -181,7 +186,7 @@ export function CanvasViewport(props: {
         selecting.current = { kind: "rect", anchor: pt };
         propsRef.current.onSelectionChange?.({ kind: "rect", x: pt[0], y: pt[1], w: 0, h: 0 });
       } else {
-        selecting.current = { kind: "lasso" };
+        selecting.current = { kind: "lasso", points: [pt] };
         propsRef.current.onSelectionChange?.({ kind: "lasso", points: [pt] });
       }
       return;
@@ -281,10 +286,12 @@ export function CanvasViewport(props: {
           w: Math.abs(pt[0] - ax),
           h: Math.abs(pt[1] - ay),
         });
-      } else if (p.selection?.kind === "lasso") {
-        const last = p.selection.points[p.selection.points.length - 1];
+      } else {
+        const pts = selecting.current.points;
+        const last = pts[pts.length - 1];
         if (Math.hypot(pt[0] - last[0], pt[1] - last[1]) >= 2) {
-          p.onSelectionChange?.({ kind: "lasso", points: [...p.selection.points, pt] });
+          pts.push(pt);
+          p.onSelectionChange?.({ kind: "lasso", points: [...pts] });
         }
       }
       requestDraw();

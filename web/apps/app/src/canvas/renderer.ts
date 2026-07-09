@@ -86,14 +86,19 @@ export class LayerRasterCache {
       // of nothing.
       const mask = layer.maskVersionId ? this.getImage(layer.maskVersionId) : null;
       if (img && (!layer.maskVersionId || mask)) {
-        // Natural size, no stretch: the canvas is sized to the version's
-        // dims on creation, and a dims-less fallback must not distort.
-        e.ctx.drawImage(img, 0, 0);
         if (mask) {
+          // Masked (gen-fill) layers map candidate AND mask to doc dims —
+          // real endpoints may round output dims, and a natural-size draw
+          // under a doc-stretched mask would misalign.
+          e.ctx.drawImage(img, 0, 0, this.docW, this.docH);
           e.ctx.save();
           e.ctx.globalCompositeOperation = "destination-in";
           e.ctx.drawImage(this.alphaMask(layer.maskVersionId!, mask), 0, 0, this.docW, this.docH);
           e.ctx.restore();
+        } else {
+          // Natural size, no stretch: the canvas is sized to the version's
+          // dims on creation, and a dims-less fallback must not distort.
+          e.ctx.drawImage(img, 0, 0);
         }
         e.imageDrawn = true;
       }
@@ -161,13 +166,20 @@ export class LayerRasterCache {
   }
 
   /** Drop rasters for layers no longer in the doc (a 1080p layer holds ~8MB;
-   * an undo of remove_layer just rebuilds from ops). */
+   * an undo of remove_layer just rebuilds from ops). No size-based early-out:
+   * hidden layers never get entries, so counting would let discarded
+   * gen-fill preview rasters leak. Alpha masks are pruned alongside. */
   evict(state: CanvasDocState) {
-    if (this.entries.size <= state.layers.length) return;
     const keep = new Set(state.layers.map((l) => l.id));
     if (this.live) keep.add(this.live.layerId);
     for (const id of [...this.entries.keys()]) {
       if (!keep.has(id)) this.entries.delete(id);
+    }
+    if (this.alphaMasks.size > 0) {
+      const keepMasks = new Set(state.layers.map((l) => l.maskVersionId).filter(Boolean));
+      for (const id of [...this.alphaMasks.keys()]) {
+        if (!keepMasks.has(id)) this.alphaMasks.delete(id);
+      }
     }
   }
 }
