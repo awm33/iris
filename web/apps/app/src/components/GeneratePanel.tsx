@@ -134,31 +134,35 @@ export function GeneratePanel(props: {
     enabled: !!targetShot.data?.shot?.sceneId,
     queryFn: () => storyClient.getScene({ id: targetShot.data!.shot!.sceneId }),
   });
-  // The carry input is the upstream take's last-frame PREP artifact; probe
-  // its availability so the default-on chip can't submit before prep lands
-  // (server-side that's a transient retry, but the panel shouldn't fire
-  // jobs it knows aren't ready). Polls every 3s while missing. Known gap:
-  // an IMAGE take never grows a last_frame, so its chip stays "preparing" —
-  // image-take carry lands with explicit shot-clip source binding.
+  // The carry input: a VIDEO upstream take's last-frame PREP artifact
+  // (probed below so the default-on chip can't submit before prep lands —
+  // server-side that's a transient retry, but the panel shouldn't fire
+  // jobs it knows aren't ready; polls every 3s while missing). An IMAGE
+  // take needs no prep — the orchestrator uses it as-is, ready instantly.
   const carrySource = useMemo(() => {
     const me = targetShot.data?.shot;
     const shots = carryScene.data?.scene?.shots;
     if (!me || !shots) return undefined;
-    let best: { label: string; versionId: string } | undefined;
+    let best: { label: string; versionId: string; isImage: boolean } | undefined;
     for (const [i, sh] of shots.entries()) {
       if (sh.position >= me.position || sh.id === me.id) continue;
-      if (sh.selectedTakeVersionId) best = { label: `Shot ${i + 1}`, versionId: sh.selectedTakeVersionId };
+      if (sh.selectedTakeVersionId)
+        best = {
+          label: `Shot ${i + 1}`,
+          versionId: sh.selectedTakeVersionId,
+          isImage: (sh.selectedTakeContentType ?? "").startsWith("image/"),
+        };
     }
     return best;
   }, [targetShot.data, carryScene.data]);
   const carryProbe = useQuery({
     queryKey: ["lastFrameReady", carrySource?.versionId],
-    enabled: !!carrySource,
+    enabled: !!carrySource && !carrySource.isImage,
     retry: false,
     refetchInterval: (q) => (q.state.status === "error" ? 3000 : false),
     queryFn: () => assetClient.signDownload({ versionId: carrySource!.versionId, variant: "last_frame" }),
   });
-  const carryReady = carryProbe.isSuccess;
+  const carryReady = carrySource?.isImage || carryProbe.isSuccess;
 
   const activeTask = task && manifest?.tasks.includes(task) ? task : manifest?.tasks[0];
   // "draft" is convention, not contract — fall back to the manifest's first
@@ -266,9 +270,9 @@ export function GeneratePanel(props: {
       <PanelHeader onClose={props.onClose} />
       {props.target && <div className="target-chip">Target: {props.target.label}</div>}
       {props.target && isVideo && manifest.conditioning?.first_frame === true && carrySource && (
-        <label className="carry-chip" title="Sends the upstream take's last frame as first_frame conditioning">
+        <label className="carry-chip" title={carrySource.isImage ? "Sends the upstream take (a still) as first_frame conditioning" : "Sends the upstream take's last frame as first_frame conditioning"}>
           <input type="checkbox" checked={carry && carryReady} disabled={!carryReady} onChange={(e) => setCarry(e.target.checked)} />
-          ⛓ Continue from {carrySource.label}’s last frame
+          ⛓ Continue from {carrySource.label}’s {carrySource.isImage ? "frame" : "last frame"}
           {!carryReady && <span className="meta"> (preparing frame…)</span>}
         </label>
       )}

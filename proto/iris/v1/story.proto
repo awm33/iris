@@ -62,6 +62,9 @@ message Shot {
   // Resolved server-side so shot cards render their face without a per-shot
   // ListTakes round trip.
   string selected_take_version_id = 12;
+  // The selected take's content type (e.g. video/mp4, image/png) — preview
+  // surfaces branch on modality (image takes render stills, not <video>).
+  string selected_take_content_type = 13;
   Timestamps timestamps = 15;
 }
 

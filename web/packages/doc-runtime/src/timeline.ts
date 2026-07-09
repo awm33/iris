@@ -157,7 +157,16 @@ export function timelineDuration(state: TimelineState): number {
  * null when t isn't strictly inside the clip or a side would collapse below
  * one frame. NOTE: a blade is two ops, so it takes two undos to fully revert
  * — op grouping is a future vocabulary change if that stings in practice. */
-export function bladeOps(state: TimelineState, clipId: string, t: number, newClipId: string): TimelineOp[] | null {
+export function bladeOps(
+  state: TimelineState,
+  clipId: string,
+  t: number,
+  newClipId: string,
+  // Shot clips have no version_id, but once a take is SELECTED they have a
+  // real source — the caller passes that resolution knowledge so the right
+  // half keeps source continuity instead of restarting the take at 0.
+  hasSource?: boolean,
+): TimelineOp[] | null {
   // Round the cut point once so both halves abut exactly and the raw
   // playhead float never reaches the persisted log.
   const rt = Math.round(t * 100) / 100;
@@ -182,7 +191,7 @@ export function bladeOps(state: TimelineState, clipId: string, t: number, newCli
           // Placeholders have no source: content anchoring is meaningless,
           // and a nonzero in_point would skew their left-trim clamp.
           duration: right,
-          in_point: clip.versionId ? clip.inPoint + left : 0,
+          in_point: (hasSource ?? !!clip.versionId) ? clip.inPoint + left : 0,
         },
       },
     ];

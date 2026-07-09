@@ -263,7 +263,12 @@ export function TimelinePage(props: {
     };
     const target = inSel(selectedRef.current) ?? clipAt(st, t, "video") ?? clipAt(st, t, "audio");
     if (!target) return;
-    const ops = bladeOps(st, target.id, t, `cl_${oid().slice(3)}`);
+    // Resolved shot clips have a real source: the right half continues the
+    // take instead of restarting it (via the ref — blade is declared above
+    // the resolution hooks).
+    const hasSource =
+      !!target.versionId || !!(target.shotId && takeByShotRef.current.get(target.shotId));
+    const ops = bladeOps(st, target.id, t, `cl_${oid().slice(3)}`, hasSource);
     if (ops) for (const op of ops) bdoc.apply(op);
   };
   // Assigned in an effect, not during render: a discarded concurrent render
@@ -292,27 +297,54 @@ export function TimelinePage(props: {
       queryKey: ["shot", id],
       queryFn: () => storyClient.getShot({ id }),
       staleTime: 30_000,
-      // The fan-out lookup only serves the engine preview; PreviewPane
-      // resolves its single active shot itself.
-      enabled: engineOn,
+      // NOT gated on the engine toggle: resolution knowledge also drives
+      // GESTURE semantics (source-aware blade/trim). A blade in <video>
+      // fallback mode must not persist in_point 0 for a resolved shot —
+      // that writes duplicated-content halves into the op log.
     })),
   });
-  const takeKey = shotQueries.map((q) => q.data?.shot?.selectedTakeVersionId ?? (q.isPending ? "?" : "")).join(",");
+  const takeKey = shotQueries
+    .map((q) => `${q.data?.shot?.selectedTakeVersionId ?? (q.isPending ? "?" : "")}:${q.data?.shot?.selectedTakeContentType ?? ""}`)
+    .join(",");
+  // shotId → resolved take {versionId, contentType}. Consumed by segments,
+  // gestures (source-aware blade/trim on resolved shots) and the image-
+  // take overlay.
+  const takeByShot = useMemo(
+    () =>
+      new Map(
+        shotIds.map((id, i) => [
+          id,
+          shotQueries[i].data?.shot?.selectedTakeVersionId
+            ? {
+                versionId: shotQueries[i].data!.shot!.selectedTakeVersionId,
+                contentType: shotQueries[i].data!.shot!.selectedTakeContentType || "video/mp4",
+              }
+            : undefined,
+        ]),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shotIds, takeKey],
+  );
+  const takeByShotRef = useRef(takeByShot);
+  useEffect(() => {
+    takeByShotRef.current = takeByShot;
+  });
   // Stable identity while nothing resolved changes: the EngineCanvas
   // effect keys on this array, and a fresh array per render would spawn
   // paused re-decodes on every drag-preview / autosave status tick.
   const segments: Segment[] = useMemo(() => {
-    const takeByShot = new Map(shotIds.map((id, i) => [id, shotQueries[i].data?.shot?.selectedTakeVersionId || undefined]));
     return videoClips.flatMap((c) => {
-      const sourceId = c.versionId ?? (c.shotId ? takeByShot.get(c.shotId) : undefined);
+      const take = c.shotId ? takeByShot.get(c.shotId) : undefined;
+      // Image takes render as stills (overlay), never as decode segments.
+      const sourceId = c.versionId ?? (take?.contentType.startsWith("video/") ? take.versionId : undefined);
       return sourceId ? [{ sourceId, startS: c.start, durationS: c.duration, inPointS: c.inPoint }] : [];
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoClips, shotIds, takeKey]);
+  }, [videoClips, takeByShot]);
   const shotSettled = useMemo(
-    () => new Map(shotIds.map((id, i) => [id, !shotQueries[i].isPending || !engineOn])),
+    () => new Map(shotIds.map((id, i) => [id, !shotQueries[i].isPending])),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shotIds, takeKey, engineOn],
+    [shotIds, takeKey],
   );
   const srcFor = (versionId: string) =>
     qc.fetchQuery({
@@ -384,7 +416,7 @@ export function TimelinePage(props: {
   const onClipDown = (
     e: React.PointerEvent,
     mode: DragMode,
-    c: { id: string; start: number; duration: number; inPoint: number; versionId?: string },
+    c: { id: string; start: number; duration: number; inPoint: number; versionId?: string; shotId?: string },
   ) => {
     select(c.id);
     if (e.button !== 0) return; // right-click opens the context menu, which can swallow pointerup
@@ -392,7 +424,9 @@ export function TimelinePage(props: {
       mode,
       clipId: c.id,
       startX: e.clientX,
-      hasSource: !!c.versionId,
+      // A resolved shot clip trims like media: its selected take is a real
+      // source (in-point slip + no-reveal-before-0 clamp apply).
+      hasSource: !!c.versionId || !!(c.shotId && takeByShotRef.current.get(c.shotId)),
       orig: { start: c.start, duration: c.duration, inPoint: c.inPoint },
     };
     capture(e);
@@ -500,8 +534,12 @@ export function TimelinePage(props: {
         <div className="tl-preview">
           <EngineCanvas segments={segments} time={time} playing={playing} srcFor={srcFor} onError={setEngineError} />
           {engineError && <div className="tl-preview-note">{engineError}</div>}
+          {active?.shotId && takeByShot.get(active.shotId)?.contentType.startsWith("image/") && (
+            <StillOverlay versionId={takeByShot.get(active.shotId)!.versionId} />
+          )}
           {active?.shotId &&
             shotSettled.get(active.shotId) !== false &&
+            !takeByShot.get(active.shotId) &&
             !segments.some((sg) => time >= sg.startS && time < sg.startS + sg.durationS) && (
               <div className="tl-preview-shot tl-preview-overlay">
                 <div className="meta">🎬 {active.name} — no take selected</div>
@@ -640,6 +678,34 @@ export function TimelinePage(props: {
   );
 }
 
+/** Image-take spans in engine mode: the take is a still — paint it above
+ * the (blank) canvas for its whole duration. Owns its queryFn: wrapping
+ * srcFor (a fetchQuery on the SAME key) would await its own in-flight
+ * promise and never resolve. */
+function StillOverlay(props: { versionId: string }) {
+  const still = useQuery({
+    queryKey: ["previewSrc", props.versionId],
+    staleTime: 5 * 60_000,
+    retry: false,
+    queryFn: async () => {
+      try {
+        return (await assetClient.signDownload({ versionId: props.versionId, variant: "proxy" })).url;
+      } catch {
+        return (await assetClient.signDownload({ versionId: props.versionId })).url;
+      }
+    },
+  });
+  const qc = useQueryClient();
+  return still.data ? (
+    <img
+      className="tl-still"
+      src={still.data}
+      alt=""
+      onError={() => void qc.invalidateQueries({ queryKey: ["previewSrc", props.versionId] })}
+    />
+  ) : null;
+}
+
 /** Clip under the playhead. Media clips play/seek the proxy; shot clips
  * resolve their selected take (GetShot → selected_take_version_id) and play
  * it like media, falling back to the generate-into-slot placeholder. While
@@ -677,6 +743,7 @@ function PreviewPane(props: {
     queryFn: () => storyClient.getShot({ id: c!.shotId! }),
   });
   const versionId = c?.versionId || shotQ.data?.shot?.selectedTakeVersionId || undefined;
+  const isImageTake = !c?.versionId && (shotQ.data?.shot?.selectedTakeContentType ?? "").startsWith("image/");
 
   const srcQ = useQuery({
     queryKey: ["previewSrc", versionId],
@@ -715,7 +782,15 @@ function PreviewPane(props: {
 
   return (
     <div className="tl-preview">
-      {src && (
+      {src && isImageTake && (
+        <img
+          className="tl-still"
+          src={src}
+          alt=""
+          onError={() => void qc.invalidateQueries({ queryKey: ["previewSrc", versionId] })}
+        />
+      )}
+      {src && !isImageTake && (
         <video
           key={versionId /* source switch = fresh element; a re-signed URL for the SAME version must not remount (black flash on refocus) */}
           ref={videoRef}
