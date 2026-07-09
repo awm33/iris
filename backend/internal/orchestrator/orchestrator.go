@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/awm33/iris/backend/internal/blob"
@@ -430,6 +431,65 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 	if err := queue.EnqueueMediaJob(ctx, tx, job.WorkspaceID, "probe",
 		map[string]string{"version_id": versionID}); err != nil {
 		return err
+	}
+	// Shot-targeted generations land as Takes — the shot's candidates, with
+	// full provenance. Same transaction as the artifact: a take can never
+	// reference a version that didn't land.
+	//
+	// The take block runs under a SAVEPOINT: the shot may have been DELETED
+	// while the generation ran (validated only at CreateJob). Failing the
+	// whole landing would roll back the artifact AND its usage event, then
+	// re-run the paid generation twice more before parking — instead the
+	// artifact lands library-only and the spend stays metered.
+	if strings.HasPrefix(job.TargetEntityID, "sht_") {
+		sub, err := tx.Begin(ctx) // savepoint
+		if err != nil {
+			return err
+		}
+		takeID := ids.New("tk")
+		recipe, err := json.Marshal(map[string]any{
+			"endpoint_id": ep.ID,
+			"model":       ep.Manifest.ID,
+			"task":        job.Task,
+			"profile":     job.Profile,
+			"request":     json.RawMessage(job.Request),
+		})
+		if err != nil {
+			recipe = []byte(`{}`) // never fail the paid path over provenance serialization
+			slog.Error("recipe marshal failed", "job", job.ID, "err", err)
+		}
+		landTake := func() error {
+			if _, err := sub.Exec(ctx, `
+				INSERT INTO takes (id, shot_id, job_id, version_id, quality, recipe)
+				VALUES ($1, $2, $3, $4, $5, $6)`,
+				takeID, job.TargetEntityID, job.ID, versionID, job.Profile, recipe); err != nil {
+				return err
+			}
+			if _, err := sub.Exec(ctx, `
+				INSERT INTO asset_links (from_version_id, to_entity_id, role)
+				VALUES ($1, $2, 'used_in_take')`, versionID, takeID); err != nil {
+				return err
+			}
+			// First take auto-selects so the shot shows something
+			// immediately; selection stays revisitable in the take picker.
+			_, err := sub.Exec(ctx, `
+				UPDATE shots SET selected_take_id = $2, updated_at = now()
+				WHERE id = $1 AND selected_take_id IS NULL`,
+				job.TargetEntityID, takeID)
+			return err
+		}
+		if err := landTake(); err != nil {
+			_ = sub.Rollback(ctx)
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				slog.Warn("target shot vanished mid-generation; landing artifact library-only",
+					"job", job.ID, "shot", job.TargetEntityID)
+			} else {
+				return err
+			}
+		} else if err := sub.Commit(ctx); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO usage_events (workspace_id, job_id, kind, unit, quantity)

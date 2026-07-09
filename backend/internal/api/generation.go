@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"connectrpc.com/connect"
 
@@ -58,6 +59,9 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 	if !ep.Healthy || ep.Manifest == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("endpoint unhealthy or manifest unavailable"))
 	}
+	if err := s.validateTarget(ctx, j.TargetEntityId, j.ProjectId); err != nil {
+		return nil, err
+	}
 	// A dependency that can never complete would strand this job (dependents
 	// gate on 'complete'); reject up front. Post-create failures propagate
 	// via FailDependents.
@@ -106,6 +110,29 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 		return nil, connectErr(err)
 	}
 	return connect.NewResponse(&irisv1.CreateJobResponse{Job: genJobPB(created)}), nil
+}
+
+// validateTarget checks a generation target: shot must exist AND belong to
+// the job's project (the artifact lands in the job's project; a cross-project
+// take would silently mutate another project's shot).
+func (s *GenerationServer) validateTarget(ctx context.Context, targetEntityID, projectID string) error {
+	if targetEntityID == "" {
+		return nil
+	}
+	if !strings.HasPrefix(targetEntityID, "sht_") {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("unsupported target entity type"))
+	}
+	shotProject, err := s.Store.ShotProjectID(ctx, targetEntityID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return connect.NewError(connect.CodeInvalidArgument, errors.New("target shot not found"))
+		}
+		return connectErr(err)
+	}
+	if shotProject != projectID {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("target shot belongs to a different project"))
+	}
+	return nil
 }
 
 // toGenRequest converts the proto job into the stored request and its
@@ -226,6 +253,10 @@ func (s *GenerationServer) RetryJob(ctx context.Context, req *connect.Request[ir
 			return nil, connect.NewError(connect.CodeFailedPrecondition,
 				errors.New("dependency job is "+dep.State+"; retry it first"))
 		}
+	}
+	// The target shot may have been deleted since the original job.
+	if err := s.validateTarget(ctx, prev.TargetEntityID, prev.ProjectID); err != nil {
+		return nil, err
 	}
 	var genReq store.GenRequest
 	_ = json.Unmarshal(prev.Request, &genReq)

@@ -1,0 +1,198 @@
+syntax = "proto3";
+
+package iris.v1;
+
+import "iris/v1/common.proto";
+
+option go_package = "github.com/awm33/iris/backend/gen/iris/v1;irisv1";
+
+// The story domain: Scenes own Sets (with cataloged Views) and Shots; Shots
+// own Takes (generated candidates, one selected). Characters are reusable
+// entities with reference bundles. See docs/design/01-high-level-design.md §3.
+
+message Scene {
+  string id = 1;
+  string project_id = 2;
+  string name = 3;
+  int32 position = 4;
+  string style_notes = 5;
+  // Populated by GetScene; ListScenes returns them empty.
+  repeated View views = 6;
+  repeated Shot shots = 7;
+  AssetRef model3d = 8; // the Set's untextured 3D scene, when present
+  Timestamps timestamps = 15;
+}
+
+// A cataloged perspective of the scene's Set: a reference plate, promotable
+// from any library image (canvas exports included).
+message View {
+  string id = 1;
+  string scene_id = 2;
+  string name = 3;
+  AssetRef plate = 4;
+  int32 position = 5;
+}
+
+message Character {
+  string id = 1;
+  string workspace_id = 2;
+  string project_id = 3; // empty = workspace-level (shared across projects)
+  string name = 4;
+  repeated CharacterRef refs = 5;
+  Timestamps timestamps = 15;
+}
+
+message CharacterRef {
+  string role = 1; // turnaround | expression | voice | other
+  AssetRef asset = 2;
+}
+
+message Shot {
+  string id = 1;
+  string scene_id = 2;
+  int32 position = 3;
+  string description = 4;
+  double duration_target_s = 5;
+  string view_id = 6;            // the Set view this shot frames, optional
+  repeated string cast_ids = 7;  // character ids
+  string selected_take_id = 8;
+  bool continuity_stale = 9;
+  bool pinned = 10;
+  int32 take_count = 11;
+  Timestamps timestamps = 15;
+}
+
+// One generated (or imported) candidate for a Shot, with full provenance.
+message Take {
+  string id = 1;
+  string shot_id = 2;
+  string job_id = 3;       // generation sub-job that produced it ("" = imported)
+  string version_id = 4;   // the artifact asset version
+  string quality = 5;      // draft | master
+  bool starred = 6;
+  string recipe_json = 7;  // full provenance: model, prompt, seed, refs, params
+  Timestamps timestamps = 15;
+}
+
+service StoryService {
+  rpc CreateScene(CreateSceneRequest) returns (CreateSceneResponse);
+  rpc ListScenes(ListScenesRequest) returns (ListScenesResponse);
+  rpc GetScene(GetSceneRequest) returns (GetSceneResponse);
+  rpc UpdateScene(UpdateSceneRequest) returns (UpdateSceneResponse);
+
+  // Promote-to-View: catalog any library image as a Set view.
+  rpc AddView(AddViewRequest) returns (AddViewResponse);
+  rpc RemoveView(RemoveViewRequest) returns (RemoveViewResponse);
+
+  rpc CreateShot(CreateShotRequest) returns (CreateShotResponse);
+  rpc UpdateShot(UpdateShotRequest) returns (UpdateShotResponse);
+  rpc DeleteShot(DeleteShotRequest) returns (DeleteShotResponse);
+
+  rpc ListTakes(ListTakesRequest) returns (ListTakesResponse);
+  rpc SelectTake(SelectTakeRequest) returns (SelectTakeResponse);
+
+  rpc CreateCharacter(CreateCharacterRequest) returns (CreateCharacterResponse);
+  rpc ListCharacters(ListCharactersRequest) returns (ListCharactersResponse);
+  rpc UpdateCharacter(UpdateCharacterRequest) returns (UpdateCharacterResponse);
+  // Promote-to-Character: attach a library asset as a reference.
+  rpc AddCharacterRef(AddCharacterRefRequest) returns (AddCharacterRefResponse);
+  rpc RemoveCharacterRef(RemoveCharacterRefRequest) returns (RemoveCharacterRefResponse);
+}
+
+message CreateSceneRequest {
+  string project_id = 1;
+  string name = 2;
+}
+message CreateSceneResponse { Scene scene = 1; }
+
+message ListScenesRequest { string project_id = 1; }
+message ListScenesResponse { repeated Scene scenes = 1; }
+
+message GetSceneRequest { string id = 1; }
+message GetSceneResponse { Scene scene = 1; }
+
+message UpdateSceneRequest {
+  string id = 1;
+  optional string name = 2;
+  optional string style_notes = 3;
+  optional int32 position = 4;
+}
+message UpdateSceneResponse { Scene scene = 1; }
+
+message AddViewRequest {
+  string scene_id = 1;
+  string name = 2;
+  AssetRef plate = 3;
+}
+message AddViewResponse { View view = 1; }
+
+message RemoveViewRequest { string id = 1; }
+message RemoveViewResponse {}
+
+message CreateShotRequest {
+  string scene_id = 1;
+  string description = 2;
+  double duration_target_s = 3;
+}
+message CreateShotResponse { Shot shot = 1; }
+
+message UpdateShotRequest {
+  string id = 1;
+  optional string description = 2;
+  // Omitted = unchanged; 0 = clear (matches CreateShot's "no target").
+  optional double duration_target_s = 3;
+  optional string view_id = 4;
+  repeated string cast_ids = 5; // full replacement (incl. clearing) when set_cast is true
+  bool set_cast = 6;
+  optional int32 position = 7;
+  optional bool pinned = 8;
+  // Detach the shot from its view ("" in view_id means unchanged, so
+  // clearing needs an explicit signal).
+  bool clear_view = 9;
+}
+message UpdateShotResponse { Shot shot = 1; }
+
+message DeleteShotRequest { string id = 1; }
+message DeleteShotResponse {}
+
+message ListTakesRequest { string shot_id = 1; }
+message ListTakesResponse { repeated Take takes = 1; }
+
+message SelectTakeRequest {
+  string shot_id = 1;
+  string take_id = 2;
+}
+message SelectTakeResponse { Shot shot = 1; }
+
+message CreateCharacterRequest {
+  string workspace_id = 1;
+  string project_id = 2; // empty = workspace-level
+  string name = 3;
+}
+message CreateCharacterResponse { Character character = 1; }
+
+message ListCharactersRequest {
+  string workspace_id = 1;
+  string project_id = 2; // "" = workspace-level + all; else workspace-level + that project's
+}
+message ListCharactersResponse { repeated Character characters = 1; }
+
+message UpdateCharacterRequest {
+  string id = 1;
+  optional string name = 2;
+}
+message UpdateCharacterResponse { Character character = 1; }
+
+message AddCharacterRefRequest {
+  string character_id = 1;
+  string role = 2;
+  AssetRef asset = 3;
+}
+message AddCharacterRefResponse { Character character = 1; }
+
+message RemoveCharacterRefRequest {
+  string character_id = 1;
+  string role = 2;
+  string asset_id = 3;
+}
+message RemoveCharacterRefResponse { Character character = 1; }
