@@ -79,6 +79,7 @@ func main() {
 	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl, Pexels: pex}))
 	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}))
 	mux.Handle(irisv1connect.NewStoryServiceHandler(&api.StoryServer{Store: st}))
+	mux.Handle(irisv1connect.NewCanvasServiceHandler(&api.CanvasServer{Store: st}))
 
 	slog.Info("iris-api listening", "addr", addr)
 	srv := &http.Server{

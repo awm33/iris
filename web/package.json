@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "pnpm --filter @iris/app dev",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --if-present test"
   },
   "packageManager": "pnpm@9.15.0"
 }
