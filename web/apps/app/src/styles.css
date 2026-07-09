@@ -11,6 +11,9 @@
   --ok: #4ade80;
 }
 * { box-sizing: border-box; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-button { all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; cursor: pointer; }
 body {
   margin: 0;
   background: var(--bg);

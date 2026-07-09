@@ -103,6 +103,14 @@ export function GeneratePanel(props: {
   });
 
   if (endpoints.isLoading) return <aside className="panel">Loading models…</aside>;
+  if (endpoints.isError) {
+    return (
+      <aside className="panel">
+        <PanelHeader onClose={props.onClose} />
+        <div className="status error">Failed to load model endpoints: {String(endpoints.error)}</div>
+      </aside>
+    );
+  }
   if (!endpoint || !manifest) {
     return (
       <aside className="panel">

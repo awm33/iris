@@ -52,7 +52,11 @@ export function App() {
       title={project ? undefined : "Open a project first"}
       onClick={() => {
         setView(v);
-        if (v !== "scenes") setSceneId(undefined);
+        // Nav always returns Scenes to the list, and closes the generate
+        // panel: a shot-targeted panel surviving navigation would submit
+        // into a shot the user is no longer looking at.
+        setSceneId(undefined);
+        setGenerating(false);
       }}
     >
       {label}
@@ -82,6 +86,7 @@ export function App() {
             onOpen={(id, name) => {
               setProject({ id, name });
               setSceneId(undefined);
+              setGenerating(false); // stale targets/refs must not cross projects
               setView("scenes");
             }}
           />
@@ -93,8 +98,11 @@ export function App() {
           <ScenePage
             projectId={project.id}
             sceneId={sceneId}
-            onBack={() => setSceneId(undefined)}
-            onGenerateForShot={(shotId) => setGenerating({ shotId, label: "Shot takes" })}
+            onBack={() => {
+              setSceneId(undefined);
+              setGenerating(false);
+            }}
+            onGenerateForShot={(shotId, label) => setGenerating({ shotId, label })}
           />
         )}
         {view === "characters" && <CharactersPage projectId={project?.id} />}

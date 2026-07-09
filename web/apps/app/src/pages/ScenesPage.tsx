@@ -18,6 +18,10 @@ export function ScenesPage(props: { projectId: string; onOpen: (sceneId: string)
     },
   });
 
+  const submit = () => {
+    if (name.trim() && !create.isPending) create.mutate(name.trim());
+  };
+
   return (
     <div>
       <h2>Scenes</h2>
@@ -27,12 +31,15 @@ export function ScenesPage(props: { projectId: string; onOpen: (sceneId: string)
           placeholder="New scene name… (e.g. Diner)"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && name.trim() && create.mutate(name.trim())}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
         />
-        <button className="btn" disabled={!name.trim() || create.isPending} onClick={() => create.mutate(name.trim())}>
+        <button className="btn" disabled={!name.trim() || create.isPending} onClick={submit}>
           Create scene
         </button>
       </div>
+      {create.isError && <div className="status error">{String(create.error)}</div>}
+      {scenes.isLoading && <div className="empty">Loading…</div>}
+      {scenes.isError && <div className="status error">Failed to load scenes: {String(scenes.error)}</div>}
       {scenes.data?.scenes.length === 0 && (
         <div className="empty">
           No scenes yet. A scene is a place in your story — "the diner", "rooftop at night". Create one, catalog
@@ -41,10 +48,10 @@ export function ScenesPage(props: { projectId: string; onOpen: (sceneId: string)
       )}
       <div className="grid">
         {scenes.data?.scenes.map((s) => (
-          <div key={s.id} className="card" onClick={() => props.onOpen(s.id)}>
-            <div className="name">{s.name}</div>
-            <div className="meta">{s.styleNotes || "no style notes"}</div>
-          </div>
+          <button key={s.id} className="card card-button" onClick={() => props.onOpen(s.id)}>
+            <span className="name truncate">{s.name}</span>
+            <span className="meta truncate">{s.styleNotes || "no style notes"}</span>
+          </button>
         ))}
       </div>
     </div>

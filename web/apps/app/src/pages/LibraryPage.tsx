@@ -126,6 +126,8 @@ function AssetCard({ asset, projectId }: { asset: Asset; projectId?: string }) {
       {promoting === "view" && (
         <PromoteList
           title="Promote to view of…"
+          loading={scenes.isLoading}
+          pending={promoteView.isPending}
           items={(scenes.data?.scenes ?? []).map((s) => ({ id: s.id, label: s.name }))}
           emptyHint="No scenes yet — create one on the Scenes page."
           onPick={(id) => promoteView.mutate(id)}
@@ -135,6 +137,8 @@ function AssetCard({ asset, projectId }: { asset: Asset; projectId?: string }) {
       {promoting === "character" && (
         <PromoteList
           title="Add as turnaround ref for…"
+          loading={characters.isLoading}
+          pending={promoteCharacter.isPending}
           items={(characters.data?.characters ?? []).map((c) => ({ id: c.id, label: c.name }))}
           emptyHint="No characters yet — create one on the Characters page."
           onPick={(id) => promoteCharacter.mutate(id)}
@@ -150,6 +154,8 @@ function AssetCard({ asset, projectId }: { asset: Asset; projectId?: string }) {
 
 function PromoteList(props: {
   title: string;
+  loading: boolean;
+  pending: boolean;
   items: { id: string; label: string }[];
   emptyHint: string;
   onPick: (id: string) => void;
@@ -158,9 +164,15 @@ function PromoteList(props: {
   return (
     <div className="promote-list">
       <div className="meta">{props.title}</div>
-      {props.items.length === 0 && <div className="meta">{props.emptyHint}</div>}
+      {props.loading && <div className="meta">Loading…</div>}
+      {!props.loading && props.items.length === 0 && <div className="meta">{props.emptyHint}</div>}
       {props.items.map((it) => (
-        <button key={it.id} className="btn secondary chip-add" onClick={() => props.onPick(it.id)}>
+        <button
+          key={it.id}
+          className="btn secondary chip-add"
+          disabled={props.pending}
+          onClick={() => props.onPick(it.id)}
+        >
           {it.label}
         </button>
       ))}

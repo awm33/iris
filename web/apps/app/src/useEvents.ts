@@ -31,6 +31,7 @@ export function useEvents() {
       if (mediaDirty) {
         mediaDirty = false;
         void qc.invalidateQueries({ queryKey: ["assets"] });
+        void qc.invalidateQueries({ queryKey: ["asset"] }); // head-version resolution
         invalidateErroredThumbs(qc);
       }
     };

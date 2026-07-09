@@ -20,6 +20,10 @@ export function CharactersPage(props: { projectId?: string }) {
     },
   });
 
+  const submit = () => {
+    if (name.trim() && !create.isPending) create.mutate(name.trim());
+  };
+
   return (
     <div>
       <h2>Characters</h2>
@@ -29,12 +33,15 @@ export function CharactersPage(props: { projectId?: string }) {
           placeholder="New character name… (e.g. Mara)"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && name.trim() && create.mutate(name.trim())}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
         />
-        <button className="btn" disabled={!name.trim() || create.isPending} onClick={() => create.mutate(name.trim())}>
+        <button className="btn" disabled={!name.trim() || create.isPending} onClick={submit}>
           Create character
         </button>
       </div>
+      {create.isError && <div className="status error">{String(create.error)}</div>}
+      {chars.isLoading && <div className="empty">Loading…</div>}
+      {chars.isError && <div className="status error">Failed to load characters: {String(chars.error)}</div>}
       {chars.data?.characters.length === 0 && (
         <div className="empty">
           No characters yet. A character carries its reference images everywhere — cast it in shots and cite it in
@@ -73,8 +80,8 @@ function CharacterCard({ character, projectId }: { character: Character; project
         <span className="meta">{character.projectId ? "project" : "workspace"}</span>
       </div>
       <div className="ref-strip">
-        {character.refs.map((r, i) => (
-          <div key={i} className="ref-item" title={r.role}>
+        {character.refs.map((r) => (
+          <div key={`${r.role}:${r.asset?.assetId}`} className="ref-item" title={r.role}>
             <AssetThumb assetId={r.asset?.assetId ?? ""} className="ref-thumb" />
             <span className="ref-role">
               {r.role}

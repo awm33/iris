@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { storyClient } from "../api";
-import { VersionThumb } from "./AssetThumb";
+import { useEscape, VersionThumb } from "./AssetThumb";
 
 // Take Picker v1 (UX doc §3.5): grid of a shot's candidates, selected state,
 // one-click re-selection. Synced playback/A-B compare arrive with the video
 // studio (M5).
 export function TakePicker(props: { shotId: string; selectedTakeId: string; onClose: () => void }) {
+  useEscape(props.onClose);
   const qc = useQueryClient();
   const takes = useQuery({
     queryKey: ["takes", props.shotId],
@@ -21,7 +22,7 @@ export function TakePicker(props: { shotId: string; selectedTakeId: string; onCl
 
   return (
     <div className="overlay" onClick={props.onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="panel-header">
           <h3>Takes</h3>
           <button className="btn secondary" onClick={props.onClose}>
@@ -29,6 +30,7 @@ export function TakePicker(props: { shotId: string; selectedTakeId: string; onCl
           </button>
         </div>
         {takes.isLoading && <div className="empty">Loading…</div>}
+        {takes.isError && <div className="status error">Failed to load takes: {String(takes.error)}</div>}
         {takes.data?.takes.length === 0 && (
           <div className="empty">No takes yet — generate some into this shot.</div>
         )}
