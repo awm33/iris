@@ -156,7 +156,7 @@ export function TimelinePage(props: {
       const t = e.target as HTMLElement;
       // <select> type-ahead ("b"…) and sibling panels' form fields must
       // never reach doc-mutating hotkeys.
-      if (t.isContentEditable || t.closest?.("input,textarea,select,[contenteditable]")) return;
+      if (t.isContentEditable || t.closest?.("input,textarea,select,[contenteditable],.panel")) return;
       // No doc mutation while a picker modal is open (the edit would land
       // invisibly behind the overlay — and Escape belongs to the modal) or
       // mid-drag (the pending gesture would commit from a stale orig).
@@ -168,8 +168,10 @@ export function TimelinePage(props: {
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === " ") {
-        if (e.repeat) return; // holding space must not machine-gun toggles
+        // Cancel default BEFORE the repeat check: uncancelled repeats
+        // scroll the page and re-arm focused-button click-on-keyup.
         e.preventDefault();
+        if (e.repeat) return;
         togglePlayRef.current?.();
         return;
       }
@@ -221,8 +223,19 @@ export function TimelinePage(props: {
   useEffect(() => {
     togglePlayRef.current = togglePlay;
   });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => stopPlay, []); // unmount: kill the loop
+  useEffect(() => {
+    // rAF freezes in hidden tabs but the unmuted <video> keeps playing —
+    // audio would run past the clip's out-point with the playhead frozen.
+    const onVis = () => {
+      if (document.hidden) stopPlay();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      stopPlay(); // unmount: kill the loop
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const blade = () => {
     const bdoc = session?.doc;
@@ -509,6 +522,19 @@ function PreviewPane(props: {
   onGenerate: (shotId: string, label: string) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const qc = useQueryClient();
+  // Safari/Firefox can reject unmuted play() from effects (activation is
+  // per-element there, and clip switches mint new elements) — retry muted
+  // so the picture keeps running, and say so instead of freezing silently.
+  const [audioBlocked, setAudioBlocked] = useState(false);
+  const [mediaError, setMediaError] = useState(false);
+  const tryPlay = (v: HTMLVideoElement) => {
+    v.play().catch(() => {
+      v.muted = true;
+      setAudioBlocked(true);
+      v.play().catch(() => {});
+    });
+  };
   const c = props.clip;
 
   const shotQ = useQuery({
@@ -540,18 +566,25 @@ function PreviewPane(props: {
     if (!v || !c || Number.isNaN(v.duration)) return;
     if (props.playing) {
       if (Math.abs(v.currentTime - want) > DRIFT_S) v.currentTime = want;
-      if (v.paused) void v.play().catch(() => {});
+      if (v.paused) tryPlay(v);
     } else {
       if (!v.paused) v.pause();
       v.currentTime = want;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.time, props.playing, c, want]);
+  useEffect(() => {
+    if (!props.playing) setAudioBlocked(false);
+  }, [props.playing]);
+  useEffect(() => {
+    setMediaError(false);
+  }, [versionId, srcQ.data]);
 
   return (
     <div className="tl-preview">
       {src && (
         <video
-          key={src /* clip switch = fresh element; stale frames don't linger */}
+          key={versionId /* source switch = fresh element; a re-signed URL for the SAME version must not remount (black flash on refocus) */}
           ref={videoRef}
           src={src}
           muted={!props.playing}
@@ -559,11 +592,22 @@ function PreviewPane(props: {
           onLoadedMetadata={(e) => {
             // First seek can arrive before metadata; re-apply once known.
             e.currentTarget.currentTime = want;
-            if (props.playing) void e.currentTarget.play().catch(() => {});
+            if (props.playing) tryPlay(e.currentTarget);
+          }}
+          onError={() => {
+            // Likely an expired presign (15 min): re-sign and let the new
+            // URL flow into src — self-healing, but say what happened.
+            setMediaError(true);
+            void qc.invalidateQueries({ queryKey: ["previewSrc", versionId] });
           }}
         />
       )}
-      {c?.shotId && !versionId && !shotQ.isPending && (
+      {(srcQ.isError || mediaError) && (
+        <div className="meta">Preview unavailable — {mediaError ? "the signed link may have expired; retrying" : "signing failed"}.</div>
+      )}
+      {shotQ.isError && <div className="meta">Preview unavailable — shot lookup failed.</div>}
+      {audioBlocked && props.playing && <div className="tl-preview-note">🔇 audio blocked by the browser — muted playback</div>}
+      {c?.shotId && !versionId && !shotQ.isPending && !shotQ.isError && (
         <div className="tl-preview-shot">
           <div className="meta">🎬 {c.name} — no take selected</div>
           <button className="btn" onClick={() => props.onGenerate(c.shotId!, c.name)}>

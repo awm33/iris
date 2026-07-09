@@ -85,6 +85,7 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
       const t = e.target as HTMLElement;
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return; // browser shortcuts (Cmd+J/K/L) stay browser shortcuts
+      if (e.key === " ") e.preventDefault(); // before the repeat check: uncancelled repeats scroll / re-arm focused-button clicks
       if (e.key === " " && e.repeat) return; // holding space must not machine-gun toggles
       const el = v();
       if (!el) return;

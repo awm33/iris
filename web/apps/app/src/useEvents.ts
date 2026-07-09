@@ -24,9 +24,11 @@ export function useEvents() {
         genDirty = false;
         void qc.invalidateQueries({ queryKey: ["jobs"] });
         void qc.invalidateQueries({ queryKey: ["assets"] });
-        // Shot-targeted generations land takes — scene pages show them live.
+        // Shot-targeted generations land takes — scene pages and the
+        // timeline preview's shot resolution show them live.
         void qc.invalidateQueries({ queryKey: ["scene"] });
         void qc.invalidateQueries({ queryKey: ["takes"] });
+        void qc.invalidateQueries({ queryKey: ["shot"] });
       }
       if (mediaDirty) {
         mediaDirty = false;
