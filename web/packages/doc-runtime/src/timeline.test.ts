@@ -213,9 +213,11 @@ describe("rippleOps", () => {
     ]);
   });
 
-  it("negative delta closes gaps; starts clamp at 0", () => {
+  it("over-large negative delta clamps ONCE, preserving relative spacing", () => {
+    // delta -3 would push b (at 2) negative; the delta clamps to -2 for
+    // ALL matched clips — never per-clip (that would compress spacing).
     const ops = rippleOps(state, "v1", 2, -3);
-    expect(ops.map((o) => (o as { start: number }).start)).toEqual([0, 3]); // b clamped, c 6→3
+    expect(ops.map((o) => (o as { start: number }).start)).toEqual([0, 4]); // b 2→0, c 6→4: gap preserved
   });
 
   it("epsilon catches r2-rounded starts just before the pivot", () => {
@@ -225,6 +227,25 @@ describe("rippleOps", () => {
   it("no-ops on zero delta or unknown track", () => {
     expect(rippleOps(state, "v1", 0, 0)).toEqual([]);
     expect(rippleOps(state, "nope", 0, 1)).toEqual([]);
+  });
+
+  it("trim + ripple keeps the neighbor abutting the new out-point", () => {
+    const base: TimelineOp[] = [
+      { op_id: "t1", type: "add_track", track: { id: "v1", kind: "video" } },
+      { op_id: "c1", type: "add_clip", track_id: "v1", clip: { id: "a", name: "a", start: 0, duration: 2 } },
+      { op_id: "c2", type: "add_clip", track_id: "v1", clip: { id: "b", name: "b", start: 2, duration: 3 } },
+    ];
+    const st = reduceTimeline(base);
+    // trim a's out-point 2 → 3.5; ripple from the ORIGINAL out-point (2)
+    const ops: TimelineOp[] = [
+      { op_id: "tr", type: "trim_clip", clip_id: "a", duration: 3.5 },
+      ...rippleOps(st, "v1", 2, 1.5),
+    ];
+    const after = reduceTimeline([...base, ...ops]);
+    expect(after.tracks[0].clips.map((c) => [c.id, c.start])).toEqual([
+      ["a", 0],
+      ["b", 3.5], // still abuts the new out-point
+    ]);
   });
 
   it("applying ripple after a delete closes the gap exactly", () => {

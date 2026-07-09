@@ -633,7 +633,7 @@ export function TimelinePage(props: {
                   onPointerDown={(e) => onClipDown(e, "move", c)}
                   onPointerMove={onClipMove}
                   onPointerUp={onClipUp}
-                  onPointerCancel={onClipUp}
+                  onPointerCancel={() => onClipUp() /* a cancelled gesture commits the trim (pre-existing) but must never amplify into a ripple */}
                   title={`${c.name} · ${c.duration.toFixed(1)}s — drag moves · edges trim (⇧ right edge: ripple)`}
                 >
                   {handle("trim-l", "tl-handle-l")}
