@@ -270,7 +270,7 @@ export function GeneratePanel(props: {
       <PanelHeader onClose={props.onClose} />
       {props.target && <div className="target-chip">Target: {props.target.label}</div>}
       {props.target && isVideo && manifest.conditioning?.first_frame === true && carrySource && (
-        <label className="carry-chip" title="Sends the upstream take's last frame as first_frame conditioning">
+        <label className="carry-chip" title={carrySource.isImage ? "Sends the upstream take (a still) as first_frame conditioning" : "Sends the upstream take's last frame as first_frame conditioning"}>
           <input type="checkbox" checked={carry && carryReady} disabled={!carryReady} onChange={(e) => setCarry(e.target.checked)} />
           ⛓ Continue from {carrySource.label}’s {carrySource.isImage ? "frame" : "last frame"}
           {!carryReady && <span className="meta"> (preparing frame…)</span>}

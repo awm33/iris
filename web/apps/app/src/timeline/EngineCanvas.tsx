@@ -142,10 +142,16 @@ export function EngineCanvas(props: {
       if (!seg) {
         // Gap or unresolved span: keep the session for a same-source
         // return? No — timelines are short; a gap ends the session and
-        // blanks the canvas (placeholder overlays render above us).
+        // blanks the canvas (placeholder/still overlays render above us).
         endSession();
         const c = canvasRef.current;
         if (c) c.getContext("2d")!.clearRect(0, 0, c.width, c.height);
+        // Still spans are first-class sequence shapes now: without a
+        // prebuffer HERE, every still→video cut stalls the picture for a
+        // sign+fetch+parse while the statically-scheduled audio runs on
+        // time. prebufferTarget handles current===undefined.
+        const pre = prebufferTarget(props.segments, props.time, PREBUFFER_S);
+        if (pre) void decoderFor(pre.sourceId).catch(() => {});
         return;
       }
       const targetUs = Math.round(sourceTime(seg, props.time) * 1e6);

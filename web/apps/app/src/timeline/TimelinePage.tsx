@@ -297,9 +297,10 @@ export function TimelinePage(props: {
       queryKey: ["shot", id],
       queryFn: () => storyClient.getShot({ id }),
       staleTime: 30_000,
-      // The fan-out lookup only serves the engine preview; PreviewPane
-      // resolves its single active shot itself.
-      enabled: engineOn,
+      // NOT gated on the engine toggle: resolution knowledge also drives
+      // GESTURE semantics (source-aware blade/trim). A blade in <video>
+      // fallback mode must not persist in_point 0 for a resolved shot —
+      // that writes duplicated-content halves into the op log.
     })),
   });
   const takeKey = shotQueries
@@ -341,9 +342,9 @@ export function TimelinePage(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoClips, takeByShot]);
   const shotSettled = useMemo(
-    () => new Map(shotIds.map((id, i) => [id, !shotQueries[i].isPending || !engineOn])),
+    () => new Map(shotIds.map((id, i) => [id, !shotQueries[i].isPending])),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shotIds, takeKey, engineOn],
+    [shotIds, takeKey],
   );
   const srcFor = (versionId: string) =>
     qc.fetchQuery({
@@ -694,7 +695,15 @@ function StillOverlay(props: { versionId: string }) {
       }
     },
   });
-  return still.data ? <img className="tl-still" src={still.data} alt="" /> : null;
+  const qc = useQueryClient();
+  return still.data ? (
+    <img
+      className="tl-still"
+      src={still.data}
+      alt=""
+      onError={() => void qc.invalidateQueries({ queryKey: ["previewSrc", props.versionId] })}
+    />
+  ) : null;
 }
 
 /** Clip under the playhead. Media clips play/seek the proxy; shot clips
@@ -773,7 +782,14 @@ function PreviewPane(props: {
 
   return (
     <div className="tl-preview">
-      {src && isImageTake && <img className="tl-still" src={src} alt="" />}
+      {src && isImageTake && (
+        <img
+          className="tl-still"
+          src={src}
+          alt=""
+          onError={() => void qc.invalidateQueries({ queryKey: ["previewSrc", versionId] })}
+        />
+      )}
       {src && !isImageTake && (
         <video
           key={versionId /* source switch = fresh element; a re-signed URL for the SAME version must not remount (black flash on refocus) */}
