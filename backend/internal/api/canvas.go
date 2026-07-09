@@ -124,13 +124,14 @@ func (s *CanvasServer) AppendOps(ctx context.Context, req *connect.Request[irisv
 
 // validateOpPayload enforces the envelope only: a JSON object carrying
 // non-empty op_id and type strings. Semantics stay client-owned.
+// json.Unmarshal (not Decoder.Decode) so trailing garbage is rejected here
+// with a client error instead of failing the whole batch at the jsonb insert.
 func validateOpPayload(p string) error {
 	var env struct {
 		OpID string `json:"op_id"`
 		Type string `json:"type"`
 	}
-	dec := json.NewDecoder(strings.NewReader(p))
-	if err := dec.Decode(&env); err != nil {
+	if err := json.Unmarshal([]byte(p), &env); err != nil {
 		return fmt.Errorf("payload is not valid JSON: %w", err)
 	}
 	if env.OpID == "" || env.Type == "" {
