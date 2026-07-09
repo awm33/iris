@@ -210,6 +210,11 @@ export function TimelinePage(props: {
     if (end0 <= 0) return;
     // At the end, space restarts from the top (player muscle memory).
     const t0 = timeRef.current >= end0 - 0.01 ? 0 : timeRef.current;
+    // Commit t0 NOW: the mixer effect reads timeRef before the first rAF
+    // tick, and a restart-from-end would otherwise schedule audio from the
+    // OLD playhead (= end → empty plan → silent replay). Also snaps the
+    // playhead UI immediately instead of on the first tick.
+    seek(t0);
     const start = performance.now();
     setPlaying(true);
     const step = () => {
@@ -341,7 +346,9 @@ export function TimelinePage(props: {
   });
   useEffect(() => {
     if (playing && engineOn && AudioMixer.supported()) {
-      mixerRef.current ??= new AudioMixer(srcFor);
+      mixerRef.current ??= new AudioMixer(srcFor, () =>
+        setEngineError("🔇 audio blocked by the browser — click ▶ once to unlock"),
+      );
       // Scheduled once per play from the playhead; mid-play edits reschedule
       // on the next play (the video side re-reads state live — recorded
       // asymmetry until the mixer follows doc changes).
@@ -477,7 +484,7 @@ export function TimelinePage(props: {
         {ClipDecoder.supported() && (
           <button
             className={`btn secondary${engineOn ? " tool-active" : ""}`}
-            title="WebCodecs compositor preview — gapless boundaries, silent until the audio slice lands"
+            title="WebCodecs compositor preview (default) — gapless boundaries + mixed audio; toggle for the <video> fallback"
             onClick={() => {
               setEngineError(undefined);
               setEngineOn((v) => !v);

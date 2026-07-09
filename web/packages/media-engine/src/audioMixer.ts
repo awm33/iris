@@ -7,17 +7,28 @@
 import { audioSchedule } from "./audioSchedule";
 import type { Segment } from "./schedule";
 
-const MAX_BUFFERS = 6; // decoded AudioBuffers are float PCM — LRU beyond this
+// Decoded AudioBuffers are float PCM — ~230MB per 10 minutes of stereo
+// 48kHz, so this cap is a real memory budget (~1.4GB worst case), same
+// caveat class as the video decoder cache. Fine at dogfood clip lengths.
+const MAX_BUFFERS = 6;
 
 export class AudioMixer {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
-  private buffers = new Map<string, Promise<AudioBuffer>>();
+  // null = a cached MISS: the source has no decodable audio (normal for
+  // audio-less video like mock takes) — refetching the whole proxy per
+  // play to rediscover that would be churn proportional to timeline size.
+  private buffers = new Map<string, Promise<AudioBuffer | null>>();
   private active: AudioBufferSourceNode[] = [];
   private playToken = 0;
 
-  constructor(private readonly srcFor: (sourceId: string) => Promise<string>) {}
+  constructor(
+    private readonly srcFor: (sourceId: string) => Promise<string>,
+    /** Called when the context can't run (autoplay policy without sticky
+     * activation, e.g. Safari) — silence should be visible, not silent. */
+    private readonly onBlocked?: () => void,
+  ) {}
 
   static supported(): boolean {
     return typeof AudioContext !== "undefined";
@@ -35,7 +46,7 @@ export class AudioMixer {
     return this.ctx;
   }
 
-  private bufferFor(sourceId: string): Promise<AudioBuffer> {
+  private bufferFor(sourceId: string): Promise<AudioBuffer | null> {
     const hit = this.buffers.get(sourceId);
     if (hit) {
       this.buffers.delete(sourceId);
@@ -49,7 +60,10 @@ export class AudioMixer {
         if (!res.ok) throw new Error(`fetch ${res.status}`);
         return res.arrayBuffer();
       })
-      .then((buf) => ctx.decodeAudioData(buf));
+      // decode failure = no audio track — a durable fact about the source,
+      // cached as null. Only fetch/HTTP failures (transient signing) fall
+      // through to the rejection-delete below and retry next play.
+      .then((buf) => ctx.decodeAudioData(buf).catch(() => null));
     decoded.catch(() => {
       if (this.buffers.get(sourceId) === decoded) this.buffers.delete(sourceId);
     });
@@ -69,15 +83,27 @@ export class AudioMixer {
     this.stop();
     const token = ++this.playToken;
     const ctx = this.ensureCtx();
-    void ctx.resume(); // play is always user-initiated (space/▶) — activation is fresh
-    const anchor = ctx.currentTime + 0.08;
+    // Play is user-initiated (space/▶) so sticky activation normally covers
+    // resume() from this async context — but not on every browser: surface
+    // a still-suspended context instead of being silently silent.
+    void ctx.resume().then(() => {
+      if (ctx.state !== "running") this.onBlocked?.();
+    });
+    // Anchor at NOW (minus reported output latency): a comfort pad here is
+    // a constant A/V skew for the whole play — the late-start branch below
+    // already absorbs scheduling slop by advancing the offset.
+    const anchor = ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0);
     for (const e of audioSchedule(segments, fromS)) {
       void this.bufferFor(e.sourceId)
         .then((buf) => {
-          if (token !== this.playToken) return;
+          if (token !== this.playToken || buf === null) return;
           const node = ctx.createBufferSource();
           node.buffer = buf;
           node.connect(this.master!);
+          node.onended = () => {
+            node.disconnect();
+            this.active = this.active.filter((n) => n !== node);
+          };
           const startAt = anchor + e.whenS;
           const late = ctx.currentTime - startAt;
           if (late <= 0) {
