@@ -100,6 +100,7 @@ type createRequest struct {
 		Height int `json:"height"`
 	} `json:"output"`
 	Conditioning *struct {
+		FirstFrame  *urlRef `json:"first_frame"`
 		SourceImage *urlRef `json:"source_image"`
 		Mask        *urlRef `json:"mask"`
 	} `json:"conditioning"`
@@ -269,6 +270,14 @@ func (s *server) makeAndUploadArtifact(req createRequest) (artifact, error) {
 			art = artifact{ContentType: "image/png", Width: w, Height: h}
 		}
 	} else {
+		// first_frame is FETCHED (not used — output stays canned) so a broken
+		// carry URL fails loudly in dev instead of passing every e2e run:
+		// this mock is the error-taxonomy reference implementation.
+		if req.Conditioning != nil && req.Conditioning.FirstFrame != nil {
+			if _, err := s.fetchImage(req.Conditioning.FirstFrame.URL); err != nil {
+				return artifact{}, fmt.Errorf("%w: first_frame: %v", errInvalidInput, err)
+			}
+		}
 		data = cannedMP4
 		art = artifact{ContentType: "video/mp4", Width: 640, Height: 360, DurationS: 2, FPS: 24}
 	}

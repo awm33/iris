@@ -50,6 +50,9 @@ type GenRef struct {
 // URLs are signed at dispatch). Gen-fill (M4) uses source_image + mask; the
 // remaining spec conditioning keys wire up with the surfaces that need them.
 type GenConditioning struct {
+	// FirstFrame carries continuity: an image version is used as-is; a VIDEO
+	// version means "its last frame" (the prep artifact) — the W3 carry.
+	FirstFrame  *GenRef `json:"first_frame,omitempty"`
 	SourceImage *GenRef `json:"source_image,omitempty"`
 	Mask        *GenRef `json:"mask,omitempty"`
 }

@@ -244,6 +244,17 @@ body {
   padding: 6px 10px;
   font-size: 12px;
 }
+.carry-chip {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  background: var(--bg);
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
 
 /* Overlay pickers */
 .overlay {
