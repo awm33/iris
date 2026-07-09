@@ -422,7 +422,7 @@ body {
 .tl-shot { border-style: dashed; background: #26243d; }
 .tl-active { outline: 2px solid var(--ok); }
 .tl-selected { border-color: #fff; box-shadow: 0 0 0 1px #fff inset; }
-.tl-handle { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 1; }
+.tl-handle { position: absolute; top: 0; bottom: 0; width: min(7px, 30%); cursor: ew-resize; z-index: 1; }
 .tl-handle-l { left: 0; border-radius: 4px 0 0 4px; }
 .tl-handle-r { right: 0; border-radius: 0 4px 4px 0; }
 .tl-clip:hover .tl-handle, .tl-selected .tl-handle { background: var(--accent); opacity: 0.55; }

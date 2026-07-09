@@ -55,7 +55,7 @@ export interface TimelineState {
   tracks: TrackState[];
 }
 
-const MIN_CLIP_S = 0.04; // one 24fps frame — reducer floor, shared by editing helpers
+export const MIN_CLIP_S = 0.04; // one 24fps frame — reducer floor, shared by editing helpers
 
 export function reduceTimeline(ops: TimelineOp[]): TimelineState {
   const tracks: TrackState[] = [];
@@ -158,11 +158,14 @@ export function timelineDuration(state: TimelineState): number {
  * one frame. NOTE: a blade is two ops, so it takes two undos to fully revert
  * — op grouping is a future vocabulary change if that stings in practice. */
 export function bladeOps(state: TimelineState, clipId: string, t: number, newClipId: string): TimelineOp[] | null {
+  // Round the cut point once so both halves abut exactly and the raw
+  // playhead float never reaches the persisted log.
+  const rt = Math.round(t * 100) / 100;
   for (const track of state.tracks) {
     const clip = track.clips.find((c) => c.id === clipId);
     if (!clip) continue;
-    const left = t - clip.start;
-    const right = clip.start + clip.duration - t;
+    const left = rt - clip.start;
+    const right = clip.start + clip.duration - rt;
     if (left < MIN_CLIP_S || right < MIN_CLIP_S) return null;
     return [
       { op_id: newOpId(), type: "trim_clip", clip_id: clip.id, duration: left },
@@ -175,9 +178,11 @@ export function bladeOps(state: TimelineState, clipId: string, t: number, newCli
           name: clip.name,
           version_id: clip.versionId,
           shot_id: clip.shotId,
-          start: t,
+          start: rt,
+          // Placeholders have no source: content anchoring is meaningless,
+          // and a nonzero in_point would skew their left-trim clamp.
           duration: right,
-          in_point: clip.inPoint + left,
+          in_point: clip.versionId ? clip.inPoint + left : 0,
         },
       },
     ];
@@ -186,14 +191,16 @@ export function bladeOps(state: TimelineState, clipId: string, t: number, newCli
 }
 
 /** Snap t to the nearest clip edge or extra candidate (playhead, 0) within
- * thresholdS; returns t unchanged when nothing is close enough. excludeClipId
- * keeps a dragged clip from snapping to itself. */
+ * thresholdS; returns null when nothing is close enough — an explicit miss,
+ * so an exact hit (distance 0) is distinguishable from no target, which a
+ * return-input-unchanged sentinel cannot express. excludeClipId keeps a
+ * dragged clip from snapping to itself. */
 export function snapTime(
   state: TimelineState,
   t: number,
   opts: { thresholdS: number; excludeClipId?: string; extra?: number[] },
-): number {
-  let best = t;
+): number | null {
+  let best: number | null = null;
   let bestDist = opts.thresholdS;
   const consider = (cand: number) => {
     const d = Math.abs(cand - t);

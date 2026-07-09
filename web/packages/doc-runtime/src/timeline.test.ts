@@ -100,7 +100,17 @@ describe("bladeOps", () => {
       { op_id: "c1", type: "add_clip", track_id: "v1", clip: { id: "p", name: "wide", shot_id: "sh_1", start: 0, duration: 4 } },
     ]);
     const ops = bladeOps(shots, "p", 1, "p2")!;
-    expect((ops[1] as { clip: { shot_id?: string } }).clip.shot_id).toBe("sh_1");
+    const clip = (ops[1] as { clip: { shot_id?: string; in_point?: number } }).clip;
+    expect(clip.shot_id).toBe("sh_1");
+    // No source, nothing to anchor: a nonzero in_point would skew the
+    // placeholder's left-trim clamp in the UI.
+    expect(clip.in_point).toBe(0);
+  });
+
+  it("rounds the cut point so the halves abut without float noise", () => {
+    const ops = bladeOps(state, "x", 4.333333333, "x2")!;
+    expect(ops[0]).toMatchObject({ type: "trim_clip", duration: 2.33 });
+    expect(ops[1]).toMatchObject({ type: "add_clip", clip: { start: 4.33, in_point: 3.83 } });
   });
 
   it("rejects cuts outside the clip or within a frame of an edge", () => {
@@ -119,20 +129,57 @@ describe("snapTime", () => {
     { op_id: "c2", type: "add_clip", track_id: "v1", clip: { id: "b", name: "b", start: 10, duration: 2 } },
   ]);
 
-  it("snaps to the nearest clip edge within the threshold", () => {
+  it("snaps to the nearest clip edge within the threshold, null when nothing is close", () => {
     expect(snapTime(state, 4.9, { thresholdS: 0.2 })).toBe(5); // end of a
     expect(snapTime(state, 9.85, { thresholdS: 0.2 })).toBe(10); // start of b
-    expect(snapTime(state, 7, { thresholdS: 0.2 })).toBe(7); // nothing close
+    expect(snapTime(state, 7, { thresholdS: 0.2 })).toBeNull(); // nothing close
+  });
+
+  it("reports an exact hit as a hit, not a miss", () => {
+    // A distance-0 candidate must be distinguishable from "no target" —
+    // callers comparing edges would otherwise let an unsnapped edge win.
+    expect(snapTime(state, 5, { thresholdS: 0.2 })).toBe(5);
+    expect(snapTime(state, 0, { thresholdS: 0.2 })).toBe(0); // origin extra, exact
   });
 
   it("ignores the excluded clip's own edges", () => {
-    expect(snapTime(state, 2.1, { thresholdS: 0.2, excludeClipId: "a" })).toBe(2.1);
+    expect(snapTime(state, 2.1, { thresholdS: 0.2, excludeClipId: "a" })).toBeNull();
     expect(snapTime(state, 2.1, { thresholdS: 0.2 })).toBe(2);
   });
 
   it("considers extra candidates like the playhead instead of the default origin", () => {
     expect(snapTime(state, 6.9, { thresholdS: 0.2, extra: [7.05] })).toBe(7.05);
     expect(snapTime(state, 0.1, { thresholdS: 0.2 })).toBe(0); // default extra: origin
-    expect(snapTime(state, 0.1, { thresholdS: 0.2, extra: [] })).toBe(0.1);
+    expect(snapTime(state, 0.1, { thresholdS: 0.2, extra: [] })).toBeNull();
+  });
+});
+
+describe("blade + undo interaction", () => {
+  it("two undos fully revert a blade (add first, then trim)", () => {
+    const doc = new TimelineDoc([
+      { op_id: "t1", type: "add_track", track: { id: "v1", kind: "video" } },
+      { op_id: "c1", type: "add_clip", track_id: "v1", clip: { id: "x", name: "a", start: 2, duration: 6, in_point: 1 } },
+    ]);
+    for (const op of bladeOps(doc.state, "x", 5, "x2")!) doc.apply(op);
+    expect(doc.state.tracks[0].clips).toHaveLength(2);
+    doc.undo(); // removes the add (right half disappears)
+    expect(doc.state.tracks[0].clips).toHaveLength(1);
+    expect(doc.state.tracks[0].clips[0].duration).toBe(3); // still trimmed
+    doc.undo(); // removes the trim
+    expect(doc.state.tracks[0].clips[0]).toMatchObject({ start: 2, duration: 6, inPoint: 1 });
+    doc.redo();
+    doc.redo();
+    expect(doc.state.tracks[0].clips).toHaveLength(2);
+  });
+});
+
+describe("reduce: combined trim_clip", () => {
+  it("applies start + duration + in_point together (the left-trim op shape)", () => {
+    const st = reduceTimeline([
+      { op_id: "t1", type: "add_track", track: { id: "v1", kind: "video" } },
+      { op_id: "c1", type: "add_clip", track_id: "v1", clip: { id: "x", name: "a", start: 2, duration: 6, in_point: 1 } },
+      { op_id: "tr", type: "trim_clip", clip_id: "x", start: 3.5, duration: 4.5, in_point: 2.5 },
+    ]);
+    expect(st.tracks[0].clips[0]).toMatchObject({ start: 3.5, duration: 4.5, inPoint: 2.5 });
   });
 });

@@ -20,4 +20,5 @@ export {
   clipAt,
   bladeOps,
   snapTime,
+  MIN_CLIP_S,
 } from "./timeline";

@@ -4,6 +4,7 @@ import type { Timeline } from "@iris/api-client";
 import {
   bladeOps,
   clipAt,
+  MIN_CLIP_S,
   newOpId as oid,
   OpSync,
   type OpSyncTransport,
@@ -20,7 +21,6 @@ import { useEscape } from "../components/AssetThumb";
 const PX_PER_SEC = 40;
 const TRACK_H = 56;
 const SNAP_S = 8 / PX_PER_SEC; // 8px feel regardless of zoom (zoom lands later)
-const MIN_CLIP_S = 0.04; // matches the reducer floor
 
 
 
@@ -46,7 +46,12 @@ export function TimelinePage(props: {
   const [status, setStatus] = useState<SyncStatus>("saved");
   const [, tick] = useState(0);
   const [time, setTime] = useState(0);
-  const [picking, setPicking] = useState<"media" | "shots" | null>(null);
+  const [picking, setPickingState] = useState<"media" | "shots" | null>(null);
+  const pickingRef = useRef<"media" | "shots" | null>(null);
+  const setPicking = (v: "media" | "shots" | null) => {
+    pickingRef.current = v;
+    setPickingState(v);
+  };
   const [selected, setSelected] = useState<string | null>(null);
   // Refs mirror playhead/selection for the window keydown handler — reading
   // render state there would either go stale or re-bind the listener per
@@ -66,6 +71,7 @@ export function TimelinePage(props: {
     mode: DragMode;
     clipId: string;
     startX: number;
+    hasSource: boolean;
     orig: { start: number; duration: number; inPoint: number };
     preview?: { start: number; duration: number; inPoint: number };
   } | null>(null);
@@ -145,7 +151,13 @@ export function TimelinePage(props: {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      // <select> type-ahead ("b"…) and sibling panels' form fields must
+      // never reach doc-mutating hotkeys.
+      if (t.isContentEditable || t.closest?.("input,textarea,select,[contenteditable]")) return;
+      // No doc mutation while a picker modal is open (the edit would land
+      // invisibly behind the overlay — and Escape belongs to the modal) or
+      // mid-drag (the pending gesture would commit from a stale orig).
+      if (pickingRef.current || dragRef.current) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? session?.doc.redo() : session?.doc.undo();
@@ -165,6 +177,31 @@ export function TimelinePage(props: {
     return () => window.removeEventListener("keydown", onKey);
   }, [session]);
 
+  const blade = () => {
+    const bdoc = session?.doc;
+    if (!bdoc) return;
+    const st = bdoc.state;
+    const t = timeRef.current;
+    const inSel = (id: string | null) => {
+      if (!id) return undefined;
+      for (const tr of st.tracks) {
+        const c = tr.clips.find((c) => c.id === id);
+        if (c && t > c.start && t < c.start + c.duration) return c;
+      }
+      return undefined;
+    };
+    const target = inSel(selectedRef.current) ?? clipAt(st, t, "video") ?? clipAt(st, t, "audio");
+    if (!target) return;
+    const ops = bladeOps(st, target.id, t, `cl_${oid().slice(3)}`);
+    if (ops) for (const op of ops) bdoc.apply(op);
+  };
+  // Assigned in an effect, not during render: a discarded concurrent render
+  // must not leave its closure behind. Declared before the early returns so
+  // the effect never sees an uninitialized binding on loading renders.
+  useEffect(() => {
+    bladeRef.current = blade;
+  });
+
   if (loadError) return <div className="status error">Couldn’t open timeline: {loadError}</div>;
   if (!session) return <div className="empty">Opening timeline…</div>;
   const { doc, tl } = session;
@@ -181,12 +218,18 @@ export function TimelinePage(props: {
       /* uncaptured drag still works over the element */
     }
   };
-  const onClipDown = (e: React.PointerEvent, mode: DragMode, c: { id: string; start: number; duration: number; inPoint: number }) => {
+  const onClipDown = (
+    e: React.PointerEvent,
+    mode: DragMode,
+    c: { id: string; start: number; duration: number; inPoint: number; versionId?: string },
+  ) => {
     select(c.id);
+    if (e.button !== 0) return; // right-click opens the context menu, which can swallow pointerup
     dragRef.current = {
       mode,
       clipId: c.id,
       startX: e.clientX,
+      hasSource: !!c.versionId,
       orig: { start: c.start, duration: c.duration, inPoint: c.inPoint },
     };
     capture(e);
@@ -194,33 +237,46 @@ export function TimelinePage(props: {
   const onClipMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
+    if (e.buttons === 0) {
+      // The gesture's pointerup landed elsewhere (failed capture, clip
+      // unmounted by a remote op) — a hover must not drag a phantom.
+      dragRef.current = null;
+      setDragPreview(null);
+      return;
+    }
     const dx = (e.clientX - d.startX) / PX_PER_SEC;
     // Alt disables snapping (NLE convention); the playhead is a snap target.
+    // doc.state/timeRef, not render scope — the refs-not-render-state rule.
     const snap = (t: number) =>
-      e.altKey ? t : snapTime(state, t, { thresholdS: SNAP_S, excludeClipId: d.clipId, extra: [time, 0] });
+      e.altKey ? null : snapTime(doc.state, t, { thresholdS: SNAP_S, excludeClipId: d.clipId, extra: [timeRef.current, 0] });
     let p = d.preview ?? d.orig;
     if (d.mode === "move") {
       const raw = Math.max(0, d.orig.start + dx);
-      // Snap whichever clip edge actually found a target — an edge with no
-      // target returns its input, which must not outrank a real snap.
+      // Snap whichever clip edge found a target; both hit → smaller distance.
       const byLead = snap(raw);
-      const byTrail = snap(raw + d.orig.duration) - d.orig.duration;
-      let lead = raw;
-      if (byLead !== raw && byTrail !== raw) lead = Math.abs(byLead - raw) <= Math.abs(byTrail - raw) ? byLead : byTrail;
-      else if (byLead !== raw) lead = byLead;
-      else if (byTrail !== raw) lead = byTrail;
+      const trailHit = snap(raw + d.orig.duration);
+      const byTrail = trailHit === null ? null : trailHit - d.orig.duration;
+      let lead = byLead ?? byTrail ?? raw;
+      if (byLead !== null && byTrail !== null && Math.abs(byTrail - raw) < Math.abs(byLead - raw)) lead = byTrail;
       p = { start: Math.max(0, lead), duration: d.orig.duration, inPoint: d.orig.inPoint };
     } else if (d.mode === "trim-r") {
-      const end = snap(d.orig.start + Math.max(MIN_CLIP_S, d.orig.duration + dx));
+      // No far cap: the model carries no source duration, so a media clip
+      // can extend past its source (preview freezes on the last frame);
+      // render policy for that overhang is deferred with the compositor.
+      const rawEnd = d.orig.start + Math.max(MIN_CLIP_S, d.orig.duration + dx);
+      const end = snap(rawEnd) ?? rawEnd;
       p = { ...d.orig, duration: Math.max(MIN_CLIP_S, end - d.orig.start) };
     } else {
       // trim-l slips the in-point so content stays anchored; clamped so no
-      // source before 0 is revealed and at least one frame remains.
-      const lo = d.orig.start - d.orig.inPoint;
+      // source before 0 is revealed and at least one frame remains. Clips
+      // without a source (shot placeholders) have nothing to anchor: they
+      // extend freely to the timeline origin with in_point pinned at 0.
+      const lo = d.hasSource ? d.orig.start - d.orig.inPoint : 0;
       const hi = d.orig.start + d.orig.duration - MIN_CLIP_S;
-      const ns = Math.min(hi, Math.max(Math.max(0, lo), snap(d.orig.start + dx)));
+      const rawNs = d.orig.start + dx;
+      const ns = Math.min(hi, Math.max(Math.max(0, lo), snap(rawNs) ?? rawNs));
       const delta = ns - d.orig.start;
-      p = { start: ns, duration: d.orig.duration - delta, inPoint: d.orig.inPoint + delta };
+      p = { start: ns, duration: d.orig.duration - delta, inPoint: d.hasSource ? d.orig.inPoint + delta : 0 };
     }
     // The ref is the source of truth for the drop — dragPreview state can be
     // a frame stale on a fast release (continuous-priority updates).
@@ -249,23 +305,6 @@ export function TimelinePage(props: {
       });
     }
   };
-  const blade = () => {
-    const st = doc.state;
-    const t = timeRef.current;
-    const inSel = (id: string | null) => {
-      if (!id) return undefined;
-      for (const tr of st.tracks) {
-        const c = tr.clips.find((c) => c.id === id);
-        if (c && t > c.start && t < c.start + c.duration) return c;
-      }
-      return undefined;
-    };
-    const target = inSel(selectedRef.current) ?? clipAt(st, t, "video") ?? clipAt(st, t, "audio");
-    if (!target) return;
-    const ops = bladeOps(st, target.id, t, `cl_${oid().slice(3)}`);
-    if (ops) for (const op of ops) doc.apply(op);
-  };
-  bladeRef.current = blade;
 
   return (
     <div>
