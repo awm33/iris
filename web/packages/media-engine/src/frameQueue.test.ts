@@ -47,6 +47,13 @@ describe("FrameQueue", () => {
     expect(q.size).toBe(0);
   });
 
+  it("an exact-timestamp hit is due (boundary equality)", () => {
+    const closed: number[] = [];
+    const q = new FrameQueue<ReturnType<typeof stub>>(4);
+    q.push(stub(40_000, closed));
+    expect(q.takeUpTo(40_000)?.timestamp).toBe(40_000);
+  });
+
   it("frames are handed out exactly once (ownership transfer)", () => {
     const closed: number[] = [];
     const q = new FrameQueue<ReturnType<typeof stub>>(4);

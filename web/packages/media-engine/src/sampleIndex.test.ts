@@ -32,6 +32,36 @@ describe("seekPointIndex", () => {
   });
 });
 
+describe("decode-order tables (B-frames: presentation time is non-monotonic)", () => {
+  // x264 bf=2 shape at 0.25s frames — decode order I P B B P B B …
+  // cts:                                0  .75 .25 .5  1.5 1.0 1.25
+  const bframes: SampleMeta[] = [
+    { t: 0, duration: 0.25, sync: true },
+    { t: 0.75, duration: 0.25, sync: false },
+    { t: 0.25, duration: 0.25, sync: false },
+    { t: 0.5, duration: 0.25, sync: false },
+    { t: 1.75, duration: 0.25, sync: true }, // next GOP's IDR
+    { t: 1.0, duration: 0.25, sync: false },
+    { t: 1.25, duration: 0.25, sync: false },
+    { t: 1.5, duration: 0.25, sync: false },
+  ];
+
+  it("seek picks the sync sample with the greatest cts ≤ t, not the last scanned", () => {
+    expect(seekPointIndex(bframes, 0.6)).toBe(0); // only IDR at 0 qualifies
+    expect(seekPointIndex(bframes, 1.75)).toBe(4); // second IDR, mid-array
+    expect(seekPointIndex(bframes, 99)).toBe(4);
+  });
+
+  it("no early exit: a later array entry with smaller cts must not stop the scan", () => {
+    // target 1.9 — the qualifying IDR (t=1.75) sits BEFORE smaller-cts B frames
+    expect(seekPointIndex(bframes, 1.9)).toBe(4);
+  });
+
+  it("streamEnd is the max presentation end, not the last entry's", () => {
+    expect(streamEnd(bframes)).toBeCloseTo(2.0); // 1.75+0.25, held mid-array
+  });
+});
+
 describe("streamEnd", () => {
   it("is the last sample's end", () => {
     expect(streamEnd(gop(8))).toBeCloseTo(2.0);

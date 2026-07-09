@@ -13,7 +13,9 @@ export function EnginePlayer(props: { src: string }) {
   useEffect(() => {
     const abort = new AbortController();
     let raf = 0;
-    const queue = new FrameQueue<VideoFrame>(8);
+    // Small on purpose: every queued frame pins a hardware decoder buffer;
+    // Chrome's pool is ~8-10 and the decoder wedges when they're all out.
+    const queue = new FrameQueue<VideoFrame>(3);
     (async () => {
       try {
         const t0open = performance.now();
@@ -26,7 +28,8 @@ export function EnginePlayer(props: { src: string }) {
         setStatus(`decoding ${dec.info.codec} ${dec.info.width}×${dec.info.height} (opened in ${Math.round(performance.now() - t0open)}ms)`);
 
         let pumping = true;
-        const pump = (async () => {
+        let pumpFailed = false;
+        void (async () => {
           for await (const frame of dec.frames(0, abort.signal)) {
             // Backpressure: the painter drains by wall clock.
             while (queue.full && !abort.signal.aborted) {
@@ -38,10 +41,16 @@ export function EnginePlayer(props: { src: string }) {
             }
             queue.push(frame);
           }
-        })().finally(() => {
-          pumping = false;
-        });
-        void pump;
+        })()
+          .catch((e) => {
+            // The testbed exists to prove decode works — a decode failure
+            // must never read as "done".
+            pumpFailed = true;
+            if (!abort.signal.aborted) setStatus(`decode failed: ${String(e)}`);
+          })
+          .finally(() => {
+            pumping = false;
+          });
 
         let painted = 0;
         const t0 = performance.now();
@@ -55,8 +64,10 @@ export function EnginePlayer(props: { src: string }) {
             painted++;
           }
           if (!pumping && queue.size === 0) {
-            const secs = (performance.now() - t0) / 1000;
-            setStatus(`done — ${painted} frames painted in ${secs.toFixed(1)}s (${(painted / secs).toFixed(1)} fps)`);
+            if (!pumpFailed) {
+              const secs = (performance.now() - t0) / 1000;
+              setStatus(`done — ${painted} frames painted in ${secs.toFixed(1)}s (${(painted / secs).toFixed(1)} fps)`);
+            }
             return;
           }
           raf = requestAnimationFrame(paint);
@@ -75,7 +86,7 @@ export function EnginePlayer(props: { src: string }) {
 
   return (
     <div className="engine-player">
-      <canvas ref={canvasRef} className="player-video" />
+      <canvas ref={canvasRef} />
       <div className="toolbar" style={{ marginBottom: 0 }}>
         <button className="btn secondary" onClick={() => setReplayNonce((n) => n + 1)}>⟳ Replay</button>
         <span className="meta">{status}</span>

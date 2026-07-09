@@ -24,7 +24,7 @@ export class FrameQueue<F extends TimedFrame> {
     return this.frames.length >= this.capacity;
   }
 
-  /** Append in decode order. Over capacity the OLDEST frame is closed and
+  /** Append in PRESENTATION order (decoder output order). Over capacity the OLDEST frame is closed and
    * dropped — the painter has fallen behind and old frames are the ones
    * that will never be shown. */
   push(f: F): void {

@@ -44,36 +44,44 @@ export class ClipDecoder {
     const buf = await res.arrayBuffer();
 
     const file = MP4Box.createFile();
-    const ready = new Promise<MP4Box.MP4Info>((resolve, reject) => {
-      file.onReady = resolve;
-      file.onError = (e: string) => reject(new Error(e));
-    });
+    // The whole buffer is appended in one call, so mp4box parses and
+    // extracts SYNCHRONOUSLY — presence checks after the calls replace
+    // callbacks (onError is dead wiring in mp4box 0.5.x: never invoked;
+    // an unparseable container simply never fires onReady).
+    let info: MP4Box.MP4Info | null = null;
+    file.onReady = (i) => {
+      info = i;
+    };
     (buf as ArrayBuffer & { fileStart: number }).fileStart = 0;
     file.appendBuffer(buf as ArrayBuffer & { fileStart: number });
     file.flush();
-    const info = await ready;
+    // TS can't see the synchronous callback assignment — snapshot it.
+    const parsed = info as MP4Box.MP4Info | null;
+    if (!parsed) throw new Error("unparseable container — the engine plays MP4 only");
 
-    const track = info.videoTracks[0];
+    const track = parsed.videoTracks[0];
     if (!track) throw new Error("no video track");
 
     const samples: DemuxedSample[] = [];
-    const done = new Promise<void>((resolve) => {
-      file.onSamples = (_id: number, _user: unknown, batch: MP4Box.Sample[]) => {
-        for (const s of batch) {
-          samples.push({
-            data: s.data,
-            timestampUs: Math.round((s.cts / s.timescale) * 1e6),
-            durationUs: Math.round((s.duration / s.timescale) * 1e6),
-            sync: s.is_sync,
-          });
-        }
-        if (samples.length >= track.nb_samples) resolve();
-      };
-    });
+    file.onSamples = (_id: number, _user: unknown, batch: MP4Box.Sample[]) => {
+      for (const s of batch) {
+        samples.push({
+          data: s.data,
+          timestampUs: Math.round((s.cts / s.timescale) * 1e6),
+          durationUs: Math.round((s.duration / s.timescale) * 1e6),
+          sync: s.is_sync,
+        });
+      }
+    };
     file.setExtractionOptions(track.id, null, { nbSamples: track.nb_samples });
     file.start();
-    await done;
-    samples.sort((a, b) => a.timestampUs - b.timestampUs);
+    if (samples.length < track.nb_samples) {
+      throw new Error(`demux incomplete: ${samples.length}/${track.nb_samples} samples`);
+    }
+    // Samples stay in mp4box delivery order = DECODE order. Sorting by
+    // presentation time here once broke every real proxy: prep's x264
+    // output has B-frames (decode order ≠ presentation order), and
+    // VideoDecoder requires decode order — timestamps carry cts.
 
     const index: SampleMeta[] = samples.map((s) => ({
       t: s.timestampUs / 1e6,
@@ -93,7 +101,7 @@ export class ClipDecoder {
 
     return new ClipDecoder(
       {
-        durationS: info.duration / info.timescale,
+        durationS: parsed.duration / parsed.timescale,
         width: track.video.width,
         height: track.video.height,
         codec: track.codec,
@@ -134,11 +142,18 @@ export class ClipDecoder {
     try {
       let fed = startIdx;
       let flushed = false;
+      let flushDone = false;
+      // Wake the park when the decoder wants more input (dequeue), emits a
+      // frame (output cb), errors, or finishes flushing.
+      decoder.ondequeue = () => waiter?.();
       for (;;) {
         if (signal?.aborted) return;
         if (decodeError) throw decodeError;
-        // Feed while the decoder is hungry; flush once everything is in.
-        while (fed < this.samples.length && decoder.decodeQueueSize < 8) {
+        // Feed while the decoder is hungry AND our undelivered-output pile
+        // is small. Unclosed VideoFrames pin hardware decoder buffers —
+        // letting `out` grow while the consumer is slow wedges the decoder
+        // (it stops dequeuing input entirely until buffers return).
+        while (fed < this.samples.length && decoder.decodeQueueSize < 8 && out.length < 4) {
           const s = this.samples[fed++];
           decoder.decode(
             new EncodedVideoChunk({
@@ -151,16 +166,33 @@ export class ClipDecoder {
         }
         if (fed >= this.samples.length && !flushed) {
           flushed = true;
-          void decoder.flush().catch(() => {}); // error surfaces via callback
+          // The flush PROMISE is the end-of-stream signal: it resolves only
+          // after every reorder-held output has been emitted. Polling
+          // decodeQueueSize instead once truncated the B-frame tail —
+          // the queue drains when inputs are ACCEPTED, not presented.
+          decoder.flush().then(
+            () => {
+              flushDone = true;
+              waiter?.();
+            },
+            () => {
+              flushDone = true; // error (if real) surfaces via the error cb
+              waiter?.();
+            },
+          );
         }
         while (out.length > 0) yield out.shift()!;
-        if (flushed && decoder.decodeQueueSize === 0 && out.length === 0) return;
-        // Park until the decoder produces something (or errors).
+        if (flushDone && out.length === 0) return;
+        // LEVEL check before parking: wake events that fired while this
+        // generator was suspended at a yield are lost (waiter unset), so
+        // an edge-triggered park deadlocks — e.g. every dequeue spent
+        // mid-yield leaves a hungry, silent decoder. If feeding is
+        // possible, loop instead of parking. Parking is then safe: either
+        // work is in flight (decodeQueueSize > 0 → dequeue/output will
+        // fire) or everything is fed (flush completion will fire).
+        if (fed < this.samples.length && decoder.decodeQueueSize < 8 && out.length < 4) continue;
         await new Promise<void>((resolve) => {
           waiter = resolve;
-          // Also wake on a timer: decodeQueueSize draining without output
-          // (tail of stream) must not hang the generator.
-          setTimeout(resolve, 15);
         });
         waiter = null;
       }

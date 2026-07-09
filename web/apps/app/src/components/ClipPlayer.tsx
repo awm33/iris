@@ -170,7 +170,7 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
           </span>
           {ClipDecoder.supported() && (
             <button
-              className={`btn secondary${engineMode ? " active" : ""}`}
+              className={`btn secondary${engineMode ? " tool-active" : ""}`}
               title="Decode via the WebCodecs media engine (compositor testbed)"
               onClick={() => setEngineMode((m) => !m)}
             >
