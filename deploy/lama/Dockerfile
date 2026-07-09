@@ -3,7 +3,7 @@
 # keeps the image small and survives rebuilds. See entrypoint.sh.
 FROM python:3.11-slim
 
-RUN pip install --no-cache-dir onnxruntime==1.19.2 numpy pillow requests
+RUN pip install --no-cache-dir onnxruntime==1.19.2 numpy==2.4.6 pillow==12.3.0 requests==2.34.2
 
 WORKDIR /app
 COPY app.py entrypoint.sh ./

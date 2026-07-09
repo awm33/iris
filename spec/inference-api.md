@@ -14,7 +14,7 @@ The HTTP contract every model endpoint implements to be usable from Iris: our Wa
 GET    /v1/manifest            → capability manifest (JSON; schema: spec/manifest.schema.json)
 POST   /v1/jobs                → create a generation job (async)
 GET    /v1/jobs/{id}           → job status + progress
-DELETE /v1/jobs/{id}           → cancel
+DELETE /v1/jobs/{id}           → cancel (204 on success; canceling a terminal job is a no-op 204)
 GET    /v1/healthz             → liveness (200 = accepting jobs)
 ```
 

@@ -124,6 +124,7 @@ export function GenFillBar(props: {
       <button
         className="btn"
         disabled={!prompt.trim() || !endpoint}
+        title={endpoint ? undefined : "No prompt-conditioned endpoint is available — only removal specialists are up"}
         onClick={() => endpoint && props.onGenerate(prompt.trim(), count, endpoint)}
       >
         ⚡ Generate

@@ -35,6 +35,12 @@ from PIL import Image
 MODEL_PATH = os.environ.get("LAMA_MODEL_PATH", "/models/lama_fp32.onnx")
 PORT = int(os.environ.get("PORT", "8900"))
 MAX_INPUT_BYTES = 64 << 20
+# The pinned Carve export emits [0,255]; a heuristic (out.max() <= 1.5) here
+# corrupted removals on near-black sources — the whole output sat under the
+# threshold and got multiplied by 255 into gray noise. The range is a
+# property of the export, so it is configuration, not inference.
+OUTPUT_SCALE = float(os.environ.get("LAMA_OUTPUT_SCALE", "1"))
+MAX_ACTIVE_JOBS = 16  # == manifest limits.max_queue; enforced in do_POST
 
 MANIFEST = {
     "spec_version": "1.0",
@@ -95,24 +101,42 @@ def inpaint(src: Image.Image, mask: Image.Image) -> Image.Image:
     if len(xs) == 0:
         return src  # nothing to remove
 
-    # Pad the bbox for context; clamp to the image.
+    # Pad the bbox for context, then expand to a SQUARE crop: the export is
+    # a fixed 512x512, so a non-square crop would scale anisotropically —
+    # visible as directional smear in texture reconstruction (wood grain).
     x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
     pad = max(32, (max(x1 - x0, y1 - y0) * 3) // 10)
-    cx0, cy0 = max(0, x0 - pad), max(0, y0 - pad)
-    cx1, cy1 = min(src.width, x1 + pad), min(src.height, y1 + pad)
+    cx0, cy0 = max(0, int(x0) - pad), max(0, int(y0) - pad)
+    cx1, cy1 = min(src.width, int(x1) + pad), min(src.height, int(y1) + pad)
+    side = max(cx1 - cx0, cy1 - cy0)
+    side = min(side, src.width, src.height)
 
-    crop = src.crop((cx0, cy0, cx1, cy1)).resize((mw, mh), Image.BILINEAR)
+    def expand(lo, hi, limit):
+        grow = side - (hi - lo)
+        lo = max(0, lo - grow // 2)
+        hi = min(limit, lo + side)
+        return max(0, hi - side), hi
+
+    cx0, cx1 = expand(cx0, cx1, src.width)
+    cy0, cy1 = expand(cy0, cy1, src.height)
+
+    crop = src.crop((cx0, cy0, cx1, cy1)).resize((mw, mh), Image.LANCZOS)
     mcrop = Image.fromarray(mask_np[cy0:cy1, cx0:cx1] * 255).resize((mw, mh), Image.NEAREST)
 
     img_t = np.asarray(crop, dtype=np.float32).transpose(2, 0, 1)[None] / 255.0
     mask_t = (np.asarray(mcrop, dtype=np.float32)[None, None] > 127).astype(np.float32)
+    # Feed by declared name (an export with swapped input order would
+    # otherwise silently swap image/mask); positional fallback.
     names = [i.name for i in sess.get_inputs()]
-    out = sess.run(None, {names[0]: img_t, names[1]: mask_t})[0][0]
+    if "image" in names and "mask" in names:
+        feed = {"image": img_t, "mask": mask_t}
+    else:
+        feed = {names[0]: img_t, names[1]: mask_t}
+    out = sess.run(None, feed)[0][0]
 
-    if out.max() <= 1.5:  # exports vary: [0,1] vs [0,255]
-        out = out * 255.0
+    out = out * OUTPUT_SCALE
     out_img = Image.fromarray(np.clip(out.transpose(1, 2, 0), 0, 255).astype(np.uint8))
-    out_img = out_img.resize((cx1 - cx0, cy1 - cy0), Image.BILINEAR)
+    out_img = out_img.resize((cx1 - cx0, cy1 - cy0), Image.LANCZOS)
 
     # Paste back ONLY the masked pixels (spec: black regions byte-preserved).
     result = src.copy()
@@ -123,12 +147,21 @@ def inpaint(src: Image.Image, mask: Image.Image) -> Image.Image:
 
 jobs = {}
 jobs_lock = threading.Lock()
+_infer_sem = threading.BoundedSemaphore(2)  # == manifest limits.concurrency
 
 
-def fail(job, code, message, retryable):
+def active_jobs():
+    return sum(1 for j in jobs.values() if j["state"] in ("queued", "running", "uploading"))
+
+
+def fail(job, code, message, retryable, seconds=None):
     with jobs_lock:
         if job["state"] not in ("canceled",):
             job.update(state="failed", error={"code": code, "message": message, "retryable": retryable})
+            if seconds is not None:
+                # Spec §3: metrics present when terminal — failed inference
+                # still burned compute; it must not be invisible.
+                job["metrics"] = {"gpu_seconds": round(seconds, 2)}
 
 
 def run_job(job, req):
@@ -142,17 +175,30 @@ def run_job(job, req):
         cond = req.get("conditioning") or {}
         src = fetch_image(cond["source_image"]["url"], "RGB")
         mask = fetch_image(cond["mask"]["url"], "L")
-    except Exception as e:  # caller's inputs: invalid_input, no retry
-        fail(job, "invalid_input", f"conditioning input: {e}", False)
+    except (requests.ConnectionError, requests.Timeout) as e:
+        # Spec §6: mid-job unreachability/expiry is transient — the
+        # orchestrator retries with fresh URLs.
+        fail(job, "transient", f"conditioning input unreachable: {e}", True, time.time() - started)
+        return
+    except requests.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 0
+        if code >= 500:
+            fail(job, "transient", f"conditioning input: HTTP {code}", True, time.time() - started)
+        else:
+            fail(job, "invalid_input", f"conditioning input: HTTP {code}", False, time.time() - started)
+        return
+    except Exception as e:  # undecodable/oversized: the caller's problem
+        fail(job, "invalid_input", f"conditioning input: {e}", False, time.time() - started)
         return
     with jobs_lock:
         if job["state"] == "canceled":
             return
         job["progress"] = 0.4
     try:
-        result = inpaint(src, mask)
+        with _infer_sem:
+            result = inpaint(src, mask)
     except Exception as e:
-        fail(job, "internal", f"inference: {e}\n{traceback.format_exc(limit=3)}", True)
+        fail(job, "internal", f"inference: {e}\n{traceback.format_exc(limit=3)}", True, time.time() - started)
         return
     with jobs_lock:
         if job["state"] == "canceled":
@@ -180,7 +226,7 @@ def run_job(job, req):
             put.raise_for_status()
             artifact["uploaded"] = True
         except Exception as e:
-            fail(job, "internal", f"artifact upload: {e}", True)
+            fail(job, "internal", f"artifact upload: {e}", True, time.time() - started)
             return
     with jobs_lock:
         if job["state"] == "canceled":
@@ -240,6 +286,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": {"code": "invalid_input", "message": "not found", "retryable": False}})
             return
         length = int(self.headers.get("Content-Length") or 0)
+        if length > (1 << 20):
+            self.send_json(400, {"error": {"code": "invalid_input", "message": "request too large", "retryable": False}})
+            return
         try:
             req = json.loads(self.rfile.read(length))
         except Exception:
@@ -265,6 +314,9 @@ class Handler(BaseHTTPRequestHandler):
             if jid in jobs:  # idempotent create
                 self.send_json(200, dict(jobs[jid]))
                 return
+            if active_jobs() >= MAX_ACTIVE_JOBS:
+                self.send_json(429, {"error": {"code": "overloaded", "message": "queue full", "retryable": True, "detail": {"retry_after_s": 5}}})
+                return
             job = {"id": jid, "state": "queued", "progress": 0.0, "eta_s": None, "artifacts": None, "error": None, "metrics": None}
             jobs[jid] = job
         threading.Thread(target=run_job, args=(job, req), daemon=True).start()
@@ -284,13 +336,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if job["state"] in ("queued", "running", "uploading"):
                 job["state"] = "canceled"
-            self.send_json(200, dict(job))
+        self.send_response(204)
+        self.end_headers()
+
+
+def warm():
+    try:
+        get_session()
+        print("model loaded", flush=True)
+    except Exception as e:
+        # A corrupt model must kill the container loudly — a silent warm
+        # failure leaves healthz green while every job fails "internal".
+        print(f"FATAL: model load failed: {e}", flush=True)
+        os._exit(1)
 
 
 def main():
     # Warm the model off the request path; healthz is up immediately and the
     # first job simply waits on the session lock if it races the load.
-    threading.Thread(target=get_session, daemon=True).start()
+    threading.Thread(target=warm, daemon=True).start()
     print(f"lama-onnx listening on :{PORT} (model: {MODEL_PATH})", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 

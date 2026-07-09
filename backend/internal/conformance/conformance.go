@@ -557,7 +557,12 @@ func encodePNG(img image.Image) []byte {
 
 func (c *checker) checkCancel(ctx context.Context) (string, error) {
 	id := fmt.Sprintf("j_conf_cancel_%d", time.Now().UnixNano())
-	body := map[string]any{"id": id, "task": "t2v", "prompt": "SLOW conformance cancel"}
+	recv := newArtifactReceiver(c.cfg.ReceiverHost)
+	defer recv.Close()
+	body, err := c.buildJobBody(ctx, id, "SLOW conformance cancel", recv)
+	if err != nil {
+		return "", err
+	}
 	if resp, data, err := c.do(ctx, "POST", "/v1/jobs", body, true); err != nil {
 		return "", err
 	} else if resp.StatusCode != 202 {
