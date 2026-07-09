@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { type ChainEdge, JobState, type Shot } from "@iris/api-client";
 import { generationClient, storyClient } from "../api";
-import { VersionThumb } from "../components/AssetThumb";
+import { useEscape, VersionThumb } from "../components/AssetThumb";
 import { TakePicker } from "../components/TakePicker";
 import { truncate } from "./ScenePage";
 
@@ -281,7 +281,7 @@ function BoardShotCard(props: {
   return (
     <div
       className={`board-shot${props.dragging ? " board-dragging" : ""}`}
-      draggable={!pickingTakes /* a drag started inside the open modal would drag (and fade) the card */}
+      draggable={!pickingTakes && !inspecting /* a drag started inside an open modal would drag (and fade) the card */}
       onDragStart={(e) => {
         // Firefox aborts drags with an empty data store — setData is load-bearing.
         e.dataTransfer.setData("text/plain", sh.id);
@@ -322,7 +322,7 @@ function BoardShotCard(props: {
               title="Continuity chain — click to inspect"
               onClick={() => setInspecting(true)}
             >
-              ⛓ Shot {props.fromShotNo}{chain.fresh ? "" : " ⚠"}
+              ⛓ {props.fromShotNo ? `Shot ${props.fromShotNo}` : "upstream"}{chain.fresh ? "" : " ⚠"}
             </button>
           )}
           <button className="chip-add btn secondary" onClick={props.onGenerate}>
@@ -336,36 +336,13 @@ function BoardShotCard(props: {
         </div>
       </div>
       {inspecting && chain && (
-        <div className="overlay" onClick={() => setInspecting(false)}>
-          <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="panel-header">
-              <h3>Continuity chain</h3>
-              <button className="btn secondary" onClick={() => setInspecting(false)}>Close</button>
-            </div>
-            <div className="chain-inspector">
-              <VersionThumb versionId={chain.carriedVersionId} className="chain-thumb" />
-              <div>
-                <div className="name">
-                  Shot {props.fromShotNo} → Shot {props.index + 1}
-                </div>
-                <div className="meta">
-                  This shot's selected take was generated with Shot {props.fromShotNo}’s last frame as its
-                  first-frame conditioning.
-                </div>
-                <div className={`meta${chain.fresh ? "" : " status error"}`} style={{ marginTop: 6 }}>
-                  {chain.fresh
-                    ? "✓ Fresh — the carried frame is still the upstream shot's selected take."
-                    : "⚠ Stale — the upstream selection changed since this carry. Regenerate to continue the current pick."}
-                </div>
-                {!chain.fresh && (
-                  <button className="btn" style={{ marginTop: 10 }} onClick={() => { setInspecting(false); props.onGenerate(); }}>
-                    ⚡ Regenerate with current upstream
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+        <ChainInspector
+          chain={chain}
+          fromShotNo={props.fromShotNo}
+          toShotNo={props.index + 1}
+          onRegenerate={props.onGenerate}
+          onClose={() => setInspecting(false)}
+        />
       )}
       {pickingTakes && (
         <TakePicker
@@ -378,6 +355,60 @@ function BoardShotCard(props: {
           onClose={() => setPickingTakes(false)}
         />
       )}
+    </div>
+  );
+}
+
+function ChainInspector(props: {
+  chain: ChainEdge;
+  fromShotNo?: number;
+  toShotNo: number;
+  onRegenerate: () => void;
+  onClose: () => void;
+}) {
+  useEscape(props.onClose);
+  const chain = props.chain;
+  return (
+    <div className="overlay" onClick={props.onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label="Continuity chain" onClick={(e) => e.stopPropagation()}>
+        <div className="panel-header">
+          <h3>Continuity chain</h3>
+          <button className="btn secondary" onClick={props.onClose}>Close</button>
+        </div>
+        <div className="chain-inspector">
+          <VersionThumb
+            versionId={chain.carriedVersionId}
+            variant="last_frame" /* the frame the carry actually consumed — the poster (first frame) would mislead */
+            className="chain-thumb"
+          />
+          <div>
+            <div className="name">
+              {props.fromShotNo ? `Shot ${props.fromShotNo}` : "Upstream"} → Shot {props.toShotNo}
+            </div>
+            <div className="meta">
+              This shot's selected take was generated with the upstream take's last frame as its first-frame
+              conditioning.
+            </div>
+            <div className={`meta${chain.fresh ? "" : " status error"}`} style={{ marginTop: 6 }}>
+              {chain.fresh
+                ? "✓ Fresh — the carried frame is still the upstream shot's selected take."
+                : "⚠ Stale — the upstream selection changed since this carry. Regenerate to continue the current pick."}
+            </div>
+            {!chain.fresh && (
+              <button
+                className="btn"
+                style={{ marginTop: 10 }}
+                onClick={() => {
+                  props.onClose();
+                  props.onRegenerate();
+                }}
+              >
+                ⚡ Regenerate with current upstream
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
