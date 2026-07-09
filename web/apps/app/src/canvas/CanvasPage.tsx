@@ -16,6 +16,7 @@ import { flatten, LayerRasterCache } from "./renderer";
 import { CanvasViewport, type CanvasTool } from "./CanvasViewport";
 import { GenFillBar, type GenFillState } from "./GenFillBar";
 import {
+  bitmapSelectionFromMask,
   type GenFillEndpoint,
   genFillEndpoints,
   pickProfile,
@@ -55,6 +56,10 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   const [genFill, setGenFill] = useState<GenFillState>();
   const [genFillError, setGenFillError] = useState<string>();
   const [promoting, setPromoting] = useState(false);
+  const [subjectBusy, setSubjectBusy] = useState(false);
+  // Subject-select session: the flatten is uploaded once and reused until
+  // the doc changes (ops length moves); clicks accumulate as refine points.
+  const subjectRef = useRef<{ versionId: string; opsLen: number; points: { x: number; y: number; negative: boolean }[] } | null>(null);
 
   // Image-layer pixels: versionId → Image, loaded via signed URLs.
   // crossOrigin=anonymous keeps the canvas untainted so export can read it.
@@ -208,7 +213,11 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
       }
       // Esc never clears the selection while a gen-fill is in flight — the
       // vanishing marching ants would read as a cancel the flow didn't do.
-      if (e.key === "Escape" && selection && !genFill) setSelection(undefined);
+      if (e.key === "Escape" && selection && !genFill) {
+        setSelection(undefined);
+        // Fresh subject next time: refine points don't outlive the selection.
+        if (subjectRef.current) subjectRef.current.points = [];
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -282,6 +291,51 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     });
     setPreview(undefined);
   };
+
+  async function subjectClick(pt: [number, number], negative: boolean) {
+    if (subjectBusy || !session) return;
+    setSubjectBusy(true);
+    setGenFillError(undefined);
+    try {
+      let sess = subjectRef.current;
+      if (!sess || sess.opsLen !== doc.ops.length) {
+        // Doc changed since the last embed — flatten + upload fresh. Capture
+        // ops length BEFORE the flatten: an op landing mid-upload must not
+        // stamp the old flatten as current.
+        const opsLen = doc.ops.length;
+        const up = await uploadFile(await flattenToFile(" (subject)"), props.projectId);
+        sess = { versionId: up.version!.id, opsLen, points: [] };
+        subjectRef.current = sess;
+      }
+      if (sess.points.length >= 16) {
+        setGenFillError("refine limit reached — Esc to restart the selection");
+        return;
+      }
+      sess.points.push({ x: pt[0], y: pt[1], negative });
+      try {
+        const res = await canvasClient.subjectMask({
+          versionId: sess.versionId,
+          points: sess.points,
+        });
+        const sel = await bitmapSelectionFromMask(res.maskPng, canvas.width, canvas.height);
+        if (sel) {
+          setSelection(sel);
+        } else {
+          sess.points.pop(); // a dud point must not poison later refines
+          setGenFillError("no subject found at that point");
+        }
+      } catch (e) {
+        // Keep the session (embedding cache makes retry free); drop only
+        // the point that failed.
+        sess.points.pop();
+        throw e;
+      }
+    } catch (e) {
+      setGenFillError(String(e));
+    } finally {
+      setSubjectBusy(false);
+    }
+  }
 
   const addLayer = () => {
     const id = `lyr_${newOpId().slice(3)}`;
@@ -463,6 +517,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         {toolButton("eraser", "◻ Eraser")}
         {toolButton("marquee", "▭ Select")}
         {toolButton("lasso", "◯ Lasso")}
+        {toolButton("subject", subjectBusy ? "✨ …" : "✨ Subject")}
         <input
           type="color"
           value={color}
@@ -499,6 +554,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
             `save failed: ${syncError ?? ""} ${retrying ? "(retrying)" : "(ops kept locally — not retryable)"}`}
         </span>
         {imageError && <span className="status error">{imageError}</span>}
+        {/* The GenFillBar renders errors while mounted; before a selection
+            exists (e.g. a failed subject click) this is the only surface. */}
+        {genFillError && !selection && !genFill && <span className="status error">{genFillError}</span>}
         <span style={{ flex: 1 }} />
         {exportMsg && <span className="status">{exportMsg}</span>}
         <button className="btn secondary" onClick={() => setPromoting((p) => !p)}>
@@ -537,8 +595,12 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           redrawTick={redrawTick}
           preview={preview}
           selection={selection}
-          onSelectionChange={setSelection}
+          onSelectionChange={(sel) => {
+            setSelection(sel);
+            if (subjectRef.current) subjectRef.current.points = [];
+          }}
           overlayLayer={overlayLayer}
+          onSubjectClick={(pt, neg) => void subjectClick(pt, neg)}
         />
         <aside className="layers-panel">
           <div className="section-head">

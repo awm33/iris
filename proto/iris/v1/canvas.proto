@@ -45,6 +45,25 @@ service CanvasService {
   rpc AppendOps(AppendOpsRequest) returns (AppendOpsResponse);
   rpc UpdateCanvas(UpdateCanvasRequest) returns (UpdateCanvasResponse);
   rpc DeleteCanvas(DeleteCanvasRequest) returns (DeleteCanvasResponse);
+  // Click-to-mask (SAM-class subject select). Proxied to the segmentation
+  // tool service — an interactive tool, not a generation task; the mask
+  // feeds the same Remove/gen-fill loop as hand-drawn selections.
+  rpc SubjectMask(SubjectMaskRequest) returns (SubjectMaskResponse);
+}
+
+message SubjectPoint {
+  double x = 1; // image coordinates on the referenced version
+  double y = 2;
+  bool negative = 3; // exclude this region (shift-click refine)
+}
+
+message SubjectMaskRequest {
+  string version_id = 1; // image version to segment (the flattened canvas)
+  repeated SubjectPoint points = 2; // 1..16
+}
+
+message SubjectMaskResponse {
+  bytes mask_png = 1; // white = subject — the inpaint mask convention
 }
 
 message CreateCanvasRequest {
