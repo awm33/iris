@@ -15,10 +15,11 @@ export function TakePicker(props: {
   onRegenerate: (recipeJson: string) => void;
   onClose: () => void;
 }) {
-  useEscape(props.onClose);
   const qc = useQueryClient();
   const [highlight, setHighlight] = useState(0);
   const [playingVersion, setPlayingVersion] = useState<string>();
+  // While a take is playing, the player owns the keyboard (incl. Esc).
+  useEscape(playingVersion ? () => setPlayingVersion(undefined) : props.onClose);
   const takes = useQuery({
     queryKey: ["takes", props.shotId],
     queryFn: () => storyClient.listTakes({ shotId: props.shotId }),
@@ -41,6 +42,7 @@ export function TakePicker(props: {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (playingVersion) return; // player owns the keyboard
       if (list.length === 0 || select.isPending) return;
       // Never hijack modified combos or typing contexts (focus is not
       // trapped; background inputs remain tabbable).
@@ -76,7 +78,7 @@ export function TakePicker(props: {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [list, highlight, select, props.selectedTakeId]);
+  }, [list, highlight, select, props.selectedTakeId, playingVersion]);
 
   return (
     <div className="overlay" onClick={props.onClose}>

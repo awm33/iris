@@ -28,12 +28,18 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string>();
   const [usingProxy, setUsingProxy] = useState<boolean>();
-  const [strip, setStrip] = useState<{ url: string; cols: number } | null>(null);
+  const [strip, setStrip] = useState<{ url: string } | null>(null);
   const [waveform, setWaveform] = useState<number[] | null>(null);
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
   const jogRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  // Hoisted: EVERY play path (keys, video click, ▶ button, scrub) must kill
+  // the J-jog interval or playback stutters against a 4Hz rewind.
+  const stopJog = () => {
+    if (jogRef.current) clearInterval(jogRef.current);
+    jogRef.current = undefined;
+  };
 
   const [src, setSrc] = useState<string>();
   useEffect(() => {
@@ -47,13 +53,21 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
         if (cancelled) return;
         setUsingProxy(proxy !== null);
         setSrc(chosen);
-        const filmstrip = await signVariant(props.versionId, "filmstrip");
-        if (filmstrip && !cancelled) setStrip({ url: filmstrip, cols: 0 });
-        const wf = await signVariant(props.versionId, "waveform");
-        if (wf && !cancelled) {
-          const res = await fetch(wf);
-          const j = (await res.json()) as { peaks: number[] };
-          if (!cancelled) setWaveform(j.peaks);
+        // Decorations are optional: a strip/waveform hiccup must not banner
+        // an error over a video that is already playing.
+        try {
+          const filmstrip = await signVariant(props.versionId, "filmstrip");
+          if (filmstrip && !cancelled) setStrip({ url: filmstrip });
+          const wf = await signVariant(props.versionId, "waveform");
+          if (wf && !cancelled) {
+            const res = await fetch(wf);
+            if (res.ok) {
+              const j = (await res.json()) as { peaks: number[] };
+              if (!cancelled && Array.isArray(j.peaks)) setWaveform(j.peaks);
+            }
+          }
+        } catch {
+          /* strip/waveform stay absent */
         }
       } catch (e) {
         if (!cancelled) setError(String(e));
@@ -67,13 +81,11 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
   // Transport keys — never while typing.
   useEffect(() => {
     const v = () => videoRef.current;
-    const stopJog = () => {
-      if (jogRef.current) clearInterval(jogRef.current);
-      jogRef.current = undefined;
-    };
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return; // browser shortcuts (Cmd+J/K/L) stay browser shortcuts
+      if (e.key === " " && e.repeat) return; // holding space must not machine-gun toggles
       const el = v();
       if (!el) return;
       switch (e.key.toLowerCase()) {
@@ -147,7 +159,7 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
         <div className="panel-header">
           <h3 className="truncate">{props.title ?? "Clip"}</h3>
           <span className="meta">
-            {usingProxy === false && "original (proxy still rendering) · "}
+            {usingProxy === false && "no proxy — playing original · "}
             J/K/L · space · ←/→ frame
           </span>
           <button className="btn secondary" onClick={props.onClose}>
@@ -164,7 +176,11 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
             controls={false}
             onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
             onDurationChange={(e) => setDuration(e.currentTarget.duration)}
-            onPlay={() => setPlaying(true)}
+            onPlay={() => {
+              stopJog();
+              setPlaying(true);
+            }}
+            onError={() => setError("Playback failed — the signed link may have expired; close and reopen the clip.")}
             onPause={() => setPlaying(false)}
             onClick={() => {
               const el = videoRef.current!;
@@ -175,6 +191,8 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
         <div
           className="player-scrub"
           onPointerDown={(e) => {
+            if (e.button !== 0) return;
+            stopJog();
             e.currentTarget.setPointerCapture(e.pointerId);
             scrub(e);
           }}
@@ -182,7 +200,7 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
         >
           {strip && <img className="player-strip" src={strip.url} alt="" draggable={false} />}
           {waveform && <Waveform peaks={waveform} />}
-          {duration > 0 && <div className="player-head" style={{ left: `${(time / duration) * 100}%` }} />}
+          {duration > 0 && <div className="player-head" style={{ left: `calc(${Math.min(100, (time / duration) * 100)}% - 2px)` }} />}
         </div>
         <div className="toolbar" style={{ marginBottom: 0 }}>
           <button
@@ -209,8 +227,9 @@ function Waveform(props: { peaks: number[] }) {
   useEffect(() => {
     const c = ref.current!;
     const ctx = c.getContext("2d")!;
-    const w = (c.width = c.clientWidth || 600);
-    const h = (c.height = 28);
+    const dpr = window.devicePixelRatio || 1;
+    const w = (c.width = (c.clientWidth || 600) * dpr);
+    const h = (c.height = 28 * dpr);
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "rgba(139,124,246,0.7)";
     const n = props.peaks.length;

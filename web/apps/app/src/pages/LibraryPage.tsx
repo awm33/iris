@@ -138,7 +138,7 @@ function AssetCard({
       )}
       <div className="name">{asset.name}</div>
       <div className="meta">{AssetKind[asset.kind]?.toLowerCase() ?? "asset"}</div>
-      {isVideo && (
+      {isVideo && asset.headVersionId && (
         <div className="promote-row">
           <button className="btn secondary chip-add" onClick={() => setPlaying(true)}>
             ▶ Play
