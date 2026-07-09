@@ -199,6 +199,30 @@ export function bladeOps(
   return null;
 }
 
+/** Ops that shift every clip on a track starting at-or-after afterS by
+ * deltaS — the ripple companion to a trim or delete. One move_clip per
+ * shifted clip (multi-op gesture, like blade: one undo per op). The
+ * epsilon absorbs the r2-rounded starts the UI commits. */
+export function rippleOps(state: TimelineState, trackId: string, afterS: number, deltaS: number): TimelineOp[] {
+  const track = state.tracks.find((t) => t.id === trackId);
+  if (!track || deltaS === 0) return [];
+  const matched = track.clips.filter((c) => c.start >= afterS - 0.005);
+  if (matched.length === 0) return [];
+  // Clamp the DELTA once (never each start): per-clip zero-clamping would
+  // compress relative spacing asymmetrically — overlaps/reorders real NLE
+  // ripple never produces. Shipped callers can't exceed the bound (a trim
+  // or delete delta is bounded by the span before the pivot), so this is
+  // hardening for future callers.
+  const d = Math.max(deltaS, -Math.min(...matched.map((c) => c.start)));
+  if (d === 0) return [];
+  return matched.map((c) => ({
+    op_id: newOpId(),
+    type: "move_clip",
+    clip_id: c.id,
+    start: Math.round((c.start + d) * 100) / 100,
+  }));
+}
+
 /** Snap t to the nearest clip edge or extra candidate (playhead, 0) within
  * thresholdS; returns null when nothing is close enough — an explicit miss,
  * so an exact hit (distance 0) is distinguishable from no target, which a

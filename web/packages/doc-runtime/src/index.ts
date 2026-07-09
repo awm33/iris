@@ -19,6 +19,7 @@ export {
   timelineDuration,
   clipAt,
   bladeOps,
+  rippleOps,
   snapTime,
   MIN_CLIP_S,
 } from "./timeline";

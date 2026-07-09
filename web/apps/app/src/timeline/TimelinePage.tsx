@@ -4,6 +4,7 @@ import type { Timeline } from "@iris/api-client";
 import {
   bladeOps,
   clipAt,
+  rippleOps,
   MIN_CLIP_S,
   newOpId as oid,
   OpSync,
@@ -185,7 +186,7 @@ export function TimelinePage(props: {
       else if (e.key === "Delete" || e.key === "Backspace") {
         const id = selectedRef.current;
         if (id && session) {
-          session.doc.apply({ op_id: oid(), type: "remove_clip", clip_id: id });
+          removeClipRef.current?.(id, e.shiftKey);
           select(null);
         }
       } else if (e.key === "Escape") select(null);
@@ -247,6 +248,27 @@ export function TimelinePage(props: {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Remove a clip; with ripple=true the removed span closes (clips after
+  // its end shift left by its duration — same track only). Multi-op like
+  // blade: one undo per op.
+  const removeClip = (clipId: string, ripple: boolean) => {
+    const rdoc = session?.doc;
+    if (!rdoc) return;
+    const st = rdoc.state;
+    const track = st.tracks.find((t) => t.clips.some((c) => c.id === clipId));
+    const clip = track?.clips.find((c) => c.id === clipId);
+    rdoc.apply({ op_id: oid(), type: "remove_clip", clip_id: clipId });
+    if (ripple && track && clip) {
+      for (const op of rippleOps(rdoc.state, track.id, clip.start + clip.duration, -clip.duration)) {
+        rdoc.apply(op);
+      }
+    }
+  };
+  const removeClipRef = useRef<(clipId: string, ripple: boolean) => void>(() => {});
+  useEffect(() => {
+    removeClipRef.current = removeClip;
+  });
 
   const blade = () => {
     const bdoc = session?.doc;
@@ -481,7 +503,7 @@ export function TimelinePage(props: {
     setDragPreview({ clipId: d.clipId, start: p.start, duration: p.duration });
   };
   const r2 = (n: number) => Math.round(n * 100) / 100;
-  const onClipUp = () => {
+  const onClipUp = (e?: React.PointerEvent) => {
     const d = dragRef.current;
     dragRef.current = null;
     setDragPreview(null);
@@ -491,6 +513,17 @@ export function TimelinePage(props: {
       doc.apply({ op_id: oid(), type: "move_clip", clip_id: clipId, start: r2(p.start) });
     } else if (mode === "trim-r" && Math.abs(p.duration - orig.duration) > 0.01) {
       doc.apply({ op_id: oid(), type: "trim_clip", clip_id: clipId, duration: r2(p.duration) });
+      // ⇧ on release = ripple: everything after the ORIGINAL out-point
+      // follows the edge (delta > 0 pushes later clips out, < 0 pulls in).
+      if (e?.shiftKey) {
+        const track = doc.state.tracks.find((t) => t.clips.some((c) => c.id === clipId));
+        if (track) {
+          const delta = r2(p.duration) - orig.duration;
+          for (const op of rippleOps(doc.state, track.id, orig.start + orig.duration, delta)) {
+            doc.apply(op);
+          }
+        }
+      }
     } else if (mode === "trim-l" && Math.abs(p.start - orig.start) > 0.01) {
       doc.apply({
         op_id: oid(),
@@ -600,15 +633,16 @@ export function TimelinePage(props: {
                   onPointerDown={(e) => onClipDown(e, "move", c)}
                   onPointerMove={onClipMove}
                   onPointerUp={onClipUp}
-                  onPointerCancel={onClipUp}
-                  title={`${c.name} · ${c.duration.toFixed(1)}s`}
+                  onPointerCancel={() => onClipUp() /* a cancelled gesture commits the trim (pre-existing) but must never amplify into a ripple */}
+                  title={`${c.name} · ${c.duration.toFixed(1)}s — drag moves · edges trim (⇧ right edge: ripple)`}
                 >
                   {handle("trim-l", "tl-handle-l")}
                   <span className="truncate">{c.shotId ? `🎬 ${c.name}` : c.name}</span>
                   <button
                     className="chip-x"
+                    title="Remove (⇧: ripple — close the gap)"
                     onPointerDown={(e) => e.stopPropagation()}
-                    onClick={() => doc.apply({ op_id: oid(), type: "remove_clip", clip_id: c.id })}
+                    onClick={(e) => removeClip(c.id, e.shiftKey)}
                   >
                     ×
                   </button>
