@@ -30,6 +30,7 @@ export function TakePicker(props: {
       void qc.invalidateQueries({ queryKey: ["scene"] });
       void qc.invalidateQueries({ queryKey: ["takes", props.shotId] });
       void qc.invalidateQueries({ queryKey: ["shot", props.shotId] }); // timeline preview resolution
+      void qc.invalidateQueries({ queryKey: ["chains"] }); // board chain freshness
     },
   });
 

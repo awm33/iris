@@ -442,6 +442,44 @@ func (s *Store) SelectTake(ctx context.Context, shotID, takeID string) error {
 	return tx.Commit(ctx)
 }
 
+// ChainEdge: to_shot's selected take carries from_shot's take as its
+// first_frame. Derived from take recipe provenance (the stored request),
+// not a separate table — the recipe is already the source of truth.
+type ChainEdge struct {
+	FromShotID, ToShotID, CarriedVersionID string
+	Fresh                                  bool
+}
+
+// GetSceneChains resolves continuity edges between shots in one scene.
+// Same-scene only: the generate panel builds carries within a scene, and a
+// cross-scene ref would point at a shot the board isn't showing.
+func (s *Store) GetSceneChains(ctx context.Context, sceneID string) ([]ChainEdge, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT src_t.shot_id, sh.id, src_t.version_id,
+		       COALESCE(cur.version_id = src_t.version_id, false) AS fresh
+		FROM shots sh
+		JOIN takes sel ON sel.id = sh.selected_take_id
+		JOIN takes src_t
+		  ON src_t.version_id = sel.recipe->'request'->'conditioning'->'first_frame'->>'version_id'
+		JOIN shots src_sh ON src_sh.id = src_t.shot_id AND src_sh.scene_id = sh.scene_id
+		LEFT JOIN takes cur ON cur.id = src_sh.selected_take_id
+		WHERE sh.scene_id = $1 AND src_t.shot_id <> sh.id
+		ORDER BY sh.id`, sceneID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChainEdge
+	for rows.Next() {
+		var e ChainEdge
+		if err := rows.Scan(&e.FromShotID, &e.ToShotID, &e.CarriedVersionID, &e.Fresh); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetShot(ctx context.Context, id string) (*ShotRow, error) {
 	sh := &ShotRow{}
 	var viewID, selected *string

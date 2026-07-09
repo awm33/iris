@@ -241,6 +241,24 @@ func (s *StoryServer) ListTakes(ctx context.Context, req *connect.Request[irisv1
 	return connect.NewResponse(resp), nil
 }
 
+func (s *StoryServer) GetSceneChains(ctx context.Context, req *connect.Request[irisv1.GetSceneChainsRequest]) (*connect.Response[irisv1.GetSceneChainsResponse], error) {
+	if req.Msg.SceneId == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("scene_id is required"))
+	}
+	edges, err := s.Store.GetSceneChains(ctx, req.Msg.SceneId)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	resp := &irisv1.GetSceneChainsResponse{}
+	for _, e := range edges {
+		resp.Edges = append(resp.Edges, &irisv1.ChainEdge{
+			FromShotId: e.FromShotID, ToShotId: e.ToShotID,
+			CarriedVersionId: e.CarriedVersionID, Fresh: e.Fresh,
+		})
+	}
+	return connect.NewResponse(resp), nil
+}
+
 func (s *StoryServer) GetShot(ctx context.Context, req *connect.Request[irisv1.GetShotRequest]) (*connect.Response[irisv1.GetShotResponse], error) {
 	sh, err := s.Store.GetShot(ctx, req.Msg.Id)
 	if err != nil {

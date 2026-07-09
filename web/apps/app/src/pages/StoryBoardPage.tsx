@@ -1,17 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { JobState, type Shot } from "@iris/api-client";
+import { type ChainEdge, JobState, type Shot } from "@iris/api-client";
 import { generationClient, storyClient } from "../api";
-import { VersionThumb } from "../components/AssetThumb";
+import { useEscape, VersionThumb } from "../components/AssetThumb";
 import { TakePicker } from "../components/TakePicker";
 import { truncate } from "./ScenePage";
 
 // Story board (UX doc §3.1): the writers'-room board — scenes as columns,
-// shots as cards with selected-take thumbs and state badges. Deferred from
-// the spec: continuity-chain arrows + chain inspector (chains land with the
-// carry-last-frame flow), "Open in Timeline" (the timeline's Scene-shots
-// picker already covers assembly), cast chips on cards, hover-to-scrub
-// thumbs, and the set-status "⚠ no views" header treatment.
+// shots as cards with selected-take thumbs, state badges, and continuity
+// chains (⛓ links + inspector, from take recipe provenance). Deferred from
+// the spec: "Open in Timeline" (the timeline's Scene-shots picker already
+// covers assembly), cast chips on cards, hover-to-scrub thumbs, and the
+// set-status "⚠ no views" header treatment.
 export function StoryBoardPage(props: {
   projectId: string;
   onOpenScene: (sceneId: string) => void;
@@ -110,6 +110,14 @@ function SceneColumn(props: {
     refetchInterval: 30_000,
   });
   const shots = scene.data?.scene?.shots ?? [];
+  const chains = useQuery({
+    queryKey: ["chains", props.sceneId],
+    queryFn: () => storyClient.getSceneChains({ sceneId: props.sceneId }),
+    refetchInterval: 30_000,
+  });
+  // One inbound edge per shot (the panel authors at most one carry).
+  const chainInto = new Map((chains.data?.edges ?? []).map((e) => [e.toShotId, e]));
+  const shotNo = new Map(shots.map((sh, i) => [sh.id, i + 1]));
 
   const createShot = useMutation({
     mutationFn: (description: string) => storyClient.createShot({ sceneId: props.sceneId, description }),
@@ -198,10 +206,24 @@ function SceneColumn(props: {
         {shots.map((sh, i) => (
           <div key={sh.id}>
             {dropIndex === i && dragId && <div className="board-drop" />}
+            {i > 0 && chainInto.get(sh.id)?.fromShotId === shots[i - 1].id && !dragId && (
+              <div
+                className={`board-chain${chainInto.get(sh.id)!.fresh ? "" : " board-chain-stale"}`}
+                title={
+                  chainInto.get(sh.id)!.fresh
+                    ? "Continues the previous shot's last frame"
+                    : "Upstream selection changed since this carry"
+                }
+              >
+                {chainInto.get(sh.id)!.fresh ? "⛓" : "⛓⚠"}
+              </div>
+            )}
             <BoardShotCard
               index={i}
               shot={sh}
               sceneId={props.sceneId}
+              chainIn={chainInto.get(sh.id)}
+              fromShotNo={chainInto.get(sh.id) ? shotNo.get(chainInto.get(sh.id)!.fromShotId) : undefined}
               generating={props.generatingShots.has(sh.id)}
               dragging={dragId === sh.id}
               dragActive={dragId !== null}
@@ -240,6 +262,8 @@ function BoardShotCard(props: {
   index: number;
   shot: Shot;
   sceneId: string;
+  chainIn?: ChainEdge;
+  fromShotNo?: number;
   generating: boolean;
   dragging: boolean;
   dragActive: boolean;
@@ -249,13 +273,15 @@ function BoardShotCard(props: {
   onGenerate: () => void;
 }) {
   const [pickingTakes, setPickingTakes] = useState(false);
+  const [inspecting, setInspecting] = useState(false);
   const sh = props.shot;
   const empty = sh.takeCount === 0;
+  const chain = props.chainIn;
 
   return (
     <div
       className={`board-shot${props.dragging ? " board-dragging" : ""}`}
-      draggable={!pickingTakes /* a drag started inside the open modal would drag (and fade) the card */}
+      draggable={!pickingTakes && !inspecting /* a drag started inside an open modal would drag (and fade) the card */}
       onDragStart={(e) => {
         // Firefox aborts drags with an empty data store — setData is load-bearing.
         e.dataTransfer.setData("text/plain", sh.id);
@@ -290,6 +316,15 @@ function BoardShotCard(props: {
           {sh.continuityStale ? " · ⚠ stale" : ""}
         </div>
         <div className="board-shot-actions">
+          {chain && (
+            <button
+              className={`chip-add btn secondary${chain.fresh ? "" : " board-chip-stale"}`}
+              title="Continuity chain — click to inspect"
+              onClick={() => setInspecting(true)}
+            >
+              ⛓ {props.fromShotNo ? `Shot ${props.fromShotNo}` : "upstream"}{chain.fresh ? "" : " ⚠"}
+            </button>
+          )}
           <button className="chip-add btn secondary" onClick={props.onGenerate}>
             ⚡ {empty ? "Generate" : "More takes"}
           </button>
@@ -300,6 +335,15 @@ function BoardShotCard(props: {
           )}
         </div>
       </div>
+      {inspecting && chain && (
+        <ChainInspector
+          chain={chain}
+          fromShotNo={props.fromShotNo}
+          toShotNo={props.index + 1}
+          onRegenerate={props.onGenerate}
+          onClose={() => setInspecting(false)}
+        />
+      )}
       {pickingTakes && (
         <TakePicker
           shotId={sh.id}
@@ -311,6 +355,60 @@ function BoardShotCard(props: {
           onClose={() => setPickingTakes(false)}
         />
       )}
+    </div>
+  );
+}
+
+function ChainInspector(props: {
+  chain: ChainEdge;
+  fromShotNo?: number;
+  toShotNo: number;
+  onRegenerate: () => void;
+  onClose: () => void;
+}) {
+  useEscape(props.onClose);
+  const chain = props.chain;
+  return (
+    <div className="overlay" onClick={props.onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label="Continuity chain" onClick={(e) => e.stopPropagation()}>
+        <div className="panel-header">
+          <h3>Continuity chain</h3>
+          <button className="btn secondary" onClick={props.onClose}>Close</button>
+        </div>
+        <div className="chain-inspector">
+          <VersionThumb
+            versionId={chain.carriedVersionId}
+            variant="last_frame" /* the frame the carry actually consumed — the poster (first frame) would mislead */
+            className="chain-thumb"
+          />
+          <div>
+            <div className="name">
+              {props.fromShotNo ? `Shot ${props.fromShotNo}` : "Upstream"} → Shot {props.toShotNo}
+            </div>
+            <div className="meta">
+              This shot's selected take was generated with the upstream take's last frame as its first-frame
+              conditioning.
+            </div>
+            <div className={`meta${chain.fresh ? "" : " status error"}`} style={{ marginTop: 6 }}>
+              {chain.fresh
+                ? "✓ Fresh — the carried frame is still the upstream shot's selected take."
+                : "⚠ Stale — the upstream selection changed since this carry. Regenerate to continue the current pick."}
+            </div>
+            {!chain.fresh && (
+              <button
+                className="btn"
+                style={{ marginTop: 10 }}
+                onClick={() => {
+                  props.onClose();
+                  props.onRegenerate();
+                }}
+              >
+                ⚡ Regenerate with current upstream
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

@@ -10,20 +10,23 @@ export function VersionThumb({
   versionId,
   kind,
   className = "thumb",
+  variant = "poster",
 }: {
   versionId: string;
   kind?: "image" | "video";
   className?: string;
+  /** Derived-frame override, e.g. "last_frame" for the continuity carry. */
+  variant?: string;
 }) {
   const [imgFailed, setImgFailed] = useState(false);
   const tryPoster = kind !== "image";
 
   const poster = useQuery({
-    queryKey: ["artifact-thumb", versionId, "poster"],
+    queryKey: ["artifact-thumb", versionId, variant],
     enabled: versionId !== "" && tryPoster,
     retry: false,
     staleTime: 10 * 60 * 1000,
-    queryFn: () => assetClient.signDownload({ versionId, variant: "poster" }),
+    queryFn: () => assetClient.signDownload({ versionId, variant }),
   });
   const posterNotFound = poster.error instanceof ConnectError && poster.error.code === Code.NotFound;
   const original = useQuery({
