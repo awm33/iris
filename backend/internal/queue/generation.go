@@ -21,15 +21,16 @@ import (
 const GenerationChannel = "generation_jobs"
 
 type GenerationJob struct {
-	ID          string
-	WorkspaceID string
-	ProjectID   string
-	EndpointID  string
-	ParentJobID string
-	Task        string
-	Profile     string
-	Request     []byte // resolved request JSON (prompt, refs as asset ids, output, params, seed)
-	Attempts    int
+	ID             string
+	WorkspaceID    string
+	ProjectID      string
+	EndpointID     string
+	ParentJobID    string
+	TargetEntityID string // where results land (sht_… = shot takes); "" = library only
+	Task           string
+	Profile        string
+	Request        []byte // resolved request JSON (prompt, refs as asset ids, output, params, seed)
+	Attempts       int
 }
 
 // ClaimGenerationJobs claims runnable sub-jobs: queued, due, and either
@@ -51,7 +52,8 @@ func ClaimGenerationJobs(ctx context.Context, pool *pgxpool.Pool, worker string,
 		    attempts = attempts + 1, updated_at = now()
 		FROM next WHERE j.id = next.id
 		RETURNING j.id, j.workspace_id, j.project_id, j.endpoint_id,
-		          COALESCE(j.parent_job_id, ''), j.task, j.profile, j.request, j.attempts`,
+		          COALESCE(j.parent_job_id, ''), COALESCE(j.target_entity_id, ''),
+		          j.task, j.profile, j.request, j.attempts`,
 		limit, worker)
 	if err != nil {
 		return nil, err
@@ -61,7 +63,7 @@ func ClaimGenerationJobs(ctx context.Context, pool *pgxpool.Pool, worker string,
 	for rows.Next() {
 		j := &GenerationJob{}
 		if err := rows.Scan(&j.ID, &j.WorkspaceID, &j.ProjectID, &j.EndpointID,
-			&j.ParentJobID, &j.Task, &j.Profile, &j.Request, &j.Attempts); err != nil {
+			&j.ParentJobID, &j.TargetEntityID, &j.Task, &j.Profile, &j.Request, &j.Attempts); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, j)

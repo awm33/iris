@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"connectrpc.com/connect"
 
@@ -57,6 +58,15 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 	}
 	if !ep.Healthy || ep.Manifest == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("endpoint unhealthy or manifest unavailable"))
+	}
+	// Shot targets must exist — a typo'd target would silently generate into
+	// the void (takes land in the same transaction as artifacts).
+	if strings.HasPrefix(j.TargetEntityId, "sht_") {
+		if _, err := s.Store.GetShot(ctx, j.TargetEntityId); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("target shot not found"))
+		}
+	} else if j.TargetEntityId != "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unsupported target entity type"))
 	}
 	// A dependency that can never complete would strand this job (dependents
 	// gate on 'complete'); reject up front. Post-create failures propagate

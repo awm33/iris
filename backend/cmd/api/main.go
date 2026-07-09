@@ -73,6 +73,7 @@ func main() {
 	mux.Handle(irisv1connect.NewWorkspaceServiceHandler(&api.WorkspaceServer{Store: st}))
 	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl}))
 	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}))
+	mux.Handle(irisv1connect.NewStoryServiceHandler(&api.StoryServer{Store: st}))
 
 	slog.Info("iris-api listening", "addr", addr)
 	srv := &http.Server{

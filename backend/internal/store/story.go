@@ -1,0 +1,462 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/awm33/iris/backend/internal/ids"
+)
+
+// Story domain: scenes/sets/views/characters/shots/takes as relational rows
+// (schema from migration 0001). Deliberately CRUD, not op-log documents —
+// the doc runtime debuts with the canvas (M4) where it's unavoidable; story
+// structure stays relational until collab requires otherwise (plan §M3 note).
+
+type Scene struct {
+	ID, ProjectID, Name, StyleNotes string
+	Position                        int32
+	Model3D                         *AssetRefJSON
+	CreatedAt, UpdatedAt            Time
+}
+
+type ViewRow struct {
+	ID, SceneID, Name string
+	Plate             AssetRefJSON
+	Position          int32
+}
+
+type CharacterRow struct {
+	ID, WorkspaceID, ProjectID, Name string
+	Refs                             []CharacterRefJSON
+	CreatedAt, UpdatedAt             Time
+}
+
+type CharacterRefJSON struct {
+	Role  string       `json:"role"`
+	Asset AssetRefJSON `json:"asset"`
+}
+
+type AssetRefJSON struct {
+	AssetID   string `json:"asset_id"`
+	VersionID string `json:"version_id,omitempty"`
+}
+
+type ShotRow struct {
+	ID, SceneID, Description string
+	Position                 int32
+	DurationTargetS          float64
+	ViewID, SelectedTakeID   string
+	CastIDs                  []string
+	ContinuityStale, Pinned  bool
+	TakeCount                int32
+	CreatedAt, UpdatedAt     Time
+}
+
+type TakeRow struct {
+	ID, ShotID, JobID, VersionID, Quality string
+	Starred                               bool
+	Recipe                                json.RawMessage
+	CreatedAt                             Time
+}
+
+// ── Scenes & views ────────────────────────────────────────────────────────────
+
+func (s *Store) CreateScene(ctx context.Context, projectID, name string) (*Scene, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	sc := &Scene{}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO scenes (id, project_id, name, position)
+		VALUES ($1, $2, $3,
+		        COALESCE((SELECT max(position)+1 FROM scenes WHERE project_id = $2), 0))
+		RETURNING id, project_id, name, position, style_notes, created_at, updated_at`,
+		ids.New("scn"), projectID, name).
+		Scan(&sc.ID, &sc.ProjectID, &sc.Name, &sc.Position, &sc.StyleNotes, &sc.CreatedAt, &sc.UpdatedAt); err != nil {
+		return nil, err
+	}
+	// Every scene owns a Set from birth (HLD: the Set is the scene's world).
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO sets (id, scene_id) VALUES ($1, $2)`, ids.New("set"), sc.ID); err != nil {
+		return nil, err
+	}
+	return sc, tx.Commit(ctx)
+}
+
+func (s *Store) ListScenes(ctx context.Context, projectID string) ([]*Scene, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, project_id, name, position, style_notes, created_at, updated_at
+		FROM scenes WHERE project_id = $1 ORDER BY position, created_at`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Scene
+	for rows.Next() {
+		sc := &Scene{}
+		if err := rows.Scan(&sc.ID, &sc.ProjectID, &sc.Name, &sc.Position, &sc.StyleNotes,
+			&sc.CreatedAt, &sc.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetScene(ctx context.Context, id string) (*Scene, []*ViewRow, []*ShotRow, error) {
+	sc := &Scene{}
+	var model3d []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT sc.id, sc.project_id, sc.name, sc.position, sc.style_notes,
+		       sc.created_at, sc.updated_at, st.model3d_ref
+		FROM scenes sc JOIN sets st ON st.scene_id = sc.id
+		WHERE sc.id = $1`, id).
+		Scan(&sc.ID, &sc.ProjectID, &sc.Name, &sc.Position, &sc.StyleNotes,
+			&sc.CreatedAt, &sc.UpdatedAt, &model3d)
+	if err != nil {
+		return nil, nil, nil, wrapNotFound(err)
+	}
+	if len(model3d) > 0 {
+		ref := &AssetRefJSON{}
+		if json.Unmarshal(model3d, ref) == nil && ref.AssetID != "" {
+			sc.Model3D = ref
+		}
+	}
+
+	views, err := s.listViews(ctx, sc.ID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	shots, err := s.listShots(ctx, sc.ID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return sc, views, shots, nil
+}
+
+func (s *Store) UpdateScene(ctx context.Context, id string, name, styleNotes *string, position *int32) (*Scene, error) {
+	sc := &Scene{}
+	err := s.pool.QueryRow(ctx, `
+		UPDATE scenes SET
+			name = COALESCE($2, name),
+			style_notes = COALESCE($3, style_notes),
+			position = COALESCE($4, position),
+			updated_at = now()
+		WHERE id = $1
+		RETURNING id, project_id, name, position, style_notes, created_at, updated_at`,
+		id, name, styleNotes, position).
+		Scan(&sc.ID, &sc.ProjectID, &sc.Name, &sc.Position, &sc.StyleNotes, &sc.CreatedAt, &sc.UpdatedAt)
+	return sc, wrapNotFound(err)
+}
+
+func (s *Store) AddView(ctx context.Context, sceneID, name string, plate AssetRefJSON) (*ViewRow, error) {
+	plateJSON, _ := json.Marshal(plate)
+	v := &ViewRow{}
+	var plateRaw []byte
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO views (id, set_id, name, plate_ref, position)
+		SELECT $1, st.id, $2, $3,
+		       COALESCE((SELECT max(v.position)+1 FROM views v WHERE v.set_id = st.id), 0)
+		FROM sets st WHERE st.scene_id = $4
+		RETURNING id, $4::text, name, plate_ref, position`,
+		ids.New("view"), name, plateJSON, sceneID).
+		Scan(&v.ID, &v.SceneID, &v.Name, &plateRaw, &v.Position)
+	if err != nil {
+		return nil, wrapNotFound(err)
+	}
+	_ = json.Unmarshal(plateRaw, &v.Plate)
+	return v, nil
+}
+
+func (s *Store) RemoveView(ctx context.Context, id string) error {
+	// Shots referencing the view keep working (view_id dangles by design —
+	// the shot's framing intent outlives the catalog entry).
+	tag, err := s.pool.Exec(ctx, `DELETE FROM views WHERE id = $1`, id)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return err
+}
+
+func (s *Store) listViews(ctx context.Context, sceneID string) ([]*ViewRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT v.id, $1::text, v.name, v.plate_ref, v.position
+		FROM views v JOIN sets st ON st.id = v.set_id
+		WHERE st.scene_id = $1 ORDER BY v.position`, sceneID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ViewRow
+	for rows.Next() {
+		v := &ViewRow{}
+		var plateRaw []byte
+		if err := rows.Scan(&v.ID, &v.SceneID, &v.Name, &plateRaw, &v.Position); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(plateRaw, &v.Plate)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// ── Shots & takes ─────────────────────────────────────────────────────────────
+
+func (s *Store) CreateShot(ctx context.Context, sceneID, description string, durationTargetS float64) (*ShotRow, error) {
+	sh := &ShotRow{}
+	var viewID, selected *string
+	var duration *float64
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO shots (id, scene_id, description, duration_target_s, position)
+		VALUES ($1, $2, $3, NULLIF($4, 0.0),
+		        COALESCE((SELECT max(position)+1 FROM shots WHERE scene_id = $2), 0))
+		RETURNING id, scene_id, position, description, duration_target_s, view_id,
+		          cast_ids, selected_take_id, continuity_stale, pinned, created_at, updated_at`,
+		ids.New("sht"), sceneID, description, durationTargetS).
+		Scan(&sh.ID, &sh.SceneID, &sh.Position, &sh.Description, &duration, &viewID,
+			&sh.CastIDs, &selected, &sh.ContinuityStale, &sh.Pinned, &sh.CreatedAt, &sh.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	derefShot(sh, duration, viewID, selected)
+	return sh, nil
+}
+
+func (s *Store) UpdateShot(ctx context.Context, id string, description *string, durationTargetS *float64, viewID *string, castIDs []string, setCast bool, position *int32, pinned *bool) (*ShotRow, error) {
+	sh := &ShotRow{}
+	var vID, selected *string
+	var duration *float64
+	var cast any
+	if setCast {
+		cast = castIDs
+	}
+	err := s.pool.QueryRow(ctx, `
+		UPDATE shots SET
+			description = COALESCE($2, description),
+			duration_target_s = COALESCE($3, duration_target_s),
+			view_id = COALESCE(NULLIF($4, ''), view_id),
+			cast_ids = COALESCE($5, cast_ids),
+			position = COALESCE($6, position),
+			pinned = COALESCE($7, pinned),
+			updated_at = now()
+		WHERE id = $1
+		RETURNING id, scene_id, position, description, duration_target_s, view_id,
+		          cast_ids, selected_take_id, continuity_stale, pinned, created_at, updated_at`,
+		id, description, durationTargetS, viewID, cast, position, pinned).
+		Scan(&sh.ID, &sh.SceneID, &sh.Position, &sh.Description, &duration, &vID,
+			&sh.CastIDs, &selected, &sh.ContinuityStale, &sh.Pinned, &sh.CreatedAt, &sh.UpdatedAt)
+	if err != nil {
+		return nil, wrapNotFound(err)
+	}
+	derefShot(sh, duration, vID, selected)
+	return sh, nil
+}
+
+func (s *Store) DeleteShot(ctx context.Context, id string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`UPDATE shots SET selected_take_id = NULL WHERE id = $1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM takes WHERE shot_id = $1`, id); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM shots WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) listShots(ctx context.Context, sceneID string) ([]*ShotRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT sh.id, sh.scene_id, sh.position, sh.description, sh.duration_target_s,
+		       sh.view_id, sh.cast_ids, sh.selected_take_id, sh.continuity_stale, sh.pinned,
+		       sh.created_at, sh.updated_at,
+		       (SELECT count(*) FROM takes t WHERE t.shot_id = sh.id) AS take_count
+		FROM shots sh WHERE sh.scene_id = $1 ORDER BY sh.position, sh.created_at`, sceneID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ShotRow
+	for rows.Next() {
+		sh := &ShotRow{}
+		var viewID, selected *string
+		var duration *float64
+		if err := rows.Scan(&sh.ID, &sh.SceneID, &sh.Position, &sh.Description, &duration,
+			&viewID, &sh.CastIDs, &selected, &sh.ContinuityStale, &sh.Pinned,
+			&sh.CreatedAt, &sh.UpdatedAt, &sh.TakeCount); err != nil {
+			return nil, err
+		}
+		derefShot(sh, duration, viewID, selected)
+		out = append(out, sh)
+	}
+	return out, rows.Err()
+}
+
+func derefShot(sh *ShotRow, duration *float64, viewID, selected *string) {
+	if duration != nil {
+		sh.DurationTargetS = *duration
+	}
+	if viewID != nil {
+		sh.ViewID = *viewID
+	}
+	if selected != nil {
+		sh.SelectedTakeID = *selected
+	}
+}
+
+func (s *Store) ListTakes(ctx context.Context, shotID string) ([]*TakeRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, shot_id, COALESCE(job_id,''), COALESCE(version_id,''), quality, starred, recipe, created_at
+		FROM takes WHERE shot_id = $1 ORDER BY created_at`, shotID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*TakeRow
+	for rows.Next() {
+		t := &TakeRow{}
+		if err := rows.Scan(&t.ID, &t.ShotID, &t.JobID, &t.VersionID, &t.Quality,
+			&t.Starred, &t.Recipe, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SelectTake sets the shot's selected take (must belong to the shot).
+func (s *Store) SelectTake(ctx context.Context, shotID, takeID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE shots SET selected_take_id = $2, updated_at = now()
+		WHERE id = $1 AND EXISTS (SELECT 1 FROM takes WHERE id = $2 AND shot_id = $1)`,
+		shotID, takeID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) GetShot(ctx context.Context, id string) (*ShotRow, error) {
+	sh := &ShotRow{}
+	var viewID, selected *string
+	var duration *float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT sh.id, sh.scene_id, sh.position, sh.description, sh.duration_target_s,
+		       sh.view_id, sh.cast_ids, sh.selected_take_id, sh.continuity_stale, sh.pinned,
+		       sh.created_at, sh.updated_at,
+		       (SELECT count(*) FROM takes t WHERE t.shot_id = sh.id)
+		FROM shots sh WHERE sh.id = $1`, id).
+		Scan(&sh.ID, &sh.SceneID, &sh.Position, &sh.Description, &duration,
+			&viewID, &sh.CastIDs, &selected, &sh.ContinuityStale, &sh.Pinned,
+			&sh.CreatedAt, &sh.UpdatedAt, &sh.TakeCount)
+	if err != nil {
+		return nil, wrapNotFound(err)
+	}
+	derefShot(sh, duration, viewID, selected)
+	return sh, nil
+}
+
+// ── Characters ────────────────────────────────────────────────────────────────
+
+func (s *Store) CreateCharacter(ctx context.Context, workspaceID, projectID, name string) (*CharacterRow, error) {
+	c := &CharacterRow{}
+	var refsRaw []byte
+	var pID *string
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO characters (id, workspace_id, project_id, name)
+		VALUES ($1, $2, NULLIF($3,''), $4)
+		RETURNING id, workspace_id, project_id, name, refs, created_at, updated_at`,
+		ids.New("chr"), workspaceID, projectID, name).
+		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if pID != nil {
+		c.ProjectID = *pID
+	}
+	_ = json.Unmarshal(refsRaw, &c.Refs)
+	return c, nil
+}
+
+func (s *Store) ListCharacters(ctx context.Context, workspaceID, projectID string) ([]*CharacterRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, workspace_id, COALESCE(project_id,''), name, refs, created_at, updated_at
+		FROM characters
+		WHERE workspace_id = $1 AND (project_id IS NULL OR $2 = '' OR project_id = $2)
+		ORDER BY created_at`, workspaceID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*CharacterRow
+	for rows.Next() {
+		c := &CharacterRow{}
+		var refsRaw []byte
+		if err := rows.Scan(&c.ID, &c.WorkspaceID, &c.ProjectID, &c.Name, &refsRaw,
+			&c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(refsRaw, &c.Refs)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateCharacter(ctx context.Context, id string, name *string) (*CharacterRow, error) {
+	c := &CharacterRow{}
+	var refsRaw []byte
+	var pID *string
+	err := s.pool.QueryRow(ctx, `
+		UPDATE characters SET name = COALESCE($2, name), updated_at = now()
+		WHERE id = $1
+		RETURNING id, workspace_id, project_id, name, refs, created_at, updated_at`,
+		id, name).
+		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		return nil, wrapNotFound(err)
+	}
+	if pID != nil {
+		c.ProjectID = *pID
+	}
+	_ = json.Unmarshal(refsRaw, &c.Refs)
+	return c, nil
+}
+
+// AddCharacterRef appends a reference to the character's bundle (atomic
+// jsonb append — no read-modify-write race).
+func (s *Store) AddCharacterRef(ctx context.Context, characterID string, ref CharacterRefJSON) (*CharacterRow, error) {
+	refJSON, _ := json.Marshal(ref)
+	c := &CharacterRow{}
+	var refsRaw []byte
+	var pID *string
+	err := s.pool.QueryRow(ctx, `
+		UPDATE characters SET refs = refs || $2::jsonb, updated_at = now()
+		WHERE id = $1
+		RETURNING id, workspace_id, project_id, name, refs, created_at, updated_at`,
+		characterID, refJSON).
+		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		return nil, wrapNotFound(err)
+	}
+	if pID != nil {
+		c.ProjectID = *pID
+	}
+	_ = json.Unmarshal(refsRaw, &c.Refs)
+	return c, nil
+}

@@ -431,6 +431,38 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 		map[string]string{"version_id": versionID}); err != nil {
 		return err
 	}
+	// Shot-targeted generations land as Takes — the shot's candidates, with
+	// full provenance. Same transaction as the artifact: a take can never
+	// reference a version that didn't land.
+	if strings.HasPrefix(job.TargetEntityID, "sht_") {
+		takeID := ids.New("tk")
+		recipe, _ := json.Marshal(map[string]any{
+			"endpoint_id": ep.ID,
+			"model":       ep.Manifest.ID,
+			"task":        job.Task,
+			"profile":     job.Profile,
+			"request":     json.RawMessage(job.Request),
+		})
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO takes (id, shot_id, job_id, version_id, quality, recipe)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			takeID, job.TargetEntityID, job.ID, versionID, job.Profile, recipe); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO asset_links (from_version_id, to_entity_id, role)
+			VALUES ($1, $2, 'used_in_take')`, versionID, takeID); err != nil {
+			return err
+		}
+		// First take auto-selects so the shot shows something immediately;
+		// selection stays revisitable in the take picker.
+		if _, err := tx.Exec(ctx, `
+			UPDATE shots SET selected_take_id = $2, updated_at = now()
+			WHERE id = $1 AND selected_take_id IS NULL`,
+			job.TargetEntityID, takeID); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO usage_events (workspace_id, job_id, kind, unit, quantity)
 		VALUES ($1, $2, 'generation', 'gpu_second', $3)`,

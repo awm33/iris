@@ -44,7 +44,14 @@
 - **Endpoint responses treated as untrusted** (own content types, probe-measured metadata, clamped metering) per security review; hardening backlog below.
 - Two independent review rounds; findings incl. a critical dependency-deadlock fixed and live-verified.
 
-**Remaining for M2 exit (→ PR 3):** the browser dogfood moment — WS event bridge (pg NOTIFY → WebSocket), Jobs page + queue tray, generate panel v1 (model picker from manifests, prompt, library ref chips, count, draft/master). Backend is fully curl-verified; no generation UI exists yet.
+**M2 — ✅ COMPLETE** (PR #3, merged `891bb6f`): SSE event bridge (coalesced per-client dirty flags — lossless "something changed" semantics, resync on reconnect, poll backstop; SSE is an accelerator, never load-bearing), generate panel v1 (manifest-driven), Jobs page with live cancel/retry and artifact posters. Browser-verified incl. the lost-terminal-event recovery scenario.
+
+**M3 progress (PR #4) — story domain backend:**
+- `story.proto` + StoryService: Scenes (auto-owning Sets), Views (promote-to-View from any library image), Characters (ref bundles, atomic jsonb append), Shots, Takes (list/select).
+- Orchestrator lands shot-targeted generations as **Takes** in the artifact transaction (recipe = endpoint/model/task/profile/request provenance; `used_in_take` lineage; first take auto-selects, selection revisitable). CreateJob validates shot targets.
+- **Deviation noted:** story structure is relational CRUD, not op-log docs — the doc runtime debuts with the canvas (M4) where it's unavoidable; collab-readiness for story rows revisits with Phase 3.
+- Curl-verified W1/W2/W3-image: scene → promote view → cast character → shot-targeted fan-out → takes with provenance → re-select.
+- **Remaining for M3 (→ PR 5):** the UI — Scenes/Story surfaces, Character pages, promote flows from the Library, Take Picker, shot-targeted generate panel, `@`-mentions.
 
 ---
 
