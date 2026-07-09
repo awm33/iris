@@ -41,7 +41,9 @@ export function GenFillBar(props: {
     return (
       <div className="genfill-bar">
         <span className="meta">
-          Candidate {st.index + 1}/{st.candidates.length} — ←/→ to compare, Enter to commit
+          {st.candidates.length > 1
+            ? `Candidate ${st.index + 1}/${st.candidates.length} — ←/→ to compare, Enter to commit`
+            : `${st.removal ? "Removal" : "Result"} — Enter to commit`}
         </span>
         <div className="genfill-strip">
           {st.candidates.map((v, i) => (

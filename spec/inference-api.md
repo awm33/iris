@@ -56,6 +56,8 @@ GET    /v1/healthz             → liveness (200 = accepting jobs)
 }
 ```
 
+**Removal contract:** endpoints declaring `inpaint` MUST accept an empty or omitted `prompt` and treat it as removal — reconstruct plausible background in the masked region, insert nothing. (The `mask_semantics` conformance check exercises this.)
+
 **Response `202`:** `{ "id": "j_9f2c...", "state": "queued", "queue_position": 3, "estimated_start_s": 40 }`
 
 Validation failures → `400` with the error object (§4). Requests using undeclared capabilities MUST be rejected (`invalid_input`, `detail.capability` naming the missing flag) — never silently ignored. *(Iris pre-validates against the manifest; this is defense in depth.)*

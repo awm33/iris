@@ -338,10 +338,14 @@ func (c *checker) checkMaskSemantics(ctx context.Context) (string, error) {
 	recv := newArtifactReceiver()
 	defer recv.Close()
 
-	// Source: solid mid-gray. Mask: white square in the middle, black rim.
+	// Source: flat background with a red "object" sitting inside the white
+	// mask region. The object matters for the removal assertion — on a
+	// featureless source, a PERFECT background reconstruction is
+	// byte-identical to the input and would read as "unchanged".
 	const dim, lo, hi = 64, 16, 48
 	src := image.NewRGBA(image.Rect(0, 0, dim, dim))
 	draw.Draw(src, src.Bounds(), &image.Uniform{color.RGBA{90, 120, 150, 255}}, image.Point{}, draw.Src)
+	draw.Draw(src, image.Rect(lo+2, lo+2, hi-2, hi-2), &image.Uniform{color.RGBA{200, 40, 40, 255}}, image.Point{}, draw.Src)
 	mask := image.NewGray(image.Rect(0, 0, dim, dim))
 	for y := lo; y < hi; y++ {
 		for x := lo; x < hi; x++ {
@@ -397,7 +401,52 @@ func (c *checker) checkMaskSemantics(ctx context.Context) (string, error) {
 	if near(r1, r2) && near(g1, g2) && near(b1, b2) {
 		return "", fmt.Errorf("white-mask pixel at (%d,%d) unchanged — masked region was not generated", cx, cx)
 	}
-	return "black region preserved, white region generated", nil
+
+	// Removal contract (spec §2): an inpaint job with the prompt OMITTED must
+	// be accepted and obey the same mask semantics — background reconstructed
+	// in the white region, black region untouched. (What fills the region is
+	// the model's business; that it changes and preserves is the contract.)
+	rid := fmt.Sprintf("j_conf_removal_%d", time.Now().UnixNano())
+	rbody := map[string]any{
+		"id": rid, "task": "inpaint", "profile": "draft",
+		"output": map[string]any{"width": dim, "height": dim},
+		"conditioning": map[string]any{
+			"source_image": map[string]any{"url": srcURL},
+			"mask":         map[string]any{"url": maskURL},
+		},
+		"upload": map[string]any{"artifacts": []map[string]any{{"put_url": recv.putURL("/a1"), "content_type": "image/png"}}},
+	}
+	resp, data, err = c.do(ctx, "POST", "/v1/jobs", rbody, true)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 202 && resp.StatusCode != 200 {
+		return "", fmt.Errorf("removal create (no prompt): want 202/200, got %d: %s", resp.StatusCode, data)
+	}
+	rj, err := c.poll(ctx, rid)
+	if err != nil {
+		return "", err
+	}
+	if rj["state"] != "complete" {
+		return "", fmt.Errorf("removal (empty prompt): want complete, got %v (error: %v)", rj["state"], rj["error"])
+	}
+	rout, _, err := image.Decode(bytes.NewReader(recv.body("/a1")))
+	if err != nil {
+		return "", fmt.Errorf("removal artifact does not decode as an image: %w", err)
+	}
+	for _, p := range [][2]int{{4, 4}, {dim - 4, dim - 4}} {
+		r1, g1, b1, _ := src.At(p[0], p[1]).RGBA()
+		r2, g2, b2, _ := rout.At(p[0], p[1]).RGBA()
+		if !near(r1, r2) || !near(g1, g2) || !near(b1, b2) {
+			return "", fmt.Errorf("removal modified a black-mask pixel at %v", p)
+		}
+	}
+	r1, g1, b1, _ = src.At(cx, cx).RGBA()
+	r2, g2, b2, _ = rout.At(cx, cx).RGBA()
+	if near(r1, r2) && near(g1, g2) && near(b1, b2) {
+		return "", fmt.Errorf("removal left the white-mask region unchanged")
+	}
+	return "generation + removal: black regions preserved, white regions changed", nil
 }
 
 func encodePNG(img image.Image) []byte {

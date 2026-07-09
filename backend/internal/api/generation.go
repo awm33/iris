@@ -31,6 +31,10 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("job.model_endpoint_id and job.task are required"))
 	}
+	// Canonicalize: removal keys on EXACTLY "" downstream (naming, endpoint
+	// contract) — a whitespace-only prompt must not be named "removal" while
+	// behaving as generation.
+	j.Prompt = strings.TrimSpace(j.Prompt)
 	// Empty prompt is a REMOVAL for inpaint (spec §2: reconstruct background,
 	// insert nothing); every other task needs one.
 	if j.Prompt == "" && j.Task != "inpaint" {

@@ -61,7 +61,7 @@ function JobCard({ job }: { job: GenerationJob }) {
   return (
     <div className={`job-card state-${stateLabel[job.state] ?? "unknown"}`}>
       <div className="job-main">
-        <div className="name">{job.prompt || job.id}</div>
+        <div className="name">{job.prompt || (job.task === "inpaint" ? "removal" : job.id)}</div>
         <div className="meta">
           {stateLabel[job.state]} · {job.count > 1 ? `${job.count} takes · ` : ""}
           {job.task} · {job.profile}
