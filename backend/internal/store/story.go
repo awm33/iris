@@ -438,12 +438,35 @@ func (s *Store) SelectTake(ctx context.Context, shotID, takeID string) error {
 		if _, err := tx.Exec(ctx, `
 			UPDATE shots SET continuity_stale = true, updated_at = now()
 			WHERE scene_id = $1 AND position > $2 AND NOT continuity_stale
+			  AND NOT pinned
 			  AND EXISTS (SELECT 1 FROM takes WHERE takes.shot_id = shots.id)`,
 			sceneID, position); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// TakeRecipe returns a take's raw recipe JSON (replay provenance).
+func (s *Store) TakeRecipe(ctx context.Context, takeID string) ([]byte, error) {
+	var recipe []byte
+	err := s.pool.QueryRow(ctx, `SELECT recipe FROM takes WHERE id = $1`, takeID).Scan(&recipe)
+	return recipe, wrapNotFound(err)
+}
+
+// TakeWasCarried: was this take generated WITH first-frame continuity —
+// either an explicit first_frame ref or a dispatch-resolved dependency
+// carry? Defines chain membership for RegenerateChain.
+func (s *Store) TakeWasCarried(ctx context.Context, takeID string) (bool, error) {
+	if takeID == "" {
+		return false, nil
+	}
+	var carried bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(recipe->'request'->'conditioning'->'first_frame'->>'version_id', '') <> ''
+		       OR COALESCE((recipe->'request'->>'carry_from_depends_on')::bool, false)
+		FROM takes WHERE id = $1`, takeID).Scan(&carried)
+	return carried, wrapNotFound(err)
 }
 
 // ChainEdge: to_shot's selected take carries from_shot's take as its

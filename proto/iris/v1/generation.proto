@@ -72,11 +72,19 @@ message GenerationJob {
   double cost_estimate = 22;
   double cost_actual = 23;
   repeated string artifact_version_ids = 24;
+  // Chain regeneration: resolve first_frame at DISPATCH from the dependency
+  // job's landed artifact (video → its last frame, image → as-is). Requires
+  // depends_on_job_id; mutually exclusive with conditioning.first_frame.
+  bool carry_from_depends_on = 25;
   Timestamps timestamps = 15;
 }
 
 service GenerationService {
   rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
+  // W3: regenerate a continuity chain — one count=1 job per chained shot
+  // from start_shot_id forward, each depends_on the previous and carries
+  // its landed frame. Stops at pinned or unchained shots.
+  rpc RegenerateChain(RegenerateChainRequest) returns (RegenerateChainResponse);
   rpc GetJob(GetJobRequest) returns (GetJobResponse);
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
@@ -87,6 +95,8 @@ service GenerationService {
 }
 
 message CreateJobRequest { GenerationJob job = 1; }
+message RegenerateChainRequest { string start_shot_id = 1; }
+message RegenerateChainResponse { repeated string job_ids = 1; }
 message CreateJobResponse { GenerationJob job = 1; }
 
 message GetJobRequest { string id = 1; }

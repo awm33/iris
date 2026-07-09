@@ -319,6 +319,27 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	// refs signed at dispatch time. Kind IS validated here — a video version
 	// as a mask would otherwise burn every retry attempt on an endpoint
 	// decode failure before parking mislabeled "internal".
+	// Dependency carry resolves HERE — the dependency's artifact didn't
+	// exist at create time. The resolved ref is written back into req so
+	// provenance is true: the landed take's recipe carries the concrete
+	// version (chain edges + lineage derive from it), not just a flag.
+	if req.CarryFromDependsOn && job.DependsOnJobID != "" {
+		dep, err := o.Store.GetGenJob(ctx, job.DependsOnJobID)
+		if err != nil {
+			return nil, "", fmt.Errorf("load dependency %s: %w", job.DependsOnJobID, err)
+		}
+		if len(dep.ArtifactVersionIDs) == 0 {
+			return nil, "", &inference.ValidationError{Msg: fmt.Sprintf(
+				"dependency %s completed with no artifacts to carry from", job.DependsOnJobID)}
+		}
+		if req.Conditioning == nil {
+			req.Conditioning = &store.GenConditioning{}
+		}
+		req.Conditioning.FirstFrame = &store.GenRef{VersionID: dep.ArtifactVersionIDs[0]}
+		if newJSON, merr := json.Marshal(req); merr == nil {
+			job.Request = newJSON
+		}
+	}
 	if c := req.Conditioning; c != nil {
 		infReq.Conditioning = &inference.Conditioning{}
 		if c.FirstFrame != nil {

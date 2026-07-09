@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -26,7 +27,16 @@ const (
 )
 
 func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[irisv1.CreateJobRequest]) (*connect.Response[irisv1.CreateJobResponse], error) {
-	j := req.Msg.Job
+	created, err := s.createJobMsg(ctx, req.Msg.Job)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&irisv1.CreateJobResponse{Job: genJobPB(created)}), nil
+}
+
+// createJobMsg is CreateJob's core, shared with RegenerateChain (which
+// constructs one job message per chain link).
+func (s *GenerationServer) createJobMsg(ctx context.Context, j *irisv1.GenerationJob) (*store.GenJob, error) {
 	if j == nil || j.ModelEndpointId == "" || j.Task == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("job.model_endpoint_id and job.task are required"))
@@ -118,7 +128,7 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 	if err != nil {
 		return nil, connectErr(err)
 	}
-	return connect.NewResponse(&irisv1.CreateJobResponse{Job: genJobPB(created)}), nil
+	return created, nil
 }
 
 // validateTarget checks a generation target: it must exist AND belong to the
@@ -264,7 +274,168 @@ func (s *GenerationServer) toGenRequest(j *irisv1.GenerationJob, count int) (*st
 		return nil, nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("inpaint requires conditioning.source_image and conditioning.mask"))
 	}
+	if j.CarryFromDependsOn {
+		if j.DependsOnJobId == "" {
+			return nil, nil, connect.NewError(connect.CodeInvalidArgument,
+				errors.New("carry_from_depends_on requires depends_on_job_id"))
+		}
+		if genReq.Conditioning != nil && genReq.Conditioning.FirstFrame != nil {
+			return nil, nil, connect.NewError(connect.CodeInvalidArgument,
+				errors.New("carry_from_depends_on and conditioning.first_frame are mutually exclusive"))
+		}
+		genReq.CarryFromDependsOn = true
+		if infReq.Conditioning == nil {
+			infReq.Conditioning = &inference.Conditioning{}
+		}
+		// Placeholder so the manifest capability check runs at CREATE time —
+		// the real URL resolves at dispatch from the dependency's artifact.
+		infReq.Conditioning.FirstFrame = &inference.FrameRef{}
+	}
 	return genReq, infReq, nil
+}
+
+// RegenerateChain (W3): one count=1 job per chained shot from start_shot_id
+// forward in scene order — the first carries from the CURRENT upstream
+// selected take, each subsequent from its dependency's landed artifact.
+// The chain stops at a pinned shot (frozen by the user) or the first shot
+// that wasn't itself generated with a carry (unchained).
+func (s *GenerationServer) RegenerateChain(ctx context.Context, req *connect.Request[irisv1.RegenerateChainRequest]) (*connect.Response[irisv1.RegenerateChainResponse], error) {
+	if req.Msg.StartShotId == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("start_shot_id is required"))
+	}
+	start, err := s.Store.GetShot(ctx, req.Msg.StartShotId)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	if start.Pinned {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("start shot is pinned"))
+	}
+	sc, _, shots, err := s.Store.GetScene(ctx, start.SceneID)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+
+	// The chain: start shot, then following shots whose selected take was
+	// generated WITH a carry (recipe provenance), stopping at pins.
+	type link struct{ shot *store.ShotRow }
+	var chain []link
+	for _, sh := range shots {
+		if sh.Position < start.Position {
+			continue
+		}
+		if sh.ID != start.ID {
+			if sh.Pinned {
+				break
+			}
+			chained, err := s.Store.TakeWasCarried(ctx, sh.SelectedTakeID)
+			if err != nil || !chained {
+				break
+			}
+		}
+		if sh.SelectedTakeID == "" {
+			break // nothing to replay
+		}
+		chain = append(chain, link{shot: sh})
+	}
+	if len(chain) == 0 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no regenerable shots in the chain"))
+	}
+
+	// Upstream carry input for the FIRST link: nearest earlier shot with a
+	// selected take (matches the generate panel's semantics).
+	var firstCarry string
+	for _, sh := range shots {
+		if sh.Position >= start.Position {
+			break
+		}
+		if sh.SelectedTakeVersionID != "" {
+			firstCarry = sh.SelectedTakeVersionID
+		}
+	}
+
+	resp := &irisv1.RegenerateChainResponse{}
+	prevJobID := ""
+	for i, l := range chain {
+		j, err := s.jobFromTakeRecipe(ctx, l.shot, sc.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		j.Count = 1
+		j.Seed = 0 // fresh takes
+		if i == 0 {
+			if firstCarry != "" {
+				j.Conditioning = &irisv1.Conditioning{FirstFrame: &irisv1.AssetRef{VersionId: firstCarry}}
+			}
+		} else {
+			j.DependsOnJobId = prevJobID
+			j.CarryFromDependsOn = true
+			j.Conditioning = nil
+		}
+		created, cerr := s.createJobMsg(ctx, j)
+		if cerr != nil {
+			// Mid-chain failure: earlier links already run — report what
+			// was created rather than pretending atomicity we don't have.
+			if len(resp.JobIds) > 0 {
+				return connect.NewResponse(resp), nil
+			}
+			return nil, cerr
+		}
+		prevJobID = created.ID
+		resp.JobIds = append(resp.JobIds, created.ID)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// jobFromTakeRecipe rebuilds a CreateJob message from a shot's selected
+// take's recipe — the replayable provenance (endpoint, task, profile,
+// prompt, output, references).
+func (s *GenerationServer) jobFromTakeRecipe(ctx context.Context, sh *store.ShotRow, projectID string) (*irisv1.GenerationJob, error) {
+	recipe, err := s.Store.TakeRecipe(ctx, sh.SelectedTakeID)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	var r struct {
+		EndpointID string `json:"endpoint_id"`
+		Task       string `json:"task"`
+		Profile    string `json:"profile"`
+		Request    struct {
+			Prompt         string          `json:"prompt"`
+			NegativePrompt string          `json:"negative_prompt"`
+			Output         json.RawMessage `json:"output"`
+			References     []store.GenRef  `json:"references"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(recipe, &r); err != nil || r.EndpointID == "" {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("shot %s's selected take has no replayable recipe", sh.ID))
+	}
+	j := &irisv1.GenerationJob{
+		ProjectId:       projectID,
+		ModelEndpointId: r.EndpointID,
+		Task:            r.Task,
+		Profile:         r.Profile,
+		Prompt:          r.Request.Prompt,
+		NegativePrompt:  r.Request.NegativePrompt,
+		TargetEntityId:  sh.ID,
+	}
+	if len(r.Request.Output) > 0 {
+		var out struct {
+			Width     int32   `json:"width"`
+			Height    int32   `json:"height"`
+			DurationS float64 `json:"duration_s"`
+			FPS       float64 `json:"fps"`
+		}
+		if json.Unmarshal(r.Request.Output, &out) == nil {
+			j.Output = &irisv1.OutputSpec{Width: out.Width, Height: out.Height, DurationS: out.DurationS, Fps: out.FPS}
+		}
+	}
+	for _, ref := range r.Request.References {
+		j.References = append(j.References, &irisv1.Reference{
+			Kind: ref.Kind, Role: ref.Role, Weight: ref.Weight,
+			Asset: &irisv1.AssetRef{AssetId: ref.AssetID, VersionId: ref.VersionID},
+		})
+	}
+	return j, nil
 }
 
 func (s *GenerationServer) GetJob(ctx context.Context, req *connect.Request[irisv1.GetJobRequest]) (*connect.Response[irisv1.GetJobResponse], error) {
@@ -436,6 +607,7 @@ func genJobPB(j *store.GenJob) *irisv1.GenerationJob {
 			Asset: &irisv1.AssetRef{AssetId: r.AssetID, VersionId: r.VersionID},
 		})
 	}
+	pb.CarryFromDependsOn = genReq.CarryFromDependsOn
 	if c := genReq.Conditioning; c != nil {
 		pb.Conditioning = &irisv1.Conditioning{}
 		if c.FirstFrame != nil {

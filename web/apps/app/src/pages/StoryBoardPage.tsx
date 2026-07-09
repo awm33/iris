@@ -258,6 +258,28 @@ function SceneColumn(props: {
   );
 }
 
+function PinToggle(props: { shot: Shot; sceneId: string }) {
+  const qc = useQueryClient();
+  const pin = useMutation({
+    mutationFn: () => storyClient.updateShot({ id: props.shot.id, pinned: !props.shot.pinned }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["scene", props.sceneId] }),
+  });
+  return (
+    <button
+      className="chip-x"
+      title={
+        props.shot.pinned
+          ? "Unpin (stale propagation and chain regeneration include this shot again)"
+          : "Pin — freeze this shot: never marked stale, chain regeneration stops here"
+      }
+      disabled={pin.isPending}
+      onClick={() => pin.mutate()}
+    >
+      {props.shot.pinned ? "📌" : "📍"}
+    </button>
+  );
+}
+
 function BoardShotCard(props: {
   index: number;
   shot: Shot;
@@ -314,8 +336,10 @@ function BoardShotCard(props: {
           {sh.selectedTakeId ? " · ✓" : ""}
           {props.generating ? " · ⟳ generating" : ""}
           {sh.continuityStale ? " · ⚠ stale" : ""}
+          {sh.pinned ? " · 📌" : ""}
         </div>
         <div className="board-shot-actions">
+          <PinToggle shot={sh} sceneId={props.sceneId} />
           {chain && (
             <button
               className={`chip-add btn secondary${chain.fresh ? "" : " board-chip-stale"}`}
@@ -338,6 +362,7 @@ function BoardShotCard(props: {
       {inspecting && chain && (
         <ChainInspector
           chain={chain}
+          toShotId={sh.id}
           fromShotNo={props.fromShotNo}
           toShotNo={props.index + 1}
           onRegenerate={props.onGenerate}
@@ -361,13 +386,23 @@ function BoardShotCard(props: {
 
 function ChainInspector(props: {
   chain: ChainEdge;
+  toShotId: string;
   fromShotNo?: number;
   toShotNo: number;
   onRegenerate: () => void;
   onClose: () => void;
 }) {
   useEscape(props.onClose);
+  const qc = useQueryClient();
   const chain = props.chain;
+  const regenChain = useMutation({
+    mutationFn: () => generationClient.regenerateChain({ startShotId: props.toShotId }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["jobs"] });
+      void qc.invalidateQueries({ queryKey: ["scene"] });
+      void qc.invalidateQueries({ queryKey: ["chains"] });
+    },
+  });
   return (
     <div className="overlay" onClick={props.onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-label="Continuity chain" onClick={(e) => e.stopPropagation()}>
@@ -395,17 +430,32 @@ function ChainInspector(props: {
                 : "⚠ Stale — the upstream selection changed since this carry. Regenerate to continue the current pick."}
             </div>
             {!chain.fresh && (
-              <button
-                className="btn"
-                style={{ marginTop: 10 }}
-                onClick={() => {
-                  props.onClose();
-                  props.onRegenerate();
-                }}
-              >
-                ⚡ Regenerate with current upstream
-              </button>
+              <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    props.onClose();
+                    props.onRegenerate();
+                  }}
+                >
+                  ⚡ Regenerate this shot
+                </button>
+                <button
+                  className="btn secondary"
+                  disabled={regenChain.isPending}
+                  title="One count=1 job per chained shot from here forward, each carrying its predecessor's landed frame (depends_on ordering). Stops at pinned or unchained shots."
+                  onClick={() => regenChain.mutate()}
+                >
+                  {regenChain.isPending ? "⟳ queuing…" : "⛓⟳ Regenerate chain"}
+                </button>
+              </div>
             )}
+            {regenChain.isSuccess && (
+              <div className="meta" style={{ marginTop: 6 }}>
+                ⟳ {regenChain.data.jobIds.length} chained job{regenChain.data.jobIds.length !== 1 ? "s" : ""} queued — takes arrive in order.
+              </div>
+            )}
+            {regenChain.isError && <div className="status error">{String(regenChain.error)}</div>}
           </div>
         </div>
       </div>

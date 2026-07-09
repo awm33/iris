@@ -35,6 +35,8 @@ type GenRequest struct {
 	Output         json.RawMessage  `json:"output,omitempty"`
 	References     []GenRef         `json:"references,omitempty"`
 	Conditioning   *GenConditioning `json:"conditioning,omitempty"`
+	// Resolve first_frame at dispatch from the dependency's landed artifact.
+	CarryFromDependsOn bool `json:"carry_from_depends_on,omitempty"`
 	Params         json.RawMessage  `json:"params,omitempty"`
 }
 
