@@ -3,7 +3,7 @@ import { type CanvasDoc, type LayerState, newOpId, type StrokeOp } from "@iris/d
 import { composite, drawLiveSegment, drawStroke, type LayerRasterCache, type ViewTransform } from "./renderer";
 import { type Selection, traceSelection } from "./genfill";
 
-export type CanvasTool = "pan" | "brush" | "eraser" | "marquee" | "lasso";
+export type CanvasTool = "pan" | "brush" | "eraser" | "marquee" | "lasso" | "subject";
 
 /**
  * The drawing surface: composites the doc under a pan/zoom transform and
@@ -30,6 +30,8 @@ export function CanvasViewport(props: {
   onSelectionChange?: (sel: Selection | undefined) => void;
   /** Ephemeral top layer (gen-fill candidate being previewed in place). */
   overlayLayer?: LayerState;
+  /** Subject tool: a click in doc coordinates (shiftKey = exclude region). */
+  onSubjectClick?: (pt: [number, number], negative: boolean) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -83,7 +85,8 @@ export function CanvasViewport(props: {
     });
   };
 
-  /** Marching-ants outline over the composite (two-pass dash for contrast). */
+  /** Marching-ants outline over the composite (two-pass dash for contrast);
+   * bitmap selections render as a tint + dashed bbox (no path to dash). */
   const drawSelectionOverlay = (canvas: HTMLCanvasElement, dpr: number) => {
     const sel = propsRef.current.selection;
     if (!sel) return;
@@ -91,6 +94,17 @@ export function CanvasViewport(props: {
     const ctx = canvas.getContext("2d")!;
     ctx.save();
     ctx.setTransform(vt.scale * dpr, 0, 0, vt.scale * dpr, vt.x * dpr, vt.y * dpr);
+    if (sel.kind === "bitmap") {
+      ctx.drawImage(sel.tintCanvas, 0, 0);
+      ctx.beginPath();
+      ctx.rect(sel.bbox.x, sel.bbox.y, sel.bbox.w, sel.bbox.h);
+      ctx.lineWidth = 1.5 / vt.scale;
+      ctx.strokeStyle = "rgba(255,255,255,0.7)";
+      ctx.setLineDash([6 / vt.scale, 6 / vt.scale]);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
     traceSelection(ctx, sel);
     ctx.lineWidth = 1.5 / vt.scale;
     ctx.strokeStyle = "rgba(0,0,0,0.85)";
@@ -179,6 +193,10 @@ export function CanvasViewport(props: {
       return;
     }
     if (e.button !== 0) return;
+    if (props.tool === "subject") {
+      propsRef.current.onSubjectClick?.(toDoc(e), e.shiftKey);
+      return;
+    }
     if (props.tool === "marquee" || props.tool === "lasso") {
       const pt = toDoc(e);
       capture(e);

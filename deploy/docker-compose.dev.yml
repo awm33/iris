@@ -60,6 +60,15 @@ services:
     ports: ["127.0.0.1:8902:8900"]
     volumes: [lama-models:/models]
 
+  # SAM subject-select (MobileSAM ONNX) — click-to-mask tool service, proxied
+  # through the Iris API. Not an inference-api endpoint: interactive tool,
+  # not a generation task.
+  sam:
+    build:
+      context: ../deploy/sam
+    ports: ["127.0.0.1:8903:8900"]
+    volumes: [sam-models:/models]
+
   # keycloak: deferred — auth v0 is session-cookie against a seeded user (M1);
   # OSS IdP lands per plan §M8/backlog.
 
@@ -67,3 +76,4 @@ volumes:
   pgdata:
   miniodata:
   lama-models:
+  sam-models:

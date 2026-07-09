@@ -1,15 +1,20 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 
 	irisv1 "github.com/awm33/iris/backend/gen/iris/v1"
+	"github.com/awm33/iris/backend/internal/blob"
 	"github.com/awm33/iris/backend/internal/store"
 )
 
@@ -17,8 +22,13 @@ import (
 // client-owned vocabulary (web/packages/doc-runtime); the server validates
 // shape and size, assigns seqs, and stays out of semantics — the same
 // untrusted-input posture as everywhere else, applied to our own client.
+// It also proxies the SAM subject-select tool service (SubjectMask): the
+// browser never talks to model containers directly.
 type CanvasServer struct {
-	Store *store.Store
+	Store  *store.Store
+	Blob   *blob.Store
+	SamURL string // "" = subject select not configured
+	HTTP   *http.Client
 }
 
 const (
@@ -160,6 +170,62 @@ func (s *CanvasServer) DeleteCanvas(ctx context.Context, req *connect.Request[ir
 		return nil, connectErr(err)
 	}
 	return connect.NewResponse(&irisv1.DeleteCanvasResponse{}), nil
+}
+
+const maxSubjectPoints = 16
+
+func (s *CanvasServer) SubjectMask(ctx context.Context, req *connect.Request[irisv1.SubjectMaskRequest]) (*connect.Response[irisv1.SubjectMaskResponse], error) {
+	if s.SamURL == "" {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("subject select not configured — start the sam service and set IRIS_SAM_URL"))
+	}
+	m := req.Msg
+	if m.VersionId == "" || len(m.Points) == 0 || len(m.Points) > maxSubjectPoints {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("version_id and 1..%d points are required", maxSubjectPoints))
+	}
+	info, err := s.Store.GetVersionObjectInfo(ctx, m.VersionId)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	if !strings.HasPrefix(info.ContentType, "image/") {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("subject select needs an image version"))
+	}
+	// External presign: the tool container fetches via host.docker.internal,
+	// same as generation endpoints.
+	url, err := s.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, 5*time.Minute)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	points := make([][3]float64, 0, len(m.Points))
+	for _, p := range m.Points {
+		label := 1.0
+		if p.Negative {
+			label = 0
+		}
+		points = append(points, [3]float64{p.X, p.Y, label})
+	}
+	body, _ := json.Marshal(map[string]any{"image_url": url, "points": points})
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.SamURL+"/mask", bytes.NewReader(body))
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer dev")
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := s.HTTP.Do(httpReq)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("subject-select service: %w", err))
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			fmt.Errorf("subject-select service: HTTP %d: %s", resp.StatusCode, truncateRunes(string(data), 200)))
+	}
+	return connect.NewResponse(&irisv1.SubjectMaskResponse{MaskPng: data}), nil
 }
 
 func canvasPB(c *store.Canvas) *irisv1.Canvas {

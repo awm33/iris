@@ -48,6 +48,9 @@ func main() {
 		SecretKey:      getenv("IRIS_S3_SECRET_KEY", "iris-dev-secret"),
 		Bucket:         getenv("IRIS_S3_BUCKET", "iris-media"),
 		PublicEndpoint: os.Getenv("IRIS_S3_PUBLIC_ENDPOINT"), // set when browser reaches MinIO differently
+		// Dockerized tool services (SAM) fetch via host.docker.internal —
+		// same contract as the orchestrator's model-endpoint presigns.
+		ExternalEndpoint: getenv("IRIS_S3_EXTERNAL_ENDPOINT", "host.docker.internal:9100"),
 	})
 	if err != nil {
 		slog.Error("blob init", "err", err)
@@ -86,7 +89,11 @@ func main() {
 	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl, Pexels: pex}, opts))
 	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}, opts))
 	mux.Handle(irisv1connect.NewStoryServiceHandler(&api.StoryServer{Store: st}, opts))
-	mux.Handle(irisv1connect.NewCanvasServiceHandler(&api.CanvasServer{Store: st}, opts))
+	mux.Handle(irisv1connect.NewCanvasServiceHandler(&api.CanvasServer{
+		Store: st, Blob: bl,
+		SamURL: getenv("IRIS_SAM_URL", "http://localhost:8903"),
+		HTTP:   &http.Client{Timeout: 60 * time.Second},
+	}, opts))
 
 	slog.Info("iris-api listening", "addr", addr)
 	srv := &http.Server{
