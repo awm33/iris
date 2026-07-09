@@ -88,6 +88,9 @@ service StoryService {
   rpc RemoveView(RemoveViewRequest) returns (RemoveViewResponse);
 
   rpc CreateShot(CreateShotRequest) returns (CreateShotResponse);
+  // Single-shot lookup: timeline clips carry only a shot_id and resolve the
+  // selected take (selected_take_version_id) at preview time.
+  rpc GetShot(GetShotRequest) returns (GetShotResponse);
   rpc UpdateShot(UpdateShotRequest) returns (UpdateShotResponse);
   rpc DeleteShot(DeleteShotRequest) returns (DeleteShotResponse);
 
@@ -157,6 +160,9 @@ message UpdateShotResponse { Shot shot = 1; }
 
 message DeleteShotRequest { string id = 1; }
 message DeleteShotResponse {}
+
+message GetShotRequest { string id = 1; }
+message GetShotResponse { Shot shot = 1; }
 
 message ListTakesRequest { string shot_id = 1; }
 message ListTakesResponse { repeated Take takes = 1; }

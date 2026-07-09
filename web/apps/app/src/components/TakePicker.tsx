@@ -29,6 +29,7 @@ export function TakePicker(props: {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["scene"] });
       void qc.invalidateQueries({ queryKey: ["takes", props.shotId] });
+      void qc.invalidateQueries({ queryKey: ["shot", props.shotId] }); // timeline preview resolution
     },
   });
 

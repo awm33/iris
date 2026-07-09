@@ -241,6 +241,14 @@ func (s *StoryServer) ListTakes(ctx context.Context, req *connect.Request[irisv1
 	return connect.NewResponse(resp), nil
 }
 
+func (s *StoryServer) GetShot(ctx context.Context, req *connect.Request[irisv1.GetShotRequest]) (*connect.Response[irisv1.GetShotResponse], error) {
+	sh, err := s.Store.GetShot(ctx, req.Msg.Id)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	return connect.NewResponse(&irisv1.GetShotResponse{Shot: shotPB(sh)}), nil
+}
+
 func (s *StoryServer) SelectTake(ctx context.Context, req *connect.Request[irisv1.SelectTakeRequest]) (*connect.Response[irisv1.SelectTakeResponse], error) {
 	if err := s.Store.SelectTake(ctx, req.Msg.ShotId, req.Msg.TakeId); err != nil {
 		return nil, connectErr(err)

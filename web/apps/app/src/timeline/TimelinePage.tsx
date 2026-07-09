@@ -77,6 +77,9 @@ export function TimelinePage(props: {
   } | null>(null);
   const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number; duration: number } | null>(null);
   const bladeRef = useRef<() => void>(() => {});
+  const [playing, setPlaying] = useState(false);
+  const playRef = useRef<{ raf: number } | null>(null);
+  const togglePlayRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     let cancelled = false;
@@ -153,7 +156,7 @@ export function TimelinePage(props: {
       const t = e.target as HTMLElement;
       // <select> type-ahead ("b"…) and sibling panels' form fields must
       // never reach doc-mutating hotkeys.
-      if (t.isContentEditable || t.closest?.("input,textarea,select,[contenteditable]")) return;
+      if (t.isContentEditable || t.closest?.("input,textarea,select,[contenteditable],.panel")) return;
       // No doc mutation while a picker modal is open (the edit would land
       // invisibly behind the overlay — and Escape belongs to the modal) or
       // mid-drag (the pending gesture would commit from a stale orig).
@@ -164,6 +167,14 @@ export function TimelinePage(props: {
         return;
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === " ") {
+        // Cancel default BEFORE the repeat check: uncancelled repeats
+        // scroll the page and re-arm focused-button click-on-keyup.
+        e.preventDefault();
+        if (e.repeat) return;
+        togglePlayRef.current?.();
+        return;
+      }
       if (e.key === "b" || e.key === "B") bladeRef.current?.();
       else if (e.key === "Delete" || e.key === "Backspace") {
         const id = selectedRef.current;
@@ -176,6 +187,55 @@ export function TimelinePage(props: {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [session]);
+
+  // Playback v1: a wall-clock rAF loop drives the playhead; the preview
+  // video chases it (drift-corrected). Uniform across media clips, shot
+  // placeholders and gaps — frame-accurate compositing arrives with the
+  // WebCodecs engine.
+  const stopPlay = () => {
+    if (playRef.current) cancelAnimationFrame(playRef.current.raf);
+    playRef.current = null;
+    setPlaying(false);
+  };
+  const startPlay = () => {
+    const pdoc = session?.doc;
+    if (playRef.current || !pdoc) return;
+    const end0 = timelineDuration(pdoc.state);
+    if (end0 <= 0) return;
+    // At the end, space restarts from the top (player muscle memory).
+    const t0 = timeRef.current >= end0 - 0.01 ? 0 : timeRef.current;
+    const start = performance.now();
+    setPlaying(true);
+    const step = () => {
+      const t = t0 + (performance.now() - start) / 1000;
+      const end = timelineDuration(pdoc.state); // re-read: edits mid-play move the end
+      if (t >= end) {
+        seek(end);
+        stopPlay();
+        return;
+      }
+      seek(t);
+      playRef.current = { raf: requestAnimationFrame(step) };
+    };
+    playRef.current = { raf: requestAnimationFrame(step) };
+  };
+  const togglePlay = () => (playRef.current ? stopPlay() : startPlay());
+  useEffect(() => {
+    togglePlayRef.current = togglePlay;
+  });
+  useEffect(() => {
+    // rAF freezes in hidden tabs but the unmuted <video> keeps playing —
+    // audio would run past the clip's out-point with the playhead frozen.
+    const onVis = () => {
+      if (document.hidden) stopPlay();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      stopPlay(); // unmount: kill the loop
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const blade = () => {
     const bdoc = session?.doc;
@@ -317,15 +377,17 @@ export function TimelinePage(props: {
         <button className="btn secondary" disabled={!doc.canUndo} onClick={() => doc.undo()}>↩</button>
         <button className="btn secondary" disabled={!doc.canRedo} onClick={() => doc.redo()}>↪</button>
         <button className="btn secondary" title="Blade at playhead (B)" onClick={blade}>🔪</button>
+        <button className="btn secondary" title="Play/pause (space)" onClick={togglePlay}>{playing ? "⏸" : "▶"}</button>
         <span className={`status${status === "error" ? " error" : ""}`}>{status === "saved" ? "saved" : status === "error" ? "save failed — ops kept locally" : "…"}</span>
       </div>
 
-      <PreviewPane clip={active} time={time} onGenerate={props.onGenerateForShot} />
+      <PreviewPane clip={active} time={time} playing={playing} onGenerate={props.onGenerateForShot} />
 
       <div
         className="tl-ruler"
         style={{ width: dur * PX_PER_SEC }}
         onPointerDown={(e) => {
+          stopPlay();
           const r = e.currentTarget.getBoundingClientRect();
           seek(Math.max(0, (e.clientX - r.left) / PX_PER_SEC));
           capture(e);
@@ -445,61 +507,109 @@ export function TimelinePage(props: {
   );
 }
 
-/** Clip under the playhead: media clips seek the proxy; shot placeholders
- * offer generate-into-slot. Frame-accurate compositing arrives with the
- * WebCodecs engine — this is a paused-seek preview. */
+/** Clip under the playhead. Media clips play/seek the proxy; shot clips
+ * resolve their selected take (GetShot → selected_take_version_id) and play
+ * it like media, falling back to the generate-into-slot placeholder. While
+ * playing, the wall-clock playhead leads and the video chases it — paused,
+ * every seek is exact. Only the active clip's own audio plays; audio-track
+ * mixing arrives with the WebCodecs compositor. */
+const DRIFT_S = 0.15; // correct the chase only past ~4 frames — resets stutter
+
 function PreviewPane(props: {
   clip?: { id: string; name: string; versionId?: string; shotId?: string; start: number; inPoint: number };
   time: number;
+  playing: boolean;
   onGenerate: (shotId: string, label: string) => void;
 }) {
-  const [src, setSrc] = useState<string>();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const qc = useQueryClient();
+  // Safari/Firefox can reject unmuted play() from effects (activation is
+  // per-element there, and clip switches mint new elements) — retry muted
+  // so the picture keeps running, and say so instead of freezing silently.
+  const [audioBlocked, setAudioBlocked] = useState(false);
+  const [mediaError, setMediaError] = useState(false);
+  const tryPlay = (v: HTMLVideoElement) => {
+    v.play().catch(() => {
+      v.muted = true;
+      setAudioBlocked(true);
+      v.play().catch(() => {});
+    });
+  };
   const c = props.clip;
-  useEffect(() => {
-    setSrc(undefined);
-    if (!c?.versionId) return;
-    let cancelled = false;
-    (async () => {
+
+  const shotQ = useQuery({
+    queryKey: ["shot", c?.shotId],
+    enabled: !!c?.shotId,
+    staleTime: 30_000,
+    queryFn: () => storyClient.getShot({ id: c!.shotId! }),
+  });
+  const versionId = c?.versionId || shotQ.data?.shot?.selectedTakeVersionId || undefined;
+
+  const srcQ = useQuery({
+    queryKey: ["previewSrc", versionId],
+    enabled: !!versionId,
+    staleTime: 5 * 60_000, // presigned URLs outlive this comfortably
+    retry: false,
+    queryFn: async () => {
       try {
-        const r = await assetClient.signDownload({ versionId: c.versionId!, variant: "proxy" });
-        if (!cancelled) setSrc(r.url);
+        return (await assetClient.signDownload({ versionId: versionId!, variant: "proxy" })).url;
       } catch {
-        try {
-          const r = await assetClient.signDownload({ versionId: c.versionId! });
-          if (!cancelled) setSrc(r.url);
-        } catch {
-          /* preview absent */
-        }
+        return (await assetClient.signDownload({ versionId: versionId! })).url;
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [c?.versionId]);
+    },
+  });
+  const src = versionId ? srcQ.data : undefined;
+
+  const want = c ? Math.max(0, props.time - c.start + c.inPoint) : 0;
   useEffect(() => {
     const v = videoRef.current;
-    if (v && c && !Number.isNaN(v.duration)) v.currentTime = Math.max(0, props.time - c.start + c.inPoint);
-  }, [props.time, c]);
+    if (!v || !c || Number.isNaN(v.duration)) return;
+    if (props.playing) {
+      if (Math.abs(v.currentTime - want) > DRIFT_S) v.currentTime = want;
+      if (v.paused) tryPlay(v);
+    } else {
+      if (!v.paused) v.pause();
+      v.currentTime = want;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.time, props.playing, c, want]);
+  useEffect(() => {
+    if (!props.playing) setAudioBlocked(false);
+  }, [props.playing]);
+  useEffect(() => {
+    setMediaError(false);
+  }, [versionId, srcQ.data]);
 
   return (
     <div className="tl-preview">
-      {c?.versionId && src && (
+      {src && (
         <video
+          key={versionId /* source switch = fresh element; a re-signed URL for the SAME version must not remount (black flash on refocus) */}
           ref={videoRef}
           src={src}
-          muted
+          muted={!props.playing}
           playsInline
           onLoadedMetadata={(e) => {
             // First seek can arrive before metadata; re-apply once known.
-            if (c) e.currentTarget.currentTime = Math.max(0, props.time - c.start + c.inPoint);
+            e.currentTarget.currentTime = want;
+            if (props.playing) tryPlay(e.currentTarget);
+          }}
+          onError={() => {
+            // Likely an expired presign (15 min): re-sign and let the new
+            // URL flow into src — self-healing, but say what happened.
+            setMediaError(true);
+            void qc.invalidateQueries({ queryKey: ["previewSrc", versionId] });
           }}
         />
       )}
-      {c?.shotId && (
+      {(srcQ.isError || mediaError) && (
+        <div className="meta">Preview unavailable — {mediaError ? "the signed link may have expired; retrying" : "signing failed"}.</div>
+      )}
+      {shotQ.isError && <div className="meta">Preview unavailable — shot lookup failed.</div>}
+      {audioBlocked && props.playing && <div className="tl-preview-note">🔇 audio blocked by the browser — muted playback</div>}
+      {c?.shotId && !versionId && !shotQ.isPending && !shotQ.isError && (
         <div className="tl-preview-shot">
-          <div className="meta">🎬 {c.name} — placeholder</div>
+          <div className="meta">🎬 {c.name} — no take selected</div>
           <button className="btn" onClick={() => props.onGenerate(c.shotId!, c.name)}>
             ⚡ Generate into slot
           </button>
