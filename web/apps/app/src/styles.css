@@ -410,3 +410,18 @@ body {
 .player-strip { width: 100%; height: 100%; object-fit: fill; opacity: 0.9; pointer-events: none; }
 .player-wave { position: absolute; left: 0; bottom: 0; width: 100%; height: 28px; pointer-events: none; }
 .player-head { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); pointer-events: none; }
+
+/* Timeline */
+.tl-ruler { position: relative; height: 22px; background: var(--bg-raised); border-radius: 4px 4px 0 0; cursor: ew-resize; overflow: hidden; min-width: 100%; }
+.tl-tick { position: absolute; top: 2px; font-size: 10px; color: var(--text-dim); border-left: 1px solid var(--border); padding-left: 3px; height: 100%; }
+.tl-tracks { display: flex; flex-direction: column; gap: 2px; min-width: 100%; overflow-x: auto; }
+.tl-track { position: relative; background: var(--bg-raised); border-radius: 3px; }
+.tl-audio { opacity: 0.9; }
+.tl-track-label { position: absolute; left: 4px; top: 4px; font-size: 10px; color: var(--text-dim); z-index: 1; }
+.tl-clip { position: absolute; top: 6px; bottom: 6px; background: #2d2a55; border: 1px solid var(--accent); border-radius: 4px; padding: 4px 6px; font-size: 12px; cursor: grab; display: flex; justify-content: space-between; gap: 4px; overflow: hidden; user-select: none; }
+.tl-shot { border-style: dashed; background: #26243d; }
+.tl-active { outline: 2px solid var(--ok); }
+.tl-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--ok); pointer-events: none; z-index: 2; }
+.tl-preview { height: 220px; background: #000; border-radius: 8px; margin-bottom: 10px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.tl-preview video { height: 100%; }
+.tl-preview-shot { display: flex; flex-direction: column; gap: 10px; align-items: center; }

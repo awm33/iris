@@ -7,6 +7,8 @@ import { useRef, useState } from "react";
 import { JobState } from "@iris/api-client";
 import { generationClient } from "./api";
 import { CanvasesPage } from "./canvas/CanvasesPage";
+import { TimelinesPage } from "./timeline/TimelinesPage";
+import { TimelinePage } from "./timeline/TimelinePage";
 import { CanvasPage } from "./canvas/CanvasPage";
 import { createCanvasFromAsset } from "./canvas/createFromAsset";
 import { GeneratePanel, prefillFromRecipe, type GeneratePrefill } from "./components/GeneratePanel";
@@ -18,8 +20,8 @@ import { ScenePage } from "./pages/ScenePage";
 import { ScenesPage } from "./pages/ScenesPage";
 import { useEvents } from "./useEvents";
 
-type View = "projects" | "scenes" | "characters" | "canvases" | "library" | "jobs";
-const comingSoon = ["Story", "Timelines"] as const;
+type View = "projects" | "scenes" | "characters" | "canvases" | "timelines" | "library" | "jobs";
+const comingSoon = ["Story"] as const;
 
 export function App() {
   useEvents();
@@ -28,6 +30,7 @@ export function App() {
   const [project, setProject] = useState<{ id: string; name: string }>();
   const [sceneId, setSceneId] = useState<string>();
   const [canvasId, setCanvasId] = useState<string>();
+  const [timelineId, setTimelineId] = useState<string>();
   const [canvasError, setCanvasError] = useState<string>();
   const [generating, setGenerating] = useState<
     { shotId: string; label: string; prefill?: GeneratePrefill; nonce: number } | true | false
@@ -66,6 +69,7 @@ export function App() {
         // submit into a shot the user is no longer looking at.
         setSceneId(undefined);
         setCanvasId(undefined);
+        setTimelineId(undefined);
         setGenerating(false);
       }}
     >
@@ -88,6 +92,7 @@ export function App() {
         {navButton("scenes", "Scenes")}
         {navButton("characters", "Characters")}
         {navButton("canvases", "Canvases")}
+        {navButton("timelines", "Timelines")}
         {navButton("library", "Library")}
         {navButton("jobs", activeJobs > 0 ? `Jobs ⟳${activeJobs}` : "Jobs")}
       </nav>
@@ -141,6 +146,20 @@ export function App() {
               setCanvasId(undefined);
               void qc.invalidateQueries({ queryKey: ["canvases"] });
             }}
+          />
+        )}
+        {view === "timelines" && project && !timelineId && (
+          <TimelinesPage projectId={project.id} onOpen={(id) => setTimelineId(id)} />
+        )}
+        {view === "timelines" && project && timelineId && (
+          <TimelinePage
+            key={timelineId}
+            timelineId={timelineId}
+            projectId={project.id}
+            onBack={() => setTimelineId(undefined)}
+            onGenerateForShot={(shotId, label) =>
+              setGenerating({ shotId, label, nonce: ++generateNonce.current })
+            }
           />
         )}
         {view === "library" && (

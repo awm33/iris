@@ -89,6 +89,7 @@ func main() {
 	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl, Pexels: pex}, opts))
 	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}, opts))
 	mux.Handle(irisv1connect.NewStoryServiceHandler(&api.StoryServer{Store: st}, opts))
+	mux.Handle(irisv1connect.NewTimelineServiceHandler(&api.TimelineServer{Store: st}, opts))
 	mux.Handle(irisv1connect.NewCanvasServiceHandler(&api.CanvasServer{
 		Store: st, Blob: bl,
 		SamURL: getenv("IRIS_SAM_URL", "http://localhost:8903"),

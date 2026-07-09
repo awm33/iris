@@ -7,3 +7,4 @@ export * from "./gen/iris/v1/asset_pb";
 export * from "./gen/iris/v1/generation_pb";
 export * from "./gen/iris/v1/story_pb";
 export * from "./gen/iris/v1/canvas_pb";
+export * from "./gen/iris/v1/timeline_pb";
