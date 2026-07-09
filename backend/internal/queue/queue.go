@@ -41,6 +41,9 @@ const (
 	// Lease must exceed the worker's per-job timeout with margin; a healthy
 	// worker always resolves a job well inside it.
 	Lease = 5 * time.Minute
+	// MediaLease covers media jobs, which do NOT heartbeat: it must exceed
+	// the worker's longest per-kind timeout (prep: 15m) with margin.
+	MediaLease = 20 * time.Minute
 )
 
 // ErrNotOwner is returned when a completion/failure update matched no row —
@@ -114,7 +117,7 @@ func ReapStaleMediaJobs(ctx context.Context, pool *pgxpool.Pool) (requeued, park
 		    error = COALESCE(error, '') || ' [reaped: lease expired]'
 		WHERE state = 'running' AND claimed_at < now() - make_interval(secs => $1)
 		  AND attempts < $2`,
-		Lease.Seconds(), maxAttempts)
+		MediaLease.Seconds(), maxAttempts)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -124,7 +127,7 @@ func ReapStaleMediaJobs(ctx context.Context, pool *pgxpool.Pool) (requeued, park
 		SET state = 'failed', updated_at = now(),
 		    error = COALESCE(error, '') || ' [reaped: lease expired, attempts exhausted]'
 		WHERE state = 'running' AND claimed_at < now() - make_interval(secs => $1)`,
-		Lease.Seconds())
+		MediaLease.Seconds())
 	if err != nil {
 		return requeued, 0, err
 	}

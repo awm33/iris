@@ -72,24 +72,40 @@ func (w *Worker) runPrep(ctx context.Context, job *queue.MediaJob) error {
 	prefix := "derived/" + in.VersionID + "/"
 
 	if isVideo {
-		proxy, err := transcodeProxy(ctx, url)
+		proxyPath, err := transcodeProxy(ctx, url)
 		if err != nil {
 			return err
 		}
-		if err := put(prefix+"proxy.mp4", "video/mp4", proxy); err != nil {
+		if err := func() error {
+			defer os.Remove(proxyPath)
+			f, err := os.Open(proxyPath)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			st, err := f.Stat()
+			if err != nil {
+				return err
+			}
+			// Stream from disk: a 10-min proxy is hundreds of MB — never RAM.
+			return w.Blob.PutObject(ctx, prefix+"proxy.mp4", "video/mp4", f, st.Size())
+		}(); err != nil {
 			return fmt.Errorf("store proxy: %w", err)
 		}
 		meta["proxy_key"] = prefix + "proxy.mp4"
 
-		strip, cols, err := extractFilmstrip(ctx, url, durationS)
-		if err != nil {
-			return err
+		// Filmstrip failure is non-fatal for video (clips fall back to
+		// posters) — a cosmetic edge must not orphan the proxy/frames by
+		// failing the whole job.
+		if strip, cols, err := extractFilmstrip(ctx, url, durationS); err == nil {
+			if err := put(prefix+"filmstrip.jpg", "image/jpeg", strip); err != nil {
+				return fmt.Errorf("store filmstrip: %w", err)
+			}
+			meta["filmstrip_key"] = prefix + "filmstrip.jpg"
+			meta["filmstrip_cols"] = cols
+		} else if ctx.Err() != nil {
+			return err // the job's own deadline, not a media quirk
 		}
-		if err := put(prefix+"filmstrip.jpg", "image/jpeg", strip); err != nil {
-			return fmt.Errorf("store filmstrip: %w", err)
-		}
-		meta["filmstrip_key"] = prefix + "filmstrip.jpg"
-		meta["filmstrip_cols"] = cols
 
 		first, err := extractFrame(ctx, url, 0, false)
 		if err != nil {
@@ -110,20 +126,27 @@ func (w *Worker) runPrep(ctx context.Context, job *queue.MediaJob) error {
 		meta["last_frame_key"] = prefix + "last.png"
 	}
 
-	// Waveform for any audio stream (video soundtracks included). A missing
-	// audio stream is not an error — probe can't cheaply tell us, so ffmpeg's
-	// "no audio" failure is treated as "nothing to do".
-	if peaks, err := extractWaveform(ctx, url); err == nil && len(peaks) > 0 {
+	// Waveform for any audio stream (video soundtracks included). Only a
+	// genuinely-absent audio stream is "nothing to do" — transients (and the
+	// job's own deadline, since this pass runs last) must fail and retry,
+	// not silently complete without a waveform.
+	peaks, werr := extractWaveform(ctx, url)
+	switch {
+	case werr != nil && (ctx.Err() != nil || !strings.Contains(werr.Error(), "matches no streams")):
+		if isAudio || ctx.Err() != nil {
+			return werr
+		}
+		// Video with an undecodable soundtrack: log-and-skip would hide it;
+		// treat as failure too — the reaper's retry policy applies.
+		return werr
+	case len(peaks) > 0:
 		wf, _ := json.Marshal(map[string]any{"buckets": len(peaks), "peaks": peaks})
 		if err := put(prefix+"waveform.json", "application/json", wf); err != nil {
 			return fmt.Errorf("store waveform: %w", err)
 		}
 		meta["waveform_key"] = prefix + "waveform.json"
-	} else if isAudio {
-		// Pure audio without an extractable waveform IS a failure.
-		if err != nil {
-			return err
-		}
+	case isAudio:
+		return permanent(fmt.Errorf("audio version %s produced no waveform samples", in.VersionID))
 	}
 
 	metaJSON, _ := json.Marshal(meta)
@@ -143,40 +166,58 @@ func (w *Worker) runPrep(ctx context.Context, job *queue.MediaJob) error {
 	return tx.Commit(ctx)
 }
 
-// transcodeProxy renders a 720p-max H.264+AAC preview. faststart needs a
-// seekable output, so this goes through a temp file rather than a pipe.
-func transcodeProxy(ctx context.Context, url string) ([]byte, error) {
+// transcodeProxy renders a 1280x720-max H.264+AAC preview into a temp file
+// (faststart needs seekable output) and returns its path — the caller
+// streams it to blob storage and removes it. force_original_aspect_ratio
+// caps BOTH axes: a width-only cap let portrait 4K through at 1280x2276.
+func transcodeProxy(ctx context.Context, url string) (string, error) {
 	tmp, err := os.CreateTemp("", "iris-proxy-*.mp4")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
-	defer os.Remove(tmpPath)
 
 	if _, err := exec.CommandContext(ctx, "ffmpeg",
 		"-v", "error", "-y",
 		"-protocol_whitelist", protocolWhitelist,
 		"-i", url,
-		"-vf", "scale='min(1280,iw)':-2",
+		"-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
 		"-pix_fmt", "yuv420p",
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
 		tmpPath).Output(); err != nil {
-		return nil, fmt.Errorf("ffmpeg proxy: %w", withStderr(err))
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("ffmpeg proxy: %w", withStderr(err))
 	}
-	return os.ReadFile(tmpPath)
+	return tmpPath, nil
 }
 
 // extractFilmstrip tiles evenly-spaced frames into one horizontal JPEG.
 func extractFilmstrip(ctx context.Context, url string, durationS float64) ([]byte, int, error) {
+	// Sub-second or unknown durations: the fps filter can emit ZERO frames
+	// (round-to-near needs input past the half-period) — one tile of frame 0
+	// instead of a hard failure.
+	if durationS < 1 {
+		out, err := exec.CommandContext(ctx, "ffmpeg",
+			"-v", "error",
+			"-protocol_whitelist", protocolWhitelist,
+			"-i", url,
+			"-frames:v", "1",
+			"-vf", fmt.Sprintf("scale=-2:%d", filmstripTileH),
+			"-q:v", "4", "-f", "image2", "pipe:1").Output()
+		if err != nil {
+			return nil, 0, fmt.Errorf("ffmpeg filmstrip (single): %w", withStderr(err))
+		}
+		return out, 1, nil
+	}
 	cols := filmstripTiles
-	if durationS > 0 && durationS < float64(cols) {
+	if durationS < float64(cols) {
 		// Short clips: at least ~1 tile/second, minimum 2.
 		cols = max(2, int(durationS))
 	}
-	fps := float64(cols) / maxF(durationS, 0.5)
+	fps := float64(cols) / durationS
 	out, err := exec.CommandContext(ctx, "ffmpeg",
 		"-v", "error",
 		"-protocol_whitelist", protocolWhitelist,
@@ -196,20 +237,44 @@ func extractFilmstrip(ctx context.Context, url string, durationS float64) ([]byt
 // extractFrame grabs the first or last frame at full resolution as PNG.
 // The last frame is the continuity input for shot-to-shot carry (HLD W3).
 func extractFrame(ctx context.Context, url string, offsetS float64, last bool) ([]byte, error) {
-	args := []string{"-v", "error", "-protocol_whitelist", protocolWhitelist}
 	if last {
-		args = append(args, "-sseof", "-0.2")
-	} else if offsetS > 0 {
+		// The TRUE last frame: with -update 1 (and no -frames:v cap) the
+		// image2 muxer overwrites the file with every frame in the -sseof
+		// window until real EOF. -frames:v 1 would stop at the FIRST frame
+		// of the window — ~5 frames early at 24fps, a visible continuity
+		// jump for the carry-last-frame input. -update can't overwrite a
+		// pipe, hence the temp file.
+		tmp, err := os.CreateTemp("", "iris-last-*.png")
+		if err != nil {
+			return nil, err
+		}
+		tmpPath := tmp.Name()
+		_ = tmp.Close()
+		defer os.Remove(tmpPath)
+		if _, err := exec.CommandContext(ctx, "ffmpeg",
+			"-v", "error", "-y",
+			"-protocol_whitelist", protocolWhitelist,
+			"-sseof", "-0.5",
+			"-i", url,
+			"-update", "1", "-c:v", "png",
+			tmpPath).Output(); err != nil {
+			return nil, fmt.Errorf("ffmpeg last frame: %w", withStderr(err))
+		}
+		out, err := os.ReadFile(tmpPath)
+		if err != nil || len(out) == 0 {
+			// -sseof can undershoot very short clips; fall back to frame 0.
+			return extractFrame(ctx, url, 0, false)
+		}
+		return out, nil
+	}
+	args := []string{"-v", "error", "-protocol_whitelist", protocolWhitelist}
+	if offsetS > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(offsetS, 'f', 3, 64))
 	}
 	args = append(args, "-i", url, "-frames:v", "1", "-update", "1", "-f", "image2", "-c:v", "png", "pipe:1")
 	out, err := exec.CommandContext(ctx, "ffmpeg", args...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("ffmpeg frame: %w", withStderr(err))
-	}
-	if len(out) == 0 && last {
-		// -sseof can undershoot very short clips; fall back to frame 0.
-		return extractFrame(ctx, url, 0, false)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("ffmpeg produced no frame")
@@ -243,9 +308,11 @@ func extractWaveform(ctx context.Context, url string) ([]float64, error) {
 	peaks := make([]float64, buckets)
 	per := samples / buckets
 	for b := 0; b < buckets; b++ {
-		var peak int16
+		var peak int32
 		for i := b * per; i < (b+1)*per && i < samples; i++ {
-			v := int16(binary.LittleEndian.Uint16(out[i*2:]))
+			// Widen before abs: -int16(-32768) wraps to itself and would
+			// read a hard-clipped bucket as silence.
+			v := int32(int16(binary.LittleEndian.Uint16(out[i*2:])))
 			if v < 0 {
 				v = -v
 			}
@@ -253,7 +320,7 @@ func extractWaveform(ctx context.Context, url string) ([]float64, error) {
 				peak = v
 			}
 		}
-		peaks[b] = float64(peak) / 32767.0
+		peaks[b] = minF(float64(peak)/32767.0, 1.0)
 	}
 	return peaks, nil
 }

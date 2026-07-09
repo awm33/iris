@@ -35,9 +35,15 @@ type probeInput struct {
 }
 
 const (
-	claimBatch   = 4
+	// One job per claim: sequential execution after a batch claim would let
+	// slow preps outlive the lease for batch tails (NOTIFY+poll make
+	// claim-per-job cheap).
+	claimBatch = 1
 	pollFallback = 15 * time.Second
-	jobTimeout   = 2 * time.Minute
+	probeTimeout = 2 * time.Minute
+	// Prep runs multiple full-decode ffmpeg passes; a 10-min 4K clip needs
+	// hundreds of CPU-seconds. Must stay under queue.MediaLease.
+	prepTimeout = 15 * time.Minute
 	reapEvery    = time.Minute
 )
 
@@ -115,7 +121,11 @@ func (w *Worker) execute(ctx context.Context, job *queue.MediaJob) {
 		}
 	}()
 
-	jctx, cancel := context.WithTimeout(ctx, jobTimeout)
+	timeout := probeTimeout
+	if job.Kind == "prep" {
+		timeout = prepTimeout
+	}
+	jctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var err error
