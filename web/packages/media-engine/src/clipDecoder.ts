@@ -5,6 +5,7 @@
 // from the nearest sync sample. Streaming appendBuffer and audio land with
 // the compositor/audio slices.
 import * as MP4Box from "mp4box";
+import { buildIndex } from "./buildIndex";
 import { type SampleMeta, seekPointIndex, streamEnd } from "./sampleIndex";
 
 export interface ClipInfo {
@@ -82,12 +83,11 @@ export class ClipDecoder {
     // presentation time here once broke every real proxy: prep's x264
     // output has B-frames (decode order ≠ presentation order), and
     // VideoDecoder requires decode order — timestamps carry cts.
-
-    const index: SampleMeta[] = samples.map((s) => ({
-      t: s.timestampUs / 1e6,
-      duration: s.durationUs / 1e6,
-      sync: s.sync,
-    }));
+    // buildIndex removes the edit-list bias (min cts → 0) so the
+    // compositor's clock and seeks aren't skewed by ~2 frame durations.
+    const built = buildIndex(samples);
+    for (let i = 0; i < samples.length; i++) samples[i].timestampUs = built.timestampsUs[i];
+    const index: SampleMeta[] = built.index;
 
     const config: VideoDecoderConfig = {
       codec: track.codec,
@@ -125,7 +125,10 @@ export class ClipDecoder {
 
     const decoder = new VideoDecoder({
       output: (frame) => {
-        if (frame.timestamp < fromUs) {
+        // Pre-roll ends at the frame COVERING fromUs — dropping frames with
+        // timestamp < fromUs skipped the covering frame and made every
+        // paused seek land one frame late vs the play path's takeUpTo.
+        if (frame.timestamp + (frame.duration ?? 0) <= fromUs) {
           frame.close(); // pre-roll
           return;
         }
