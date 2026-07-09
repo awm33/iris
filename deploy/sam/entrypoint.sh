@@ -9,7 +9,8 @@ ZIP_URL="${SAM_MODEL_URL:-https://huggingface.co/vietanhdev/segment-anything-onn
 ZIP_SHA256="${SAM_MODEL_SHA256:-41aff2660b7531becfee21fb257c49933ddc892c554507bdb775bf504d443942}"
 
 python - <<EOF
-import hashlib, os, sys, urllib.request, zipfile
+import hashlib, os, socket, sys, urllib.request, zipfile
+socket.setdefaulttimeout(120)
 
 d = "$MODEL_DIR"
 os.makedirs(d, exist_ok=True)

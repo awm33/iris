@@ -59,6 +59,9 @@ def sessions():
         return _enc, _dec, _enc_input
 
 
+MAX_PIXELS = 48_000_000  # decompression/memory guard, well under PIL's bomb limit
+
+
 def embed(data: bytes):
     """Encoder pass with content-addressed caching. Handles both export
     styles: HWC dynamic-size inputs have preprocessing baked into the graph
@@ -69,22 +72,37 @@ def embed(data: bytes):
         if sha in _cache:
             _cache.move_to_end(sha)
             return _cache[sha]
-    img = Image.open(io.BytesIO(data)).convert("RGB")
+    img = Image.open(io.BytesIO(data))
+    if img.width * img.height > MAX_PIXELS:
+        raise ValueError(f"image exceeds {MAX_PIXELS} pixels")
+    img = img.convert("RGB")
     w, h = img.size
     scale = SIDE / max(w, h)
     enc, _, enc_input = sessions()
     shape = enc.get_inputs()[0].shape
-    if len(shape) == 3:  # (H, W, 3) raw image, preprocessing in-graph
-        tensor = np.asarray(img, dtype=np.float32)
-    else:  # (1, 3, 1024, 1024) classic export
+    if len(shape) == 3:
+        # anylabeling/samexporter HWC export: the CALLER does the geometry —
+        # aspect-preserving resize onto a fixed 1024x684 canvas, coords in
+        # that frame, orig_im_size=(684,1024), then crop+resize the mask
+        # back. Feeding the raw image only coincidentally works for wide
+        # landscapes (where 1024/w == 1024/max(w,h)) — ground-truth-tested.
+        fw, fh = 1024, 684
+        scale = min(fw / w, fh / h)
+        rw, rh = round(w * scale), round(h * scale)
+        canvas = Image.new("RGB", (fw, fh), (0, 0, 0))
+        canvas.paste(img.resize((rw, rh), Image.BILINEAR), (0, 0))
+        tensor = np.asarray(canvas, dtype=np.float32)
+        fixed = (fh, fw)
+    else:  # classic (1, 3, 1024, 1024) export: standard SAM preprocessing
         rw, rh = round(w * scale), round(h * scale)
         resized = np.asarray(img.resize((rw, rh), Image.BILINEAR), dtype=np.float32)
         normed = (resized - MEAN) / STD
         padded = np.zeros((SIDE, SIDE, 3), dtype=np.float32)
         padded[:rh, :rw] = normed
         tensor = padded.transpose(2, 0, 1)[None]
+        fixed = None
     embedding = enc.run(None, {enc_input: tensor})[0]
-    entry = (embedding, scale, (w, h))
+    entry = (embedding, scale, (w, h), fixed)
     with _lock:
         _cache[sha] = entry
         while len(_cache) > CACHE_MAX:
@@ -93,10 +111,14 @@ def embed(data: bytes):
 
 
 def predict_mask(data: bytes, points):
-    embedding, scale, (w, h) = embed(data)
+    embedding, scale, (w, h), fixed = embed(data)
     _, dec, _ = sessions()
-    coords = np.array([[[x * scale, y * scale] for x, y, _ in points]], dtype=np.float32)
-    labels = np.array([[lbl for _, _, lbl in points]], dtype=np.float32)
+    # Reference SAM ONNX contract: point-only prompts carry a (0,0,-1) pad.
+    pts = [(x * scale, y * scale) for x, y, _ in points] + [(0.0, 0.0)]
+    lbls = [float(lbl) for _, _, lbl in points] + [-1.0]
+    coords = np.array([pts], dtype=np.float32)
+    labels = np.array([lbls], dtype=np.float32)
+    size = fixed if fixed else (h, w)
     out = dec.run(
         None,
         {
@@ -105,12 +127,14 @@ def predict_mask(data: bytes, points):
             "point_labels": labels,
             "mask_input": np.zeros((1, 1, 256, 256), dtype=np.float32),
             "has_mask_input": np.zeros(1, dtype=np.float32),
-            "orig_im_size": np.array([h, w], dtype=np.float32),
+            "orig_im_size": np.array(size, dtype=np.float32),
         },
     )
-    masks = out[0]  # (1, N, H, W) logits at original size
-    mask = masks[0, 0] > 0
+    mask = out[0][0, 0] > 0  # single-mask export: best-IoU selection in-graph
     img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+    if fixed:  # crop the fixed-frame mask to content, restore original size
+        rw, rh = round(w * scale), round(h * scale)
+        img = img.crop((0, 0, rw, rh)).resize((w, h), Image.NEAREST)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -150,7 +174,8 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(length))
             url = req["image_url"]
             points = [(float(x), float(y), int(lbl)) for x, y, lbl in req["points"]]
-            assert 1 <= len(points) <= 16
+            if not (1 <= len(points) <= 16):
+                raise ValueError("1..16 points")
         except Exception:
             self.send_json(400, {"error": "bad request: need image_url and 1..16 [x,y,label] points"})
             return
@@ -162,7 +187,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("input exceeds 64MB")
             png = predict_mask(data, points)
         except Exception as e:
-            self.send_json(502, {"error": f"segmentation failed: {e}"})
+            # Never echo URLs (presign query params) back to the caller.
+            msg = str(e).split("?")[0]
+            self.send_json(502, {"error": f"segmentation failed: {type(e).__name__}: {msg}"})
             return
         self.send_response(200)
         self.send_header("Content-Type", "image/png")

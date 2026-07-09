@@ -82,12 +82,16 @@ export function renderMaskBlob(sel: Selection, docW: number, docH: number, dilat
   if (sel.kind === "bitmap") {
     ctx.drawImage(sel.maskCanvas, 0, 0);
     if (dilatePx > 0) {
-      // Approximate dilation: re-draw the (white-on-black) mask offset in a
-      // ring; "lighten" keeps white white.
+      // Approximate dilation: union of offset copies SWEEPING radii, not
+      // just the outer ring — an outer-ring-only union leaves the adjacent
+      // halo unmasked for subjects thinner than the radius (poles, limbs:
+      // exactly what click-to-mask selects).
       ctx.globalCompositeOperation = "lighten";
-      for (let a = 0; a < 16; a++) {
-        const t = (a / 16) * Math.PI * 2;
-        ctx.drawImage(sel.maskCanvas, Math.cos(t) * dilatePx, Math.sin(t) * dilatePx);
+      for (let r = 2; r <= dilatePx; r += 2) {
+        for (let a = 0; a < 8; a++) {
+          const t = (a / 8) * Math.PI * 2 + (r % 4 ? Math.PI / 8 : 0);
+          ctx.drawImage(sel.maskCanvas, Math.cos(t) * r, Math.sin(t) * r);
+        }
       }
       ctx.globalCompositeOperation = "source-over";
     }

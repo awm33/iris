@@ -206,7 +206,7 @@ func (s *CanvasServer) SubjectMask(ctx context.Context, req *connect.Request[iri
 		points = append(points, [3]float64{p.X, p.Y, label})
 	}
 	body, _ := json.Marshal(map[string]any{"image_url": url, "points": points})
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.SamURL+"/mask", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(s.SamURL, "/")+"/mask", bytes.NewReader(body))
 	if err != nil {
 		return nil, connectErr(err)
 	}
@@ -217,9 +217,12 @@ func (s *CanvasServer) SubjectMask(ctx context.Context, req *connect.Request[iri
 		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("subject-select service: %w", err))
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1))
 	if err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	if len(data) > 16<<20 {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("subject-select mask exceeds 16MB"))
 	}
 	if resp.StatusCode != 200 {
 		return nil, connect.NewError(connect.CodeUnavailable,

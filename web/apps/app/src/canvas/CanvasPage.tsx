@@ -299,23 +299,39 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     try {
       let sess = subjectRef.current;
       if (!sess || sess.opsLen !== doc.ops.length) {
-        // Doc changed since the last embed — flatten + upload fresh.
+        // Doc changed since the last embed — flatten + upload fresh. Capture
+        // ops length BEFORE the flatten: an op landing mid-upload must not
+        // stamp the old flatten as current.
+        const opsLen = doc.ops.length;
         const up = await uploadFile(await flattenToFile(" (subject)"), props.projectId);
-        sess = { versionId: up.version!.id, opsLen: doc.ops.length, points: [] };
+        sess = { versionId: up.version!.id, opsLen, points: [] };
         subjectRef.current = sess;
       }
+      if (sess.points.length >= 16) {
+        setGenFillError("refine limit reached — Esc to restart the selection");
+        return;
+      }
       sess.points.push({ x: pt[0], y: pt[1], negative });
-      if (sess.points.length > 16) sess.points = sess.points.slice(-16);
-      const res = await canvasClient.subjectMask({
-        versionId: sess.versionId,
-        points: sess.points,
-      });
-      const sel = await bitmapSelectionFromMask(res.maskPng, canvas.width, canvas.height);
-      if (sel) setSelection(sel);
-      else setGenFillError("no subject found at that point");
+      try {
+        const res = await canvasClient.subjectMask({
+          versionId: sess.versionId,
+          points: sess.points,
+        });
+        const sel = await bitmapSelectionFromMask(res.maskPng, canvas.width, canvas.height);
+        if (sel) {
+          setSelection(sel);
+        } else {
+          sess.points.pop(); // a dud point must not poison later refines
+          setGenFillError("no subject found at that point");
+        }
+      } catch (e) {
+        // Keep the session (embedding cache makes retry free); drop only
+        // the point that failed.
+        sess.points.pop();
+        throw e;
+      }
     } catch (e) {
       setGenFillError(String(e));
-      subjectRef.current = null;
     } finally {
       setSubjectBusy(false);
     }
