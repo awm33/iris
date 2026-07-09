@@ -313,15 +313,27 @@ func (s *Store) ListAssets(ctx context.Context, workspaceID, projectID, kind, qu
 type VersionObjectInfo struct {
 	SHA256      string
 	ContentType string
-	PosterKey   string // "" until the probe job has produced one
+	PosterKey   string            // "" until the probe job has produced one
+	DerivedKeys map[string]string // prep artifacts: proxy_key, filmstrip_key, first_frame_key, last_frame_key, waveform_key
 }
 
 func (s *Store) GetVersionObjectInfo(ctx context.Context, versionID string) (*VersionObjectInfo, error) {
-	info := &VersionObjectInfo{}
+	info := &VersionObjectInfo{DerivedKeys: map[string]string{}}
+	var proxy, strip, first, last, wave string
 	err := wrapNotFound(s.pool.QueryRow(ctx,
-		`SELECT sha256, content_type, COALESCE(meta->>'poster_key', '')
+		`SELECT sha256, content_type, COALESCE(meta->>'poster_key', ''),
+		        COALESCE(meta->>'proxy_key', ''), COALESCE(meta->>'filmstrip_key', ''),
+		        COALESCE(meta->>'first_frame_key', ''), COALESCE(meta->>'last_frame_key', ''),
+		        COALESCE(meta->>'waveform_key', '')
 		 FROM asset_versions WHERE id = $1`, versionID).
-		Scan(&info.SHA256, &info.ContentType, &info.PosterKey))
+		Scan(&info.SHA256, &info.ContentType, &info.PosterKey, &proxy, &strip, &first, &last, &wave))
+	for k, v := range map[string]string{
+		"proxy": proxy, "filmstrip": strip, "first_frame": first, "last_frame": last, "waveform": wave,
+	} {
+		if v != "" {
+			info.DerivedKeys[k] = v
+		}
+	}
 	return info, err
 }
 

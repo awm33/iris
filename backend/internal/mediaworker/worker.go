@@ -35,9 +35,15 @@ type probeInput struct {
 }
 
 const (
-	claimBatch   = 4
+	// One job per claim: sequential execution after a batch claim would let
+	// slow preps outlive the lease for batch tails (NOTIFY+poll make
+	// claim-per-job cheap).
+	claimBatch = 1
 	pollFallback = 15 * time.Second
-	jobTimeout   = 2 * time.Minute
+	probeTimeout = 2 * time.Minute
+	// Prep runs multiple full-decode ffmpeg passes; a 10-min 4K clip needs
+	// hundreds of CPU-seconds. Must stay under queue.MediaLease.
+	prepTimeout = 15 * time.Minute
 	reapEvery    = time.Minute
 )
 
@@ -115,13 +121,19 @@ func (w *Worker) execute(ctx context.Context, job *queue.MediaJob) {
 		}
 	}()
 
-	jctx, cancel := context.WithTimeout(ctx, jobTimeout)
+	timeout := probeTimeout
+	if job.Kind == "prep" {
+		timeout = prepTimeout
+	}
+	jctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var err error
 	switch job.Kind {
 	case "probe":
 		err = w.runProbe(jctx, job)
+	case "prep":
+		err = w.runPrep(jctx, job)
 	default:
 		err = permanent(fmt.Errorf("unknown media job kind %q", job.Kind))
 	}
@@ -236,6 +248,14 @@ func (w *Worker) runProbe(ctx context.Context, job *queue.MediaJob) error {
 		WHERE id = $1`,
 		in.VersionID, width, height, info.DurationS, fps, metaJSON); err != nil {
 		return fmt.Errorf("update version: %w", err)
+	}
+	// Chain the heavier prep pass (proxy/filmstrip/frames/waveform) for
+	// playable media — atomically with probe completion.
+	if isVideo || strings.HasPrefix(contentType, "audio/") {
+		if err := queue.EnqueueMediaJob(ctx, tx, job.WorkspaceID, "prep",
+			map[string]string{"version_id": in.VersionID}); err != nil {
+			return err
+		}
 	}
 	if err := queue.CompleteMediaJob(ctx, tx, job.ID, w.Name); err != nil {
 		return err
