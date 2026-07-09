@@ -14,7 +14,7 @@ import {
   timelineDuration,
   type SyncStatus,
 } from "@iris/doc-runtime";
-import { ClipDecoder, type Segment } from "@iris/media-engine";
+import { AudioMixer, ClipDecoder, type Segment } from "@iris/media-engine";
 import { assetClient, storyClient, timelineClient, timelineKeepaliveClient } from "../api";
 import { EngineCanvas } from "./EngineCanvas";
 import { AssetKind } from "@iris/api-client";
@@ -80,7 +80,9 @@ export function TimelinePage(props: {
   const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number; duration: number } | null>(null);
   const bladeRef = useRef<() => void>(() => {});
   const [playing, setPlaying] = useState(false);
-  const [engineOn, setEngineOn] = useState(false);
+  // Default ON since the audio slice: the engine preview is now the better
+  // player (gapless + mixed audio); the <video> chase stays as fallback.
+  const [engineOn, setEngineOn] = useState(() => ClipDecoder.supported());
   const [engineError, setEngineError] = useState<string>();
   const playRef = useRef<{ raf: number } | null>(null);
   const togglePlayRef = useRef<() => void>(() => {});
@@ -208,6 +210,11 @@ export function TimelinePage(props: {
     if (end0 <= 0) return;
     // At the end, space restarts from the top (player muscle memory).
     const t0 = timeRef.current >= end0 - 0.01 ? 0 : timeRef.current;
+    // Commit t0 NOW: the mixer effect reads timeRef before the first rAF
+    // tick, and a restart-from-end would otherwise schedule audio from the
+    // OLD playhead (= end → empty plan → silent replay). Also snaps the
+    // playhead UI immediately instead of on the first tick.
+    seek(t0);
     const start = performance.now();
     setPlaying(true);
     const step = () => {
@@ -320,6 +327,43 @@ export function TimelinePage(props: {
         }
       },
     });
+  // Audible spans: video segments carry their sources' embedded audio;
+  // audio-track clips add music/VO. Overlaps MIX (NLE semantics — every
+  // unmuted track sounds); per-clip gain lands with the mixer UI.
+  const audioSegments: Segment[] = useMemo(() => {
+    const audioClips = (docState?.tracks ?? [])
+      .filter((t) => t.kind === "audio")
+      .flatMap((t) => t.clips)
+      .flatMap((c) =>
+        c.versionId ? [{ sourceId: c.versionId, startS: c.start, durationS: c.duration, inPointS: c.inPoint }] : [],
+      );
+    return [...segments, ...audioClips];
+  }, [segments, docState]);
+  const mixerRef = useRef<AudioMixer | null>(null);
+  const audioSegmentsRef = useRef(audioSegments);
+  useEffect(() => {
+    audioSegmentsRef.current = audioSegments;
+  });
+  useEffect(() => {
+    if (playing && engineOn && AudioMixer.supported()) {
+      mixerRef.current ??= new AudioMixer(srcFor, () =>
+        setEngineError("🔇 audio blocked by the browser — click ▶ once to unlock"),
+      );
+      // Scheduled once per play from the playhead; mid-play edits reschedule
+      // on the next play (the video side re-reads state live — recorded
+      // asymmetry until the mixer follows doc changes).
+      mixerRef.current.play(audioSegmentsRef.current, timeRef.current);
+    } else {
+      mixerRef.current?.stop();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, engineOn]);
+  useEffect(
+    () => () => {
+      mixerRef.current?.dispose();
+    },
+    [],
+  );
 
   if (loadError) return <div className="status error">Couldn’t open timeline: {loadError}</div>;
   if (!session) return <div className="empty">Opening timeline…</div>;
@@ -440,7 +484,7 @@ export function TimelinePage(props: {
         {ClipDecoder.supported() && (
           <button
             className={`btn secondary${engineOn ? " tool-active" : ""}`}
-            title="WebCodecs compositor preview — gapless boundaries, silent until the audio slice lands"
+            title="WebCodecs compositor preview (default) — gapless boundaries + mixed audio; toggle for the <video> fallback"
             onClick={() => {
               setEngineError(undefined);
               setEngineOn((v) => !v);

@@ -1,3 +1,5 @@
+export { AudioMixer } from "./audioMixer";
+export { audioSchedule, type AudioPlanEntry } from "./audioSchedule";
 export { buildIndex, type BuiltIndex, type RawSample } from "./buildIndex";
 export { ClipDecoder, type ClipInfo } from "./clipDecoder";
 export { FrameQueue, type TimedFrame } from "./frameQueue";

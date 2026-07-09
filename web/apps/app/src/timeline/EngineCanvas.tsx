@@ -8,11 +8,11 @@ import {
   sourceTime,
 } from "@iris/media-engine";
 
-// Timeline compositor v1 (PR 23): the media engine paints resolved video
+// Timeline compositor (PR 23/24): the media engine paints resolved video
 // segments to one canvas, chasing the page's wall-clock playhead. Gapless
 // boundaries come from prebuffering the next segment's decoder inside
-// PREBUFFER_S. Silent by design until the audio slice (PR 24) — the
-// engine preview ships behind a toolbar toggle until then.
+// PREBUFFER_S. Audio is the AudioMixer's job (scheduled separately on the
+// AudioContext clock); together they are the timeline's default player.
 //
 // Ownership: this component OWNS decoders, generators and queued frames;
 // TimelinePage owns the clock (time/playing props).
