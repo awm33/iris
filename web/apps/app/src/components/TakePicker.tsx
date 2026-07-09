@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { storyClient } from "../api";
 import { useEscape, VersionThumb } from "./AssetThumb";
+import { ClipPlayer } from "./ClipPlayer";
 
 // Take Picker (UX doc §3.5): grid of a shot's candidates, selected state,
 // one-click re-selection, per-take regenerate-from-this, and the keyboard
@@ -17,6 +18,7 @@ export function TakePicker(props: {
   useEscape(props.onClose);
   const qc = useQueryClient();
   const [highlight, setHighlight] = useState(0);
+  const [playingVersion, setPlayingVersion] = useState<string>();
   const takes = useQuery({
     queryKey: ["takes", props.shotId],
     queryFn: () => storyClient.listTakes({ shotId: props.shotId }),
@@ -114,18 +116,30 @@ export function TakePicker(props: {
                     {isSelected ? " ✓" : ""}
                   </span>
                 </button>
-                <button
-                  className="btn secondary chip-add"
-                  title="Open the generate panel pre-filled from this take's recipe"
-                  onClick={() => props.onRegenerate(t.recipeJson)}
-                >
-                  ♻ Regenerate from this
-                </button>
+                <div className="promote-row">
+                  <button
+                    className="btn secondary chip-add"
+                    title="Play this take"
+                    onClick={() => setPlayingVersion(t.versionId)}
+                  >
+                    ▶
+                  </button>
+                  <button
+                    className="btn secondary chip-add"
+                    title="Open the generate panel pre-filled from this take's recipe"
+                    onClick={() => props.onRegenerate(t.recipeJson)}
+                  >
+                    ♻ Regenerate from this
+                  </button>
+                </div>
               </div>
             );
           })}
         </div>
         {select.isError && <div className="status error">{String(select.error)}</div>}
+        {playingVersion && (
+          <ClipPlayer versionId={playingVersion} title="Take" onClose={() => setPlayingVersion(undefined)} />
+        )}
       </div>
     </div>
   );

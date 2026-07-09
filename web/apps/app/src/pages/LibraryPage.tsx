@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { AssetKind, type Asset } from "@iris/api-client";
 import { assetClient, storyClient, uploadFile } from "../api";
 import { StockPicker } from "../components/StockPicker";
+import { ClipPlayer } from "../components/ClipPlayer";
 
 export function LibraryPage(props: {
   projectId?: string;
@@ -81,6 +82,7 @@ function AssetCard({
   const qc = useQueryClient();
   const [promoting, setPromoting] = useState<"view" | "character" | null>(null);
   const [openingCanvas, setOpeningCanvas] = useState(false);
+  const [playing, setPlaying] = useState(false);
   const isImage = asset.kind === AssetKind.IMAGE;
   const isVideo = asset.kind === AssetKind.VIDEO;
 
@@ -136,6 +138,16 @@ function AssetCard({
       )}
       <div className="name">{asset.name}</div>
       <div className="meta">{AssetKind[asset.kind]?.toLowerCase() ?? "asset"}</div>
+      {isVideo && (
+        <div className="promote-row">
+          <button className="btn secondary chip-add" onClick={() => setPlaying(true)}>
+            ▶ Play
+          </button>
+        </div>
+      )}
+      {playing && (
+        <ClipPlayer versionId={asset.headVersionId} title={asset.name} onClose={() => setPlaying(false)} />
+      )}
       {isImage && (
         <div className="promote-row">
           <button className="btn secondary chip-add" onClick={() => setPromoting("view")}>
