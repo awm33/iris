@@ -29,6 +29,8 @@ just web        # run the frontend   (separate terminal)
 just check      # everything CI runs
 ```
 
+Optional API keys (stock sources, later commercial models) go in a gitignored `.env` — see [.env.example](.env.example).
+
 Poke the mock model:
 
 ```sh

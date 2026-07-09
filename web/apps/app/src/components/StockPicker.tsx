@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import type { StockPhoto } from "@iris/api-client";
 import { assetClient } from "../api";
@@ -20,6 +20,7 @@ export function StockPicker(props: { projectId: string; onClose: () => void }) {
     queryKey: ["stock", query, page],
     enabled: query !== "",
     staleTime: 5 * 60 * 1000,
+    placeholderData: keepPreviousData, // page flips swap in place, no blank flash
     queryFn: () => assetClient.searchStock({ query, page }),
   });
 
@@ -45,7 +46,12 @@ export function StockPicker(props: { projectId: string; onClose: () => void }) {
       <div className="modal modal-wide" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="panel-header">
           <h3>Stock photos</h3>
-          <span className="meta">Photos provided by Pexels</span>
+          <span className="meta">
+            Photos provided by{" "}
+            <a href="https://www.pexels.com" target="_blank" rel="noreferrer">
+              Pexels
+            </a>
+          </span>
           <button className="btn secondary" onClick={props.onClose}>
             Close
           </button>
@@ -76,15 +82,21 @@ export function StockPicker(props: { projectId: string; onClose: () => void }) {
             const imported = importedIds.has(p.id);
             return (
               <div key={p.id} className="picker-cell">
-                {/* Thumbnails load straight from the Pexels CDN. */}
+                {/* Thumbnails load straight from the Pexels CDN — when a CSP
+                    lands, img-src will need images.pexels.com. */}
                 <img className="picker-thumb" src={p.thumbUrl} alt={p.alt} loading="lazy" />
                 <span className="picker-name" title={p.alt}>
                   {p.alt || "untitled"}
                 </span>
                 <span className="stock-credit">
-                  <a href={p.photographerUrl} target="_blank" rel="noreferrer">
-                    {p.photographer}
-                  </a>
+                  {/* The server blanks non-http(s) URLs; fall back to plain text. */}
+                  {p.photographerUrl ? (
+                    <a href={p.photographerUrl} target="_blank" rel="noreferrer">
+                      {p.photographer}
+                    </a>
+                  ) : (
+                    p.photographer
+                  )}
                 </span>
                 <button
                   className="btn secondary chip-add"

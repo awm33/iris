@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -186,10 +187,19 @@ type AssetVersion struct {
 // CreateAssetWithVersion inserts the asset identity + first version + head
 // pointer in one transaction. enqueueProbe adds a media probe job to the same
 // transaction (NOTIFY fires on commit — job and version land atomically).
-func (s *Store) CreateAssetWithVersion(ctx context.Context, a *Asset, v *AssetVersion, enqueueProbe bool) error {
+// versionMeta (optional) lands in the version's meta column in the same
+// transaction — attribution must not be a lossy afterthought.
+func (s *Store) CreateAssetWithVersion(ctx context.Context, a *Asset, v *AssetVersion, enqueueProbe bool, versionMeta map[string]any) error {
 	a.ID = ids.New("ast")
 	v.ID = ids.New("astv")
 	v.AssetID = a.ID
+	var metaJSON []byte
+	if versionMeta != nil {
+		var err error
+		if metaJSON, err = json.Marshal(versionMeta); err != nil {
+			return err
+		}
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -203,9 +213,9 @@ func (s *Store) CreateAssetWithVersion(ctx context.Context, a *Asset, v *AssetVe
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO asset_versions (id, asset_id, sha256, content_type, size_bytes, width, height, duration_s, fps)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6,0), NULLIF($7,0), NULLIF($8,0.0), NULLIF($9,0.0))`,
-		v.ID, a.ID, v.SHA256, v.ContentType, v.SizeBytes, v.Width, v.Height, v.DurationS, v.FPS); err != nil {
+		INSERT INTO asset_versions (id, asset_id, sha256, content_type, size_bytes, width, height, duration_s, fps, meta)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6,0), NULLIF($7,0), NULLIF($8,0.0), NULLIF($9,0.0), COALESCE($10::jsonb, '{}'::jsonb))`,
+		v.ID, a.ID, v.SHA256, v.ContentType, v.SizeBytes, v.Width, v.Height, v.DurationS, v.FPS, metaJSON); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
@@ -220,6 +230,22 @@ func (s *Store) CreateAssetWithVersion(ctx context.Context, a *Asset, v *AssetVe
 	}
 	a.HeadVersionID = v.ID
 	return tx.Commit(ctx)
+}
+
+// FindStockAsset returns the asset already imported from a stock source
+// (matched on version meta source/source_id within the project), or
+// ErrNotFound. Makes stock imports idempotent — re-importing the same photo
+// returns the existing asset instead of a duplicate library entry.
+func (s *Store) FindStockAsset(ctx context.Context, workspaceID, projectID, source, sourceID string) (string, error) {
+	var assetID string
+	err := s.pool.QueryRow(ctx, `
+		SELECT a.id FROM assets a
+		JOIN asset_versions v ON v.asset_id = a.id
+		WHERE a.workspace_id = $1 AND a.project_id IS NOT DISTINCT FROM NULLIF($2,'')
+		  AND v.meta->>'source' = $3 AND v.meta->>'source_id' = $4
+		ORDER BY a.created_at LIMIT 1`,
+		workspaceID, projectID, source, sourceID).Scan(&assetID)
+	return assetID, wrapNotFound(err)
 }
 
 func (s *Store) GetAsset(ctx context.Context, id string) (*Asset, []*AssetVersion, error) {

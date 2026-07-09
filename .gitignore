@@ -15,6 +15,7 @@ web/**/dist/
 # Env & tooling
 .env
 .env.*
+!.env.example
 *.local
 .DS_Store
 .dev/
