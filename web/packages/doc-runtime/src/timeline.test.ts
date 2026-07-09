@@ -107,6 +107,17 @@ describe("bladeOps", () => {
     expect(clip.in_point).toBe(0);
   });
 
+  it("hasSource=true keeps in_point continuity for a resolved shot clip", () => {
+    const shots = reduceTimeline([
+      { op_id: "t1", type: "add_track", track: { id: "v1", kind: "video" } },
+      { op_id: "c1", type: "add_clip", track_id: "v1", clip: { id: "p", name: "wide", shot_id: "sh_1", start: 0, duration: 4 } },
+    ]);
+    const ops = bladeOps(shots, "p", 1, "p2", true)!;
+    const clip = (ops[1] as { clip: { shot_id?: string; in_point?: number } }).clip;
+    expect(clip.shot_id).toBe("sh_1"); // shot binding survives
+    expect(clip.in_point).toBe(1); // the selected take continues, not restarts
+  });
+
   it("rounds the cut point so the halves abut without float noise", () => {
     const ops = bladeOps(state, "x", 4.333333333, "x2")!;
     expect(ops[0]).toMatchObject({ type: "trim_clip", duration: 2.33 });

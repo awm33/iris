@@ -50,6 +50,7 @@ type ShotRow struct {
 	DurationTargetS          float64
 	ViewID, SelectedTakeID   string
 	SelectedTakeVersionID    string
+	SelectedTakeContentType  string
 	CastIDs                  []string
 	ContinuityStale, Pinned  bool
 	TakeCount                int32
@@ -347,9 +348,11 @@ func (s *Store) listShots(ctx context.Context, q querier, sceneID string) ([]*Sh
 		       sh.view_id, sh.cast_ids, sh.selected_take_id, sh.continuity_stale, sh.pinned,
 		       sh.created_at, sh.updated_at,
 		       (SELECT count(*) FROM takes t WHERE t.shot_id = sh.id) AS take_count,
-		       COALESCE(sel.version_id, '') AS selected_version
+		       COALESCE(sel.version_id, '') AS selected_version,
+		       COALESCE(av.content_type, '') AS selected_ct
 		FROM shots sh
 		LEFT JOIN takes sel ON sel.id = sh.selected_take_id
+		LEFT JOIN asset_versions av ON av.id = sel.version_id
 		WHERE sh.scene_id = $1 ORDER BY sh.position, sh.created_at`, sceneID)
 	if err != nil {
 		return nil, err
@@ -362,7 +365,8 @@ func (s *Store) listShots(ctx context.Context, q querier, sceneID string) ([]*Sh
 		var duration *float64
 		if err := rows.Scan(&sh.ID, &sh.SceneID, &sh.Position, &sh.Description, &duration,
 			&viewID, &sh.CastIDs, &selected, &sh.ContinuityStale, &sh.Pinned,
-			&sh.CreatedAt, &sh.UpdatedAt, &sh.TakeCount, &sh.SelectedTakeVersionID); err != nil {
+			&sh.CreatedAt, &sh.UpdatedAt, &sh.TakeCount, &sh.SelectedTakeVersionID,
+			&sh.SelectedTakeContentType); err != nil {
 			return nil, err
 		}
 		derefShot(sh, duration, viewID, selected)
@@ -489,13 +493,16 @@ func (s *Store) GetShot(ctx context.Context, id string) (*ShotRow, error) {
 		       sh.view_id, sh.cast_ids, sh.selected_take_id, sh.continuity_stale, sh.pinned,
 		       sh.created_at, sh.updated_at,
 		       (SELECT count(*) FROM takes t WHERE t.shot_id = sh.id),
-		       COALESCE(sel.version_id, '')
+		       COALESCE(sel.version_id, ''),
+		       COALESCE(av.content_type, '')
 		FROM shots sh
 		LEFT JOIN takes sel ON sel.id = sh.selected_take_id
+		LEFT JOIN asset_versions av ON av.id = sel.version_id
 		WHERE sh.id = $1`, id).
 		Scan(&sh.ID, &sh.SceneID, &sh.Position, &sh.Description, &duration,
 			&viewID, &sh.CastIDs, &selected, &sh.ContinuityStale, &sh.Pinned,
-			&sh.CreatedAt, &sh.UpdatedAt, &sh.TakeCount, &sh.SelectedTakeVersionID)
+			&sh.CreatedAt, &sh.UpdatedAt, &sh.TakeCount, &sh.SelectedTakeVersionID,
+			&sh.SelectedTakeContentType)
 	if err != nil {
 		return nil, wrapNotFound(err)
 	}
