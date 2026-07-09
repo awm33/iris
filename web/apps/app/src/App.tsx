@@ -1,7 +1,7 @@
 // App shell: left-rail IA per docs/design/02-ui-ux-design.md §2.
-// Live: Projects, Scenes (+ scene detail), Characters, Canvases (+ canvas
-// editor), Library, Jobs, and the Generate panel with shot targeting.
-// Story board lands later in M5.
+// Live: Projects, Story board (project landing), Scenes (+ scene detail),
+// Characters, Canvases (+ canvas editor), Timelines (+ editor), Library,
+// Jobs, and the Generate panel with shot targeting.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { JobState } from "@iris/api-client";
@@ -18,10 +18,10 @@ import { LibraryPage } from "./pages/LibraryPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { ScenePage } from "./pages/ScenePage";
 import { ScenesPage } from "./pages/ScenesPage";
+import { StoryBoardPage } from "./pages/StoryBoardPage";
 import { useEvents } from "./useEvents";
 
-type View = "projects" | "scenes" | "characters" | "canvases" | "timelines" | "library" | "jobs";
-const comingSoon = ["Story"] as const;
+type View = "projects" | "story" | "scenes" | "characters" | "canvases" | "timelines" | "library" | "jobs";
 
 export function App() {
   useEvents();
@@ -84,11 +84,7 @@ export function App() {
         <button className={view === "projects" ? "active" : ""} onClick={() => setView("projects")}>
           Projects
         </button>
-        {comingSoon.map((label) => (
-          <button key={label} disabled title="Lands in a later milestone">
-            {label}
-          </button>
-        ))}
+        {navButton("story", "Story")}
         {navButton("scenes", "Scenes")}
         {navButton("characters", "Characters")}
         {navButton("canvases", "Canvases")}
@@ -103,8 +99,20 @@ export function App() {
               setProject({ id, name });
               setSceneId(undefined);
               setGenerating(false); // stale targets/refs must not cross projects
+              setView("story"); // UX doc §3.1: the board is the project landing
+            }}
+          />
+        )}
+        {view === "story" && project && (
+          <StoryBoardPage
+            projectId={project.id}
+            onOpenScene={(id) => {
+              setSceneId(id);
               setView("scenes");
             }}
+            onGenerateForShot={(shotId, label) =>
+              setGenerating({ shotId, label, nonce: ++generateNonce.current })
+            }
           />
         )}
         {view === "scenes" && project && !sceneId && (

@@ -189,6 +189,24 @@ body {
   color: var(--text-dim);
 }
 
+/* Story board (§3.1) */
+.board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 12px; }
+.board-col { width: 250px; flex-shrink: 0; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.board-col-head { padding: 2px 2px 6px; border-bottom: 1px solid var(--border); }
+.board-col-head:hover .name { color: var(--accent); }
+.board-col-head .meta { font-size: 11px; color: var(--text-dim); }
+.board-shots { display: flex; flex-direction: column; gap: 8px; min-height: 24px; }
+.board-shot { display: flex; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; cursor: grab; }
+.board-shot:hover { background: var(--bg-hover); }
+.board-dragging { opacity: 0.4; }
+.board-drop { height: 3px; border-radius: 2px; background: var(--accent); margin: -2px 0; }
+.board-thumb { width: 72px; height: 44px; object-fit: cover; border-radius: 4px; background: var(--bg-raised); flex-shrink: 0; }
+.board-shot-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.board-shot-body .name { font-size: 12px; }
+.board-shot-body .meta { font-size: 11px; }
+.board-shot-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.board-add input { width: 100%; background: var(--bg); border: 1px dashed var(--border); border-radius: 6px; color: var(--text); padding: 6px 8px; font-size: 12px; }
+
 /* Story surfaces */
 .scene-section { margin-bottom: 28px; }
 .section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
