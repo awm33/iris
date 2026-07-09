@@ -1,0 +1,427 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import type { Timeline } from "@iris/api-client";
+import {
+  clipAt,
+  newOpId as oid,
+  OpSync,
+  type OpSyncTransport,
+  TimelineDoc,
+  type TimelineOp,
+  timelineDuration,
+  type SyncStatus,
+} from "@iris/doc-runtime";
+import { assetClient, storyClient, timelineClient, timelineKeepaliveClient } from "../api";
+import { AssetKind } from "@iris/api-client";
+import { useEscape } from "../components/AssetThumb";
+
+const PX_PER_SEC = 40;
+const TRACK_H = 56;
+
+
+
+const parse = (payloads: string[]): TimelineOp[] =>
+  payloads
+    .map((p) => {
+      try {
+        return JSON.parse(p) as TimelineOp;
+      } catch {
+        return null;
+      }
+    })
+    .filter((o): o is TimelineOp => !!o && !!o.op_id && !!o.type);
+
+export function TimelinePage(props: {
+  timelineId: string;
+  projectId: string;
+  onBack: () => void;
+  onGenerateForShot: (shotId: string, label: string) => void;
+}) {
+  const [session, setSession] = useState<{ tl: Timeline; doc: TimelineDoc; sync: OpSync } | null>(null);
+  const [loadError, setLoadError] = useState<string>();
+  const [status, setStatus] = useState<SyncStatus>("saved");
+  const [, tick] = useState(0);
+  const [time, setTime] = useState(0);
+  const [picking, setPicking] = useState<"media" | "shots" | null>(null);
+  const dragRef = useRef<{ clipId: string; startX: number; origStart: number; previewStart?: number } | null>(null);
+  const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        let after = 0n;
+        let tl: Timeline | undefined;
+        const payloads: string[] = [];
+        for (;;) {
+          const r = await timelineClient.getTimeline({ id: props.timelineId, afterSeq: after });
+          tl = r.timeline!;
+          for (const op of r.ops) payloads.push(op.payload);
+          if (r.ops.length === 0 || r.ops[r.ops.length - 1].seq >= tl.headSeq) break;
+          after = r.ops[r.ops.length - 1].seq;
+        }
+        if (cancelled || !tl) return;
+        const doc = new TimelineDoc(parse(payloads));
+        const transport: OpSyncTransport = {
+          append: async (baseSeq, ps, opts) => {
+            const client = opts?.keepalive ? timelineKeepaliveClient : timelineClient;
+            const r = await client.appendTimelineOps({
+              timelineId: props.timelineId,
+              baseSeq: BigInt(baseSeq),
+              payloads: ps,
+            });
+            return Number(r.headSeq);
+          },
+          fetchSince: async (seq) => {
+            // Page to head: a single 2000-op page with the FULL headSeq
+            // reported would make a conflict rebase silently skip ops.
+            let cursor = BigInt(seq);
+            const missed: string[] = [];
+            let head = seq;
+            for (;;) {
+              const r = await timelineClient.getTimeline({ id: props.timelineId, afterSeq: cursor });
+              for (const op of r.ops) missed.push(op.payload);
+              head = Number(r.timeline!.headSeq);
+              if (r.ops.length === 0 || r.ops[r.ops.length - 1].seq >= r.timeline!.headSeq) break;
+              cursor = r.ops[r.ops.length - 1].seq;
+            }
+            return { headSeq: head, payloads: missed };
+          },
+        };
+        const sync = new OpSync(transport, Number(tl.headSeq));
+        doc.onLocalOp = (op) => sync.enqueue(op as never);
+        sync.onRemoteOps = (ps) => doc.applyRemote(parse(ps));
+        sync.onStatus = (s) => setStatus(s);
+        setSession({ tl, doc, sync });
+      } catch (e) {
+        if (!cancelled) setLoadError(String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.timelineId]);
+
+  useEffect(() => {
+    if (!session) return;
+    const unsub = session.doc.subscribe(() => tick((t) => t + 1));
+    const flush = () => void session.sync.flush(true);
+    window.addEventListener("beforeunload", flush);
+    document.addEventListener("visibilitychange", flush);
+    return () => {
+      unsub();
+      window.removeEventListener("beforeunload", flush);
+      document.removeEventListener("visibilitychange", flush);
+      flush();
+    };
+  }, [session]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        e.shiftKey ? session?.doc.redo() : session?.doc.undo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [session]);
+
+  if (loadError) return <div className="status error">Couldn’t open timeline: {loadError}</div>;
+  if (!session) return <div className="empty">Opening timeline…</div>;
+  const { doc, tl } = session;
+  const state = doc.state;
+  const dur = Math.max(timelineDuration(state), 30);
+  const active = clipAt(state, time, "video");
+
+  // Capture keeps drags alive off-element but can throw for already-
+  // released pointers — never let it kill the gesture (state first).
+  const capture = (e: React.PointerEvent) => {
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* uncaptured drag still works over the element */
+    }
+  };
+  const onClipDown = (e: React.PointerEvent, clipId: string, start: number) => {
+    dragRef.current = { clipId, startX: e.clientX, origStart: start };
+    capture(e);
+  };
+  const onClipMove = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    // The ref is the source of truth for the drop — dragPreview state can be
+    // a frame stale on a fast release (continuous-priority updates).
+    d.previewStart = Math.max(0, d.origStart + (e.clientX - d.startX) / PX_PER_SEC);
+    setDragPreview({ clipId: d.clipId, start: d.previewStart });
+  };
+  const onClipUp = () => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (d && d.previewStart !== undefined && Math.abs(d.previewStart - d.origStart) > 0.01) {
+      doc.apply({ op_id: oid(), type: "move_clip", clip_id: d.clipId, start: Math.round(d.previewStart * 100) / 100 });
+    }
+    setDragPreview(null);
+  };
+
+  return (
+    <div>
+      <div className="toolbar">
+        <button className="btn secondary" onClick={props.onBack}>←</button>
+        <span className="truncate" style={{ maxWidth: 220 }}>{tl.name}</span>
+        <span className="meta">{tl.fps} fps</span>
+        <button className="btn secondary" onClick={() => setPicking("media")}>+ Clip</button>
+        <button className="btn secondary" onClick={() => setPicking("shots")}>⧉ Scene shots</button>
+        <button className="btn secondary" disabled={!doc.canUndo} onClick={() => doc.undo()}>↩</button>
+        <button className="btn secondary" disabled={!doc.canRedo} onClick={() => doc.redo()}>↪</button>
+        <span className={`status${status === "error" ? " error" : ""}`}>{status === "saved" ? "saved" : status === "error" ? "save failed — ops kept locally" : "…"}</span>
+      </div>
+
+      <PreviewPane clip={active} time={time} onGenerate={props.onGenerateForShot} />
+
+      <div
+        className="tl-ruler"
+        style={{ width: dur * PX_PER_SEC }}
+        onPointerDown={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          setTime(Math.max(0, (e.clientX - r.left) / PX_PER_SEC));
+          capture(e);
+        }}
+        onPointerMove={(e) => {
+          if (e.buttons !== 1) return;
+          const r = e.currentTarget.getBoundingClientRect();
+          setTime(Math.max(0, (e.clientX - r.left) / PX_PER_SEC));
+        }}
+      >
+        {Array.from({ length: Math.ceil(dur) + 1 }, (_, i) => (
+          <span key={i} className="tl-tick" style={{ left: i * PX_PER_SEC }}>{i}</span>
+        ))}
+        <div className="tl-playhead" style={{ left: time * PX_PER_SEC }} />
+      </div>
+
+      <div className="tl-tracks" style={{ width: dur * PX_PER_SEC }}>
+        {state.tracks.map((track) => (
+          <div key={track.id} className={`tl-track tl-${track.kind}`} style={{ height: TRACK_H }}>
+            <span className="tl-track-label">{track.name}</span>
+            {track.clips.map((c) => {
+              const start = dragPreview?.clipId === c.id ? dragPreview.start : c.start;
+              return (
+                <div
+                  key={c.id}
+                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${active?.id === c.id ? " tl-active" : ""}`}
+                  style={{ left: start * PX_PER_SEC, width: c.duration * PX_PER_SEC }}
+                  onPointerDown={(e) => onClipDown(e, c.id, c.start)}
+                  onPointerMove={onClipMove}
+                  onPointerUp={onClipUp}
+                  onPointerCancel={onClipUp}
+                  title={`${c.name} · ${c.duration.toFixed(1)}s`}
+                >
+                  <span className="truncate">{c.shotId ? `🎬 ${c.name}` : c.name}</span>
+                  <button
+                    className="chip-x"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => doc.apply({ op_id: oid(), type: "remove_clip", clip_id: c.id })}
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
+            <div className="tl-playhead" style={{ left: time * PX_PER_SEC }} />
+          </div>
+        ))}
+      </div>
+
+      {picking === "media" && (
+        <MediaPicker
+          projectId={props.projectId}
+          onPick={async (assetId, name) => {
+            setPicking(null);
+            const { asset, versions } = await assetClient.getAsset({ id: assetId });
+            const head = versions.find((v) => v.id === asset?.headVersionId) ?? versions[0];
+            if (!head) return;
+            const kind = head.contentType.startsWith("audio/") ? "audio" : "video";
+            let track = state.tracks.find((t) => t.kind === kind);
+            if (!track) {
+              // Self-heal docs without a matching track (e.g. seeded before
+              // this build) instead of silently dropping the add.
+              const id = `trk_${oid().slice(3)}`;
+              doc.apply({ op_id: oid(), type: "add_track", track: { id, kind, name: kind === "video" ? "V1" : "A1" } });
+              track = doc.state.tracks.find((t) => t.id === id)!;
+            }
+            doc.apply({
+              op_id: oid(),
+              type: "add_clip",
+              track_id: track.id,
+              clip: { id: `cl_${oid().slice(3)}`, name, version_id: head.id, start: time, duration: head.durationS || 5 },
+            });
+          }}
+          onClose={() => setPicking(null)}
+        />
+      )}
+      {picking === "shots" && (
+        <ShotPicker
+          projectId={props.projectId}
+          onPick={(shots) => {
+            setPicking(null);
+            let track = state.tracks.find((t) => t.kind === "video");
+            if (!track) {
+              const id = `trk_${oid().slice(3)}`;
+              doc.apply({ op_id: oid(), type: "add_track", track: { id, kind: "video", name: "V1" } });
+              track = doc.state.tracks.find((t) => t.id === id)!;
+            }
+            // Placeholder clips laid end-to-end from the current timeline end.
+            let cursor = timelineDuration(state);
+            for (const s of shots) {
+              doc.apply({
+                op_id: oid(),
+                type: "add_clip",
+                track_id: track.id,
+                clip: { id: `cl_${oid().slice(3)}`, name: s.name, shot_id: s.id, start: cursor, duration: s.duration || 5 },
+              });
+              cursor += s.duration || 5;
+            }
+          }}
+          onClose={() => setPicking(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Clip under the playhead: media clips seek the proxy; shot placeholders
+ * offer generate-into-slot. Frame-accurate compositing arrives with the
+ * WebCodecs engine — this is a paused-seek preview. */
+function PreviewPane(props: {
+  clip?: { id: string; name: string; versionId?: string; shotId?: string; start: number; inPoint: number };
+  time: number;
+  onGenerate: (shotId: string, label: string) => void;
+}) {
+  const [src, setSrc] = useState<string>();
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const c = props.clip;
+  useEffect(() => {
+    setSrc(undefined);
+    if (!c?.versionId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await assetClient.signDownload({ versionId: c.versionId!, variant: "proxy" });
+        if (!cancelled) setSrc(r.url);
+      } catch {
+        try {
+          const r = await assetClient.signDownload({ versionId: c.versionId! });
+          if (!cancelled) setSrc(r.url);
+        } catch {
+          /* preview absent */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c?.versionId]);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v && c && !Number.isNaN(v.duration)) v.currentTime = Math.max(0, props.time - c.start + c.inPoint);
+  }, [props.time, c]);
+
+  return (
+    <div className="tl-preview">
+      {c?.versionId && src && (
+        <video
+          ref={videoRef}
+          src={src}
+          muted
+          playsInline
+          onLoadedMetadata={(e) => {
+            // First seek can arrive before metadata; re-apply once known.
+            if (c) e.currentTarget.currentTime = Math.max(0, props.time - c.start + c.inPoint);
+          }}
+        />
+      )}
+      {c?.shotId && (
+        <div className="tl-preview-shot">
+          <div className="meta">🎬 {c.name} — placeholder</div>
+          <button className="btn" onClick={() => props.onGenerate(c.shotId!, c.name)}>
+            ⚡ Generate into slot
+          </button>
+        </div>
+      )}
+      {!c && <div className="meta">No clip under the playhead.</div>}
+    </div>
+  );
+}
+
+function MediaPicker(props: { projectId: string; onPick: (assetId: string, name: string) => void; onClose: () => void }) {
+  useEscape(props.onClose);
+  const assets = useQuery({
+    queryKey: ["assets", props.projectId],
+    queryFn: () => assetClient.listAssets({ projectId: props.projectId }),
+  });
+  const media = (assets.data?.assets ?? []).filter((a) => a.kind === AssetKind.VIDEO || a.kind === AssetKind.AUDIO);
+  return (
+    <div className="overlay" onClick={props.onClose}>
+      <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="panel-header">
+          <h3>Add clip</h3>
+          <button className="btn secondary" onClick={props.onClose}>Close</button>
+        </div>
+        {media.length === 0 && <div className="empty">No video/audio in the Library yet.</div>}
+        <div className="promote-list">
+          {media.map((a) => (
+            <button key={a.id} className="btn secondary chip-add" onClick={() => props.onPick(a.id, a.name)}>
+              {a.kind === AssetKind.AUDIO ? "🎵" : "🎬"} <span className="truncate">{a.name}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ShotPicker(props: {
+  projectId: string;
+  onPick: (shots: { id: string; name: string; duration: number }[]) => void;
+  onClose: () => void;
+}) {
+  useEscape(props.onClose);
+  const qc = useQueryClient();
+  const scenes = useQuery({
+    queryKey: ["scenes", props.projectId],
+    queryFn: () => storyClient.listScenes({ projectId: props.projectId }),
+  });
+  const pick = async (sceneId: string) => {
+    const r = await qc.fetchQuery({
+      queryKey: ["scene", sceneId],
+      queryFn: () => storyClient.getScene({ id: sceneId }),
+    });
+    const shots = (r.scene?.shots ?? []).map((s, i) => ({
+      id: s.id,
+      name: s.description || `Shot ${i + 1}`,
+      duration: s.durationTargetS || 5,
+    }));
+    props.onPick(shots);
+  };
+  return (
+    <div className="overlay" onClick={props.onClose}>
+      <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="panel-header">
+          <h3>Add scene shots as placeholder clips</h3>
+          <button className="btn secondary" onClick={props.onClose}>Close</button>
+        </div>
+        {scenes.data?.scenes.length === 0 && <div className="empty">No scenes yet.</div>}
+        <div className="promote-list">
+          {scenes.data?.scenes.map((s) => (
+            <button key={s.id} className="btn secondary chip-add" onClick={() => void pick(s.id)}>
+              {s.name}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}

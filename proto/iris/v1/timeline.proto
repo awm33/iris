@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package iris.v1;
+
+import "iris/v1/canvas.proto";
+import "iris/v1/common.proto";
+
+option go_package = "github.com/awm33/iris/backend/gen/iris/v1;irisv1";
+
+// Timeline documents (M5): op-log docs on the same machinery as canvases —
+// server-ordered gapless seqs, client-owned op vocabulary carried as JSON
+// payloads (see web/packages/doc-runtime). Reuses canvas.proto's DocOp.
+
+message Timeline {
+  string id = 1;
+  string project_id = 2;
+  string doc_id = 3;
+  string name = 4;
+  int32 fps = 5;
+  int64 head_seq = 6;
+  Timestamps timestamps = 15;
+}
+
+service TimelineService {
+  rpc CreateTimeline(CreateTimelineRequest) returns (CreateTimelineResponse);
+  rpc ListTimelines(ListTimelinesRequest) returns (ListTimelinesResponse);
+  rpc GetTimeline(GetTimelineRequest) returns (GetTimelineResponse);
+  rpc AppendTimelineOps(AppendTimelineOpsRequest) returns (AppendTimelineOpsResponse);
+  rpc DeleteTimeline(DeleteTimelineRequest) returns (DeleteTimelineResponse);
+}
+
+message CreateTimelineRequest {
+  string project_id = 1;
+  string name = 2;
+  int32 fps = 3; // 0 = 24
+}
+message CreateTimelineResponse { Timeline timeline = 1; }
+message ListTimelinesRequest { string project_id = 1; }
+message ListTimelinesResponse { repeated Timeline timelines = 1; }
+message GetTimelineRequest {
+  string id = 1;
+  int64 after_seq = 2;
+}
+message GetTimelineResponse {
+  Timeline timeline = 1;
+  repeated DocOp ops = 2;
+}
+message AppendTimelineOpsRequest {
+  string timeline_id = 1;
+  int64 base_seq = 2;
+  repeated string payloads = 3;
+}
+message AppendTimelineOpsResponse { int64 head_seq = 1; }
+message DeleteTimelineRequest { string id = 1; }
+message DeleteTimelineResponse {}
