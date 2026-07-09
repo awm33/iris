@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Timeline } from "@iris/api-client";
 import {
   clipAt,
+  newOpId as oid,
   OpSync,
   type OpSyncTransport,
   TimelineDoc,
@@ -10,15 +11,14 @@ import {
   timelineDuration,
   type SyncStatus,
 } from "@iris/doc-runtime";
-import { assetClient, storyClient, timelineClient } from "../api";
+import { assetClient, storyClient, timelineClient, timelineKeepaliveClient } from "../api";
 import { AssetKind } from "@iris/api-client";
 import { useEscape } from "../components/AssetThumb";
 
 const PX_PER_SEC = 40;
 const TRACK_H = 56;
 
-let opCounter = Math.floor(Math.random() * 46656);
-const oid = () => `op_${Date.now().toString(36)}${(opCounter = (opCounter + 1) % 46656).toString(36).padStart(3, "0")}`;
+
 
 const parse = (payloads: string[]): TimelineOp[] =>
   payloads
@@ -43,7 +43,7 @@ export function TimelinePage(props: {
   const [, tick] = useState(0);
   const [time, setTime] = useState(0);
   const [picking, setPicking] = useState<"media" | "shots" | null>(null);
-  const dragRef = useRef<{ clipId: string; startX: number; origStart: number } | null>(null);
+  const dragRef = useRef<{ clipId: string; startX: number; origStart: number; previewStart?: number } | null>(null);
   const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number } | null>(null);
 
   useEffect(() => {
@@ -63,8 +63,9 @@ export function TimelinePage(props: {
         if (cancelled || !tl) return;
         const doc = new TimelineDoc(parse(payloads));
         const transport: OpSyncTransport = {
-          append: async (baseSeq, ps) => {
-            const r = await timelineClient.appendTimelineOps({
+          append: async (baseSeq, ps, opts) => {
+            const client = opts?.keepalive ? timelineKeepaliveClient : timelineClient;
+            const r = await client.appendTimelineOps({
               timelineId: props.timelineId,
               baseSeq: BigInt(baseSeq),
               payloads: ps,
@@ -72,8 +73,19 @@ export function TimelinePage(props: {
             return Number(r.headSeq);
           },
           fetchSince: async (seq) => {
-            const r = await timelineClient.getTimeline({ id: props.timelineId, afterSeq: BigInt(seq) });
-            return { headSeq: Number(r.timeline!.headSeq), payloads: r.ops.map((o) => o.payload) };
+            // Page to head: a single 2000-op page with the FULL headSeq
+            // reported would make a conflict rebase silently skip ops.
+            let cursor = BigInt(seq);
+            const missed: string[] = [];
+            let head = seq;
+            for (;;) {
+              const r = await timelineClient.getTimeline({ id: props.timelineId, afterSeq: cursor });
+              for (const op of r.ops) missed.push(op.payload);
+              head = Number(r.timeline!.headSeq);
+              if (r.ops.length === 0 || r.ops[r.ops.length - 1].seq >= r.timeline!.headSeq) break;
+              cursor = r.ops[r.ops.length - 1].seq;
+            }
+            return { headSeq: head, payloads: missed };
           },
         };
         const sync = new OpSync(transport, Number(tl.headSeq));
@@ -95,9 +107,11 @@ export function TimelinePage(props: {
     const unsub = session.doc.subscribe(() => tick((t) => t + 1));
     const flush = () => void session.sync.flush(true);
     window.addEventListener("beforeunload", flush);
+    document.addEventListener("visibilitychange", flush);
     return () => {
       unsub();
       window.removeEventListener("beforeunload", flush);
+      document.removeEventListener("visibilitychange", flush);
       flush();
     };
   }, [session]);
@@ -138,13 +152,16 @@ export function TimelinePage(props: {
   const onClipMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
-    setDragPreview({ clipId: d.clipId, start: Math.max(0, d.origStart + (e.clientX - d.startX) / PX_PER_SEC) });
+    // The ref is the source of truth for the drop — dragPreview state can be
+    // a frame stale on a fast release (continuous-priority updates).
+    d.previewStart = Math.max(0, d.origStart + (e.clientX - d.startX) / PX_PER_SEC);
+    setDragPreview({ clipId: d.clipId, start: d.previewStart });
   };
   const onClipUp = () => {
     const d = dragRef.current;
     dragRef.current = null;
-    if (d && dragPreview && Math.abs(dragPreview.start - d.origStart) > 0.01) {
-      doc.apply({ op_id: oid(), type: "move_clip", clip_id: d.clipId, start: Math.round(dragPreview.start * 100) / 100 });
+    if (d && d.previewStart !== undefined && Math.abs(d.previewStart - d.origStart) > 0.01) {
+      doc.apply({ op_id: oid(), type: "move_clip", clip_id: d.clipId, start: Math.round(d.previewStart * 100) / 100 });
     }
     setDragPreview(null);
   };
@@ -159,7 +176,7 @@ export function TimelinePage(props: {
         <button className="btn secondary" onClick={() => setPicking("shots")}>⧉ Scene shots</button>
         <button className="btn secondary" disabled={!doc.canUndo} onClick={() => doc.undo()}>↩</button>
         <button className="btn secondary" disabled={!doc.canRedo} onClick={() => doc.redo()}>↪</button>
-        <span className="status">{status === "saved" ? "saved" : status === "error" ? "save failed" : "…"}</span>
+        <span className={`status${status === "error" ? " error" : ""}`}>{status === "saved" ? "saved" : status === "error" ? "save failed — ops kept locally" : "…"}</span>
       </div>
 
       <PreviewPane clip={active} time={time} onGenerate={props.onGenerateForShot} />
@@ -226,8 +243,14 @@ export function TimelinePage(props: {
             const head = versions.find((v) => v.id === asset?.headVersionId) ?? versions[0];
             if (!head) return;
             const kind = head.contentType.startsWith("audio/") ? "audio" : "video";
-            const track = state.tracks.find((t) => t.kind === kind);
-            if (!track) return;
+            let track = state.tracks.find((t) => t.kind === kind);
+            if (!track) {
+              // Self-heal docs without a matching track (e.g. seeded before
+              // this build) instead of silently dropping the add.
+              const id = `trk_${oid().slice(3)}`;
+              doc.apply({ op_id: oid(), type: "add_track", track: { id, kind, name: kind === "video" ? "V1" : "A1" } });
+              track = doc.state.tracks.find((t) => t.id === id)!;
+            }
             doc.apply({
               op_id: oid(),
               type: "add_clip",
@@ -243,8 +266,12 @@ export function TimelinePage(props: {
           projectId={props.projectId}
           onPick={(shots) => {
             setPicking(null);
-            const track = state.tracks.find((t) => t.kind === "video");
-            if (!track) return;
+            let track = state.tracks.find((t) => t.kind === "video");
+            if (!track) {
+              const id = `trk_${oid().slice(3)}`;
+              doc.apply({ op_id: oid(), type: "add_track", track: { id, kind: "video", name: "V1" } });
+              track = doc.state.tracks.find((t) => t.id === id)!;
+            }
             // Placeholder clips laid end-to-end from the current timeline end.
             let cursor = timelineDuration(state);
             for (const s of shots) {
@@ -304,7 +331,18 @@ function PreviewPane(props: {
 
   return (
     <div className="tl-preview">
-      {c?.versionId && src && <video ref={videoRef} src={src} muted playsInline />}
+      {c?.versionId && src && (
+        <video
+          ref={videoRef}
+          src={src}
+          muted
+          playsInline
+          onLoadedMetadata={(e) => {
+            // First seek can arrive before metadata; re-apply once known.
+            if (c) e.currentTarget.currentTime = Math.max(0, props.time - c.start + c.inPoint);
+          }}
+        />
+      )}
       {c?.shotId && (
         <div className="tl-preview-shot">
           <div className="meta">🎬 {c.name} — placeholder</div>

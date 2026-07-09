@@ -20,11 +20,11 @@ describe("reduceTimeline", () => {
     const ops: TimelineOp[] = [
       track("v1"), track("a1", "audio"), clip("x", "v1", 0, 4),
       { op_id: "m1", type: "move_clip", clip_id: "x", start: -2 },
-      { op_id: "m2", type: "move_clip", clip_id: "x", start: 1, track_id: "a1" },
+      { op_id: "m2", type: "move_clip", clip_id: "x", start: 9, track_id: "a1" }, // kind mismatch: NO effect (atomicity)
       { op_id: "tr", type: "trim_clip", clip_id: "x", duration: 0 },
     ];
     const st = reduceTimeline(ops);
-    expect(st.tracks[0].clips[0].start).toBe(1);
+    expect(st.tracks[0].clips[0].start).toBe(0); // m1 clamped to 0; m2 rejected whole
     expect(st.tracks[1].clips).toHaveLength(0);
     expect(st.tracks[0].clips[0].duration).toBeGreaterThan(0);
   });

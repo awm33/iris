@@ -2,8 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { timelineClient } from "../api";
 
-let c = Math.floor(Math.random() * 46656);
-const oid = () => `op_${Date.now().toString(36)}${(c = (c + 1) % 46656).toString(36).padStart(3, "0")}`;
+import { newOpId as oid } from "@iris/doc-runtime";
 
 export function TimelinesPage(props: { projectId: string; onOpen: (id: string) => void }) {
   const qc = useQueryClient();
@@ -15,15 +14,21 @@ export function TimelinesPage(props: { projectId: string; onOpen: (id: string) =
   const create = useMutation({
     mutationFn: async (n: string) => {
       const r = await timelineClient.createTimeline({ projectId: props.projectId, name: n });
-      // Seed V1 + A1 so the first clip just works (canvas paint-layer pattern).
-      await timelineClient.appendTimelineOps({
+      try {
+        // Seed V1 + A1 so the first clip just works (canvas paint-layer pattern).
+        await timelineClient.appendTimelineOps({
         timelineId: r.timeline!.id,
         baseSeq: 0n,
         payloads: [
           JSON.stringify({ op_id: oid(), type: "add_track", track: { id: `trk_${oid().slice(3)}`, kind: "video", name: "V1" } }),
           JSON.stringify({ op_id: oid(), type: "add_track", track: { id: `trk_${oid().slice(3)}`, kind: "audio", name: "A1" } }),
         ],
-      });
+        });
+      } catch (err) {
+        // Don't strand an orphan with no tracks (there is no add-track UI).
+        await timelineClient.deleteTimeline({ id: r.timeline!.id }).catch(() => {});
+        throw err;
+      }
       return r;
     },
     onSuccess: (r) => {

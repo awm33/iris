@@ -20,6 +20,7 @@ const keepaliveTransport = createConnectTransport({
   fetch: (input, init) => fetch(input, { ...init, keepalive: true }),
 });
 export const canvasKeepaliveClient = createClient(CanvasService, keepaliveTransport);
+export const timelineKeepaliveClient = createClient(TimelineService, keepaliveTransport);
 
 /** Full presigned upload flow: StartUpload → PUT bytes → CompleteUpload. */
 export async function uploadFile(file: File, projectId?: string) {

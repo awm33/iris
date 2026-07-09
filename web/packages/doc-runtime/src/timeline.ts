@@ -1,5 +1,5 @@
 import { activeOps } from "./doc";
-import type { CanvasOp } from "./ops";
+import { type CanvasOp, newOpId } from "./ops";
 
 // Timeline op vocabulary (M5) — second consumer of the op-log runtime.
 // Same envelope ({op_id, type}) and undo-as-op semantics as the canvas;
@@ -111,16 +111,18 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
         const hit = findClip(op.clip_id);
         if (!hit) break;
         const [from, clip] = hit;
-        clip.start = Math.max(0, op.start);
+        // Both-or-neither: a rejected cross-track move must not half-apply
+        // by still changing start — op atomicity matters to non-UI authors.
         if (op.track_id && op.track_id !== from.id) {
           const to = findTrack(op.track_id);
-          // Cross-track moves keep media kinds honest at the reducer.
-          if (to && to.kind === from.kind) {
-            from.clips.splice(from.clips.indexOf(clip), 1);
-            to.clips.push(clip);
-            sort(to);
-          }
+          if (!to || to.kind !== from.kind) break;
+          clip.start = Math.max(0, op.start);
+          from.clips.splice(from.clips.indexOf(clip), 1);
+          to.clips.push(clip);
+          sort(to);
+          break;
         }
+        clip.start = Math.max(0, op.start);
         sort(from);
         break;
       }
@@ -210,7 +212,7 @@ export class TimelineDoc {
     const active = activeOps(this.ops as unknown as CanvasOp[]) as unknown as TimelineOp[];
     const last = active[active.length - 1];
     if (!last) return;
-    const op: TimelineOp = { op_id: newId(), type: "undo", target: last.op_id };
+    const op: TimelineOp = { op_id: newOpId(), type: "undo", target: last.op_id };
     this.redoTargets.push(op.op_id);
     this.commit(op);
   }
@@ -218,12 +220,8 @@ export class TimelineDoc {
   redo() {
     const target = this.redoTargets.pop();
     if (!target) return;
-    this.commit({ op_id: newId(), type: "undo", target });
+    this.commit({ op_id: newOpId(), type: "undo", target });
   }
 }
 
-let counter = Math.floor(Math.random() * 46656);
-function newId(): string {
-  counter = (counter + 1) % 46656;
-  return `op_${Date.now().toString(36)}${counter.toString(36).padStart(3, "0")}`;
-}
+

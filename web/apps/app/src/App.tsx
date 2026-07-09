@@ -1,7 +1,7 @@
 // App shell: left-rail IA per docs/design/02-ui-ux-design.md §2.
 // Live: Projects, Scenes (+ scene detail), Characters, Canvases (+ canvas
 // editor), Library, Jobs, and the Generate panel with shot targeting.
-// Story board/Timelines land with M5.
+// Story board lands later in M5.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { JobState } from "@iris/api-client";
