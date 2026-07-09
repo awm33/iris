@@ -5,3 +5,4 @@ export * from "./gen/iris/v1/common_pb";
 export * from "./gen/iris/v1/workspace_pb";
 export * from "./gen/iris/v1/asset_pb";
 export * from "./gen/iris/v1/generation_pb";
+export * from "./gen/iris/v1/story_pb";

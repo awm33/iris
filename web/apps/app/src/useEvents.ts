@@ -24,6 +24,9 @@ export function useEvents() {
         genDirty = false;
         void qc.invalidateQueries({ queryKey: ["jobs"] });
         void qc.invalidateQueries({ queryKey: ["assets"] });
+        // Shot-targeted generations land takes — scene pages show them live.
+        void qc.invalidateQueries({ queryKey: ["scene"] });
+        void qc.invalidateQueries({ queryKey: ["takes"] });
       }
       if (mediaDirty) {
         mediaDirty = false;

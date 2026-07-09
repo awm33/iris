@@ -1,8 +1,8 @@
 import { Code, ConnectError } from "@connectrpc/connect";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { AssetKind, type Asset } from "@iris/api-client";
-import { assetClient, uploadFile } from "../api";
+import { assetClient, storyClient, uploadFile } from "../api";
 
 export function LibraryPage(props: { projectId?: string; onGenerate?: () => void }) {
   const qc = useQueryClient();
@@ -49,15 +49,44 @@ export function LibraryPage(props: { projectId?: string; onGenerate?: () => void
         <div className="empty">Library is empty — upload an image, video, or audio file.</div>
       )}
       <div className="grid">
-        {assets.data?.assets.map((a) => <AssetCard key={a.id} asset={a} />)}
+        {assets.data?.assets.map((a) => <AssetCard key={a.id} asset={a} projectId={props.projectId} />)}
       </div>
     </div>
   );
 }
 
-function AssetCard({ asset }: { asset: Asset }) {
+function AssetCard({ asset, projectId }: { asset: Asset; projectId?: string }) {
+  const qc = useQueryClient();
+  const [promoting, setPromoting] = useState<"view" | "character" | null>(null);
   const isImage = asset.kind === AssetKind.IMAGE;
   const isVideo = asset.kind === AssetKind.VIDEO;
+
+  const scenes = useQuery({
+    queryKey: ["scenes", projectId ?? ""],
+    enabled: promoting === "view" && !!projectId,
+    queryFn: () => storyClient.listScenes({ projectId: projectId! }),
+  });
+  const characters = useQuery({
+    queryKey: ["characters", projectId ?? ""],
+    enabled: promoting === "character",
+    queryFn: () => storyClient.listCharacters({ projectId: projectId ?? "" }),
+  });
+  const promoteView = useMutation({
+    mutationFn: (sceneId: string) =>
+      storyClient.addView({ sceneId, name: asset.name, plate: { assetId: asset.id, versionId: "" } }),
+    onSuccess: () => {
+      setPromoting(null);
+      void qc.invalidateQueries({ queryKey: ["scene"] });
+    },
+  });
+  const promoteCharacter = useMutation({
+    mutationFn: (characterId: string) =>
+      storyClient.addCharacterRef({ characterId, role: "turnaround", asset: { assetId: asset.id, versionId: "" } }),
+    onSuccess: () => {
+      setPromoting(null);
+      void qc.invalidateQueries({ queryKey: ["characters"] });
+    },
+  });
   const thumb = useQuery({
     queryKey: ["thumb", asset.headVersionId, isVideo ? "poster" : ""],
     enabled: (isImage || isVideo) && asset.headVersionId !== "",
@@ -84,6 +113,60 @@ function AssetCard({ asset }: { asset: Asset }) {
       )}
       <div className="name">{asset.name}</div>
       <div className="meta">{AssetKind[asset.kind]?.toLowerCase() ?? "asset"}</div>
+      {isImage && (
+        <div className="promote-row">
+          <button className="btn secondary chip-add" onClick={() => setPromoting("view")}>
+            → View
+          </button>
+          <button className="btn secondary chip-add" onClick={() => setPromoting("character")}>
+            → Character
+          </button>
+        </div>
+      )}
+      {promoting === "view" && (
+        <PromoteList
+          title="Promote to view of…"
+          items={(scenes.data?.scenes ?? []).map((s) => ({ id: s.id, label: s.name }))}
+          emptyHint="No scenes yet — create one on the Scenes page."
+          onPick={(id) => promoteView.mutate(id)}
+          onClose={() => setPromoting(null)}
+        />
+      )}
+      {promoting === "character" && (
+        <PromoteList
+          title="Add as turnaround ref for…"
+          items={(characters.data?.characters ?? []).map((c) => ({ id: c.id, label: c.name }))}
+          emptyHint="No characters yet — create one on the Characters page."
+          onPick={(id) => promoteCharacter.mutate(id)}
+          onClose={() => setPromoting(null)}
+        />
+      )}
+      {(promoteView.isError || promoteCharacter.isError) && (
+        <div className="status error">{String(promoteView.error ?? promoteCharacter.error)}</div>
+      )}
+    </div>
+  );
+}
+
+function PromoteList(props: {
+  title: string;
+  items: { id: string; label: string }[];
+  emptyHint: string;
+  onPick: (id: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="promote-list">
+      <div className="meta">{props.title}</div>
+      {props.items.length === 0 && <div className="meta">{props.emptyHint}</div>}
+      {props.items.map((it) => (
+        <button key={it.id} className="btn secondary chip-add" onClick={() => props.onPick(it.id)}>
+          {it.label}
+        </button>
+      ))}
+      <button className="chip-x" onClick={props.onClose}>
+        ×
+      </button>
     </div>
   );
 }

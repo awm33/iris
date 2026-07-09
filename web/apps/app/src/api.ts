@@ -1,6 +1,6 @@
 import { createClient } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
-import { AssetService, GenerationService, WorkspaceService } from "@iris/api-client";
+import { AssetService, GenerationService, StoryService, WorkspaceService } from "@iris/api-client";
 
 // Same-origin; vite proxies /iris.v1* to the Go api in dev.
 const transport = createConnectTransport({ baseUrl: "/" });
@@ -8,6 +8,7 @@ const transport = createConnectTransport({ baseUrl: "/" });
 export const workspaceClient = createClient(WorkspaceService, transport);
 export const assetClient = createClient(AssetService, transport);
 export const generationClient = createClient(GenerationService, transport);
+export const storyClient = createClient(StoryService, transport);
 
 /** Full presigned upload flow: StartUpload → PUT bytes → CompleteUpload. */
 export async function uploadFile(file: File, projectId?: string) {
