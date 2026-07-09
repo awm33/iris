@@ -215,19 +215,29 @@ func (s *GenerationServer) toGenRequest(j *irisv1.GenerationJob, count int) (*st
 			Kind: r.Kind, Role: r.Role, Weight: r.Weight,
 		})
 	}
-	// Conditioning: gen-fill (M4) uses source_image + mask. The remaining
-	// spec keys (frames/depth/source_video) wire up with the surfaces that
-	// need them (M5+); the proto carries them but they are rejected here
-	// rather than silently dropped.
+	// Conditioning: gen-fill (M4) uses source_image + mask; continuity carry
+	// (M5) uses first_frame. The remaining spec keys (last_frame/keyframes/
+	// depth/source_video) wire up with the surfaces that need them; the
+	// proto carries them but they are rejected here rather than silently
+	// dropped.
 	if c := j.Conditioning; c != nil {
-		if c.FirstFrame != nil || c.LastFrame != nil || len(c.Keyframes) > 0 ||
+		if c.LastFrame != nil || len(c.Keyframes) > 0 ||
 			c.DepthSequence != nil || c.SourceVideo != nil {
 			return nil, nil, connect.NewError(connect.CodeUnimplemented,
-				errors.New("only source_image and mask conditioning are supported so far"))
+				errors.New("only first_frame, source_image and mask conditioning are supported so far"))
 		}
-		if c.SourceImage != nil || c.Mask != nil {
+		if c.FirstFrame != nil || c.SourceImage != nil || c.Mask != nil {
 			genReq.Conditioning = &store.GenConditioning{}
 			infReq.Conditioning = &inference.Conditioning{}
+			if c.FirstFrame != nil {
+				if c.FirstFrame.AssetId == "" && c.FirstFrame.VersionId == "" {
+					return nil, nil, connect.NewError(connect.CodeInvalidArgument, errors.New("conditioning.first_frame missing asset or version"))
+				}
+				genReq.Conditioning.FirstFrame = &store.GenRef{
+					AssetID: c.FirstFrame.AssetId, VersionID: c.FirstFrame.VersionId,
+				}
+				infReq.Conditioning.FirstFrame = &inference.FrameRef{}
+			}
 			if c.SourceImage != nil {
 				if c.SourceImage.AssetId == "" {
 					return nil, nil, connect.NewError(connect.CodeInvalidArgument, errors.New("conditioning.source_image missing asset"))
@@ -428,6 +438,9 @@ func genJobPB(j *store.GenJob) *irisv1.GenerationJob {
 	}
 	if c := genReq.Conditioning; c != nil {
 		pb.Conditioning = &irisv1.Conditioning{}
+		if c.FirstFrame != nil {
+			pb.Conditioning.FirstFrame = &irisv1.AssetRef{AssetId: c.FirstFrame.AssetID, VersionId: c.FirstFrame.VersionID}
+		}
 		if c.SourceImage != nil {
 			pb.Conditioning.SourceImage = &irisv1.AssetRef{AssetId: c.SourceImage.AssetID, VersionId: c.SourceImage.VersionID}
 		}

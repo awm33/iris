@@ -404,18 +404,42 @@ func (s *Store) ListTakes(ctx context.Context, shotID string) ([]*TakeRow, error
 }
 
 // SelectTake sets the shot's selected take (must belong to the shot).
+// CHANGING the selection marks downstream shots in the scene that already
+// have takes ⚠ continuity_stale — their content was generated against the
+// previous upstream pick (W3: the carry input just moved under them).
+// Re-selecting the same take propagates nothing.
 func (s *Store) SelectTake(ctx context.Context, shotID, takeID string) error {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE shots SET selected_take_id = $2, updated_at = now()
-		WHERE id = $1 AND EXISTS (SELECT 1 FROM takes WHERE id = $2 AND shot_id = $1)`,
-		shotID, takeID)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	defer func() { _ = tx.Rollback(ctx) }()
+	var sceneID string
+	var position int32
+	var changed bool
+	err = tx.QueryRow(ctx, `
+		WITH old AS (SELECT selected_take_id FROM shots WHERE id = $1)
+		UPDATE shots SET selected_take_id = $2, updated_at = now()
+		WHERE id = $1 AND EXISTS (SELECT 1 FROM takes WHERE id = $2 AND shot_id = $1)
+		RETURNING scene_id, position,
+		          (SELECT selected_take_id FROM old) IS DISTINCT FROM $2`,
+		shotID, takeID).Scan(&sceneID, &position, &changed)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+	if changed {
+		if _, err := tx.Exec(ctx, `
+			UPDATE shots SET continuity_stale = true, updated_at = now()
+			WHERE scene_id = $1 AND position > $2 AND NOT continuity_stale
+			  AND EXISTS (SELECT 1 FROM takes WHERE takes.shot_id = shots.id)`,
+			sceneID, position); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) GetShot(ctx context.Context, id string) (*ShotRow, error) {

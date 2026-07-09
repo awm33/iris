@@ -14,6 +14,7 @@ type Manifest = {
   profiles: Record<string, { max_width: number; max_height: number }>;
   duration?: { min_s: number; max_s: number };
   references?: { image?: { max: number; roles: string[] } };
+  conditioning?: { first_frame?: boolean };
   features?: { seed?: boolean; prompt?: boolean };
   pricing?: { unit: string; estimates?: Record<string, number> };
 };
@@ -120,6 +121,30 @@ export function GeneratePanel(props: {
   const [seed, setSeed] = useState<string>(props.prefill?.seed !== undefined ? String(props.prefill.seed) : "");
   const [refs, setRefs] = useState<RefChip[]>(props.prefill?.refs ?? []);
   const [showRefPicker, setShowRefPicker] = useState(false);
+  // Continuity carry (W3): the nearest EARLIER shot in the scene with a
+  // selected take supplies its last frame as first_frame conditioning.
+  const [carry, setCarry] = useState(true);
+  const targetShot = useQuery({
+    queryKey: ["shot", props.target?.shotId],
+    enabled: !!props.target,
+    queryFn: () => storyClient.getShot({ id: props.target!.shotId }),
+  });
+  const carryScene = useQuery({
+    queryKey: ["scene", targetShot.data?.shot?.sceneId],
+    enabled: !!targetShot.data?.shot?.sceneId,
+    queryFn: () => storyClient.getScene({ id: targetShot.data!.shot!.sceneId }),
+  });
+  const carrySource = useMemo(() => {
+    const me = targetShot.data?.shot;
+    const shots = carryScene.data?.scene?.shots;
+    if (!me || !shots) return undefined;
+    let best: { label: string; versionId: string } | undefined;
+    for (const [i, sh] of shots.entries()) {
+      if (sh.position >= me.position || sh.id === me.id) continue;
+      if (sh.selectedTakeVersionId) best = { label: `Shot ${i + 1}`, versionId: sh.selectedTakeVersionId };
+    }
+    return best;
+  }, [targetShot.data, carryScene.data]);
 
   const activeTask = task && manifest?.tasks.includes(task) ? task : manifest?.tasks[0];
   // "draft" is convention, not contract — fall back to the manifest's first
@@ -147,6 +172,9 @@ export function GeneratePanel(props: {
   const effectiveRefs = refDecl
     ? refs.filter((r) => refDecl.roles.includes(r.role)).slice(0, refDecl.max)
     : [];
+  // Offered only when it can actually submit: video endpoint that declares
+  // first_frame conditioning, with an upstream take to carry from.
+  const carryActive = carry && isVideo && manifest?.conditioning?.first_frame === true && !!carrySource;
 
   const create = useMutation({
     mutationFn: () =>
@@ -171,6 +199,11 @@ export function GeneratePanel(props: {
             role: r.role,
             asset: { assetId: r.assetId, versionId: "" },
           })),
+          // A VIDEO version as first_frame means "its last frame" (the prep
+          // artifact) — the orchestrator resolves the derived key.
+          conditioning: carryActive
+            ? { firstFrame: { assetId: "", versionId: carrySource!.versionId } }
+            : undefined,
         },
       }),
     onSuccess: () => {
@@ -217,6 +250,12 @@ export function GeneratePanel(props: {
     <aside className="panel">
       <PanelHeader onClose={props.onClose} />
       {props.target && <div className="target-chip">Target: {props.target.label}</div>}
+      {props.target && isVideo && manifest.conditioning?.first_frame === true && carrySource && (
+        <label className="carry-chip" title="Sends the upstream take's last frame as first_frame conditioning">
+          <input type="checkbox" checked={carry} onChange={(e) => setCarry(e.target.checked)} />
+          ⛓ Continue from {carrySource.label}’s last frame
+        </label>
+      )}
       {fallbackNotes.length > 0 && (
         <div className="status error">{fallbackNotes.join(" ")}</div>
       )}

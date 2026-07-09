@@ -321,6 +321,13 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	// decode failure before parking mislabeled "internal".
 	if c := req.Conditioning; c != nil {
 		infReq.Conditioning = &inference.Conditioning{}
+		if c.FirstFrame != nil {
+			url, err := o.resolveFrameURL(ctx, c.FirstFrame)
+			if err != nil {
+				return nil, "", err
+			}
+			infReq.Conditioning.FirstFrame = &inference.FrameRef{URL: url}
+		}
 		if c.SourceImage != nil {
 			url, err := o.resolveRefURL(ctx, c.SourceImage, "image/")
 			if err != nil {
@@ -375,6 +382,47 @@ func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef, wan
 		return "", fmt.Errorf("presign reference: %w", err)
 	}
 	return url, nil
+}
+
+// resolveFrameURL resolves a conditioning FRAME ref: an image version is
+// used as-is; a VIDEO version means "its last frame" — the prep artifact
+// extracted for exactly this carry (HLD W3). Prep-not-finished is a
+// ValidationError (invalid_input park): retrying won't run prep, and the
+// message tells the user what to wait for.
+func (o *Orchestrator) resolveFrameURL(ctx context.Context, ref *store.GenRef) (string, error) {
+	versionID := ref.VersionID
+	if versionID == "" {
+		a, _, err := o.Store.GetAsset(ctx, ref.AssetID)
+		if err != nil {
+			return "", &inference.ValidationError{Msg: fmt.Sprintf("first_frame asset %s not found", ref.AssetID)}
+		}
+		versionID = a.HeadVersionID
+	}
+	info, err := o.Store.GetVersionObjectInfo(ctx, versionID)
+	if err != nil {
+		return "", &inference.ValidationError{Msg: fmt.Sprintf("first_frame version %s not found", versionID)}
+	}
+	if strings.HasPrefix(info.ContentType, "image/") {
+		url, err := o.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
+		if err != nil {
+			return "", fmt.Errorf("presign first_frame: %w", err)
+		}
+		return url, nil
+	}
+	if strings.HasPrefix(info.ContentType, "video/") {
+		key := info.DerivedKeys["last_frame"]
+		if key == "" {
+			return "", &inference.ValidationError{Msg: fmt.Sprintf(
+				"first_frame source %s is a video whose last frame isn't extracted yet — media prep may still be running", versionID)}
+		}
+		url, err := o.Blob.PresignGetExternal(ctx, key, "image/png", refGetTTL)
+		if err != nil {
+			return "", fmt.Errorf("presign last frame: %w", err)
+		}
+		return url, nil
+	}
+	return "", &inference.ValidationError{Msg: fmt.Sprintf(
+		"first_frame source %s is %s — want an image or a video (its last frame)", versionID, info.ContentType)}
 }
 
 // expectedContentType is Iris's own decision — the endpoint's reported
@@ -467,7 +515,7 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 	// "what conditioned it" must be walkable from the graph, not only
 	// recoverable by parsing the job-row request JSON.
 	if req.Conditioning != nil {
-		for _, ref := range []*store.GenRef{req.Conditioning.SourceImage, req.Conditioning.Mask} {
+		for _, ref := range []*store.GenRef{req.Conditioning.FirstFrame, req.Conditioning.SourceImage, req.Conditioning.Mask} {
 			if ref == nil || ref.VersionID == "" {
 				continue
 			}
@@ -525,9 +573,13 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 			}
 			// First take auto-selects so the shot shows something
 			// immediately; selection stays revisitable in the take picker.
+			// A fresh take also clears ⚠ continuity_stale: it was generated
+			// against the CURRENT upstream state (approximation — carry
+			// isn't mandatory — but stale is a nudge, not an invariant).
 			_, err := sub.Exec(ctx, `
-				UPDATE shots SET selected_take_id = $2, updated_at = now()
-				WHERE id = $1 AND selected_take_id IS NULL`,
+				UPDATE shots SET selected_take_id = COALESCE(selected_take_id, $2),
+				                 continuity_stale = false, updated_at = now()
+				WHERE id = $1`,
 				job.TargetEntityID, takeID)
 			return err
 		}
