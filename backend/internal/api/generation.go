@@ -27,9 +27,14 @@ const (
 
 func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[irisv1.CreateJobRequest]) (*connect.Response[irisv1.CreateJobResponse], error) {
 	j := req.Msg.Job
-	if j == nil || j.Prompt == "" || j.ModelEndpointId == "" || j.Task == "" {
+	if j == nil || j.ModelEndpointId == "" || j.Task == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("job.prompt, job.model_endpoint_id, and job.task are required"))
+			errors.New("job.model_endpoint_id and job.task are required"))
+	}
+	// Empty prompt is a REMOVAL for inpaint (spec §2: reconstruct background,
+	// insert nothing); every other task needs one.
+	if j.Prompt == "" && j.Task != "inpaint" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("job.prompt is required"))
 	}
 	if j.ProjectId == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("job.project_id is required"))

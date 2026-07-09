@@ -245,6 +245,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         maskAssetId: genFill.maskAssetId,
         candidates: j.artifactVersionIds,
         index: 0,
+        removal: genFill.removal,
       });
     } else if (j.state === JobState.COMPLETE) {
       // Terminal with nothing to choose — without this branch the poll would
@@ -340,6 +341,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         jobId: r.job!.id,
         maskVersionId: mask.version!.id,
         maskAssetId: mask.asset!.id,
+        removal: prompt === "",
       });
     } catch (e) {
       setGenFillError(String(e));
@@ -355,7 +357,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
       type: "add_layer",
       layer: {
         id,
-        name: "Gen fill",
+        // Removal (empty prompt) and generation read differently in the
+        // layers panel — name them apart.
+        name: genFill.removal ? "Remove" : "Gen fill",
         kind: "image",
         version_id: genFill.candidates[genFill.index],
         mask_version_id: genFill.maskVersionId,
