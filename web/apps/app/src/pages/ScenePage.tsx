@@ -13,7 +13,7 @@ export function ScenePage(props: {
   projectId: string;
   sceneId: string;
   onBack: () => void;
-  onGenerateForShot: (shotId: string, label: string) => void;
+  onGenerateForShot: (shotId: string, label: string, recipeJson?: string) => void;
 }) {
   const qc = useQueryClient();
   const [addingView, setAddingView] = useState(false);
@@ -165,8 +165,12 @@ export function ScenePage(props: {
               shot={sh}
               sceneId={props.sceneId}
               generating={generatingShots.has(sh.id)}
-              onGenerate={() =>
-                props.onGenerateForShot(sh.id, `Shot ${i + 1}${sh.description ? ` · ${truncate(sh.description, 40)}` : ""}`)
+              onGenerate={(recipeJson) =>
+                props.onGenerateForShot(
+                  sh.id,
+                  `Shot ${i + 1}${sh.description ? ` · ${truncate(sh.description, 40)}` : ""}`,
+                  recipeJson,
+                )
               }
             />
           ))}
@@ -193,7 +197,7 @@ function ShotCard(props: {
   shot: Shot;
   sceneId: string;
   generating: boolean;
-  onGenerate: () => void;
+  onGenerate: (recipeJson?: string) => void;
 }) {
   const qc = useQueryClient();
   const [pickingTakes, setPickingTakes] = useState(false);
@@ -236,7 +240,7 @@ function ShotCard(props: {
         {del.isError && <div className="status error">{String(del.error)}</div>}
       </div>
       <div className="shot-actions">
-        <button className="btn" onClick={props.onGenerate}>
+        <button className="btn" onClick={() => props.onGenerate()}>
           ⚡ Generate takes
         </button>
         <button className="btn secondary" disabled={sh.takeCount === 0} onClick={() => setPickingTakes(true)}>
@@ -247,7 +251,15 @@ function ShotCard(props: {
         </button>
       </div>
       {pickingTakes && (
-        <TakePicker shotId={sh.id} selectedTakeId={sh.selectedTakeId} onClose={() => setPickingTakes(false)} />
+        <TakePicker
+          shotId={sh.id}
+          selectedTakeId={sh.selectedTakeId}
+          onRegenerate={(recipeJson) => {
+            setPickingTakes(false);
+            props.onGenerate(recipeJson);
+          }}
+          onClose={() => setPickingTakes(false)}
+        />
       )}
     </div>
   );
