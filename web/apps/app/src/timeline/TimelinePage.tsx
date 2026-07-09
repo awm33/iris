@@ -1,5 +1,5 @@
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Timeline } from "@iris/api-client";
 import {
   bladeOps,
@@ -271,24 +271,47 @@ export function TimelinePage(props: {
   // to a version (media clips directly; shot clips via their selected
   // take). Unresolved spans stay out — the placeholder overlay covers them.
   const qc = useQueryClient();
-  const videoClips = (session?.doc.state.tracks ?? []).filter((t) => t.kind === "video").flatMap((t) => t.clips);
-  const shotIds = [...new Set(videoClips.filter((c) => !c.versionId && c.shotId).map((c) => c.shotId!))];
+  const docState = session?.doc.state;
+  const videoClips = useMemo(
+    () => (docState?.tracks ?? []).filter((t) => t.kind === "video").flatMap((t) => t.clips),
+    [docState],
+  );
+  const shotIds = useMemo(
+    () => [...new Set(videoClips.filter((c) => !c.versionId && c.shotId).map((c) => c.shotId!))],
+    [videoClips],
+  );
   const shotQueries = useQueries({
     queries: shotIds.map((id) => ({
       queryKey: ["shot", id],
       queryFn: () => storyClient.getShot({ id }),
       staleTime: 30_000,
+      // The fan-out lookup only serves the engine preview; PreviewPane
+      // resolves its single active shot itself.
+      enabled: engineOn,
     })),
   });
-  const takeByShot = new Map(shotIds.map((id, i) => [id, shotQueries[i].data?.shot?.selectedTakeVersionId || undefined]));
-  const segments: Segment[] = videoClips.flatMap((c) => {
-    const sourceId = c.versionId ?? (c.shotId ? takeByShot.get(c.shotId) : undefined);
-    return sourceId ? [{ sourceId, startS: c.start, durationS: c.duration, inPointS: c.inPoint }] : [];
-  });
+  const takeKey = shotQueries.map((q) => q.data?.shot?.selectedTakeVersionId ?? (q.isPending ? "?" : "")).join(",");
+  // Stable identity while nothing resolved changes: the EngineCanvas
+  // effect keys on this array, and a fresh array per render would spawn
+  // paused re-decodes on every drag-preview / autosave status tick.
+  const segments: Segment[] = useMemo(() => {
+    const takeByShot = new Map(shotIds.map((id, i) => [id, shotQueries[i].data?.shot?.selectedTakeVersionId || undefined]));
+    return videoClips.flatMap((c) => {
+      const sourceId = c.versionId ?? (c.shotId ? takeByShot.get(c.shotId) : undefined);
+      return sourceId ? [{ sourceId, startS: c.start, durationS: c.duration, inPointS: c.inPoint }] : [];
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoClips, shotIds, takeKey]);
+  const shotSettled = useMemo(
+    () => new Map(shotIds.map((id, i) => [id, !shotQueries[i].isPending || !engineOn])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shotIds, takeKey, engineOn],
+  );
   const srcFor = (versionId: string) =>
     qc.fetchQuery({
       queryKey: ["previewSrc", versionId],
       staleTime: 5 * 60_000,
+      retry: false, // parity with PreviewPane on the shared key — fail fast into the engine's error surface
       queryFn: async () => {
         try {
           return (await assetClient.signDownload({ versionId, variant: "proxy" })).url;
@@ -433,14 +456,16 @@ export function TimelinePage(props: {
         <div className="tl-preview">
           <EngineCanvas segments={segments} time={time} playing={playing} srcFor={srcFor} onError={setEngineError} />
           {engineError && <div className="tl-preview-note">{engineError}</div>}
-          {active?.shotId && !segments.some((sg) => time >= sg.startS && time < sg.startS + sg.durationS) && (
-            <div className="tl-preview-shot tl-preview-overlay">
-              <div className="meta">🎬 {active.name} — no take selected</div>
-              <button className="btn" onClick={() => props.onGenerateForShot(active.shotId!, active.name)}>
-                ⚡ Generate into slot
-              </button>
-            </div>
-          )}
+          {active?.shotId &&
+            shotSettled.get(active.shotId) !== false &&
+            !segments.some((sg) => time >= sg.startS && time < sg.startS + sg.durationS) && (
+              <div className="tl-preview-shot tl-preview-overlay">
+                <div className="meta">🎬 {active.name} — no take selected</div>
+                <button className="btn" onClick={() => props.onGenerateForShot(active.shotId!, active.name)}>
+                  ⚡ Generate into slot
+                </button>
+              </div>
+            )}
           {!active && <div className="meta tl-preview-overlay">No clip under the playhead.</div>}
         </div>
       ) : (

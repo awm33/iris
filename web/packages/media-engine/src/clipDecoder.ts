@@ -125,7 +125,10 @@ export class ClipDecoder {
 
     const decoder = new VideoDecoder({
       output: (frame) => {
-        if (frame.timestamp < fromUs) {
+        // Pre-roll ends at the frame COVERING fromUs — dropping frames with
+        // timestamp < fromUs skipped the covering frame and made every
+        // paused seek land one frame late vs the play path's takeUpTo.
+        if (frame.timestamp + (frame.duration ?? 0) <= fromUs) {
           frame.close(); // pre-roll
           return;
         }

@@ -41,8 +41,11 @@ export function EngineCanvas(props: {
   const decodersRef = useRef(new Map<string, Promise<ClipDecoder>>());
   const sessionRef = useRef<PlaySession | null>(null);
   const scrubAbortRef = useRef<AbortController | null>(null);
+  const scrubKeyRef = useRef<string | null>(null);
   const propsRef = useRef(props);
-  propsRef.current = props;
+  useEffect(() => {
+    propsRef.current = props;
+  });
 
   const decoderFor = (sourceId: string): Promise<ClipDecoder> => {
     const cache = decodersRef.current;
@@ -54,12 +57,19 @@ export function EngineCanvas(props: {
       return hit;
     }
     const opened = propsRef.current.srcFor(sourceId).then((url) => ClipDecoder.open(url));
-    opened.catch(() => cache.delete(sourceId)); // failed opens must retry next time
+    opened.catch(() => {
+      // Only delete OUR entry: an evicted-then-reopened source must not
+      // have its healthy replacement removed by the stale rejection.
+      if (cache.get(sourceId) === opened) cache.delete(sourceId);
+    });
     cache.set(sourceId, opened);
-    while (cache.size > MAX_DECODERS) {
-      const oldest = cache.keys().next().value!;
-      if (oldest === sessionRef.current?.sourceId) break; // never evict the playing source
-      cache.delete(oldest);
+    // Evict oldest first, SKIPPING the playing source — a break here would
+    // stop evicting entirely and grow the cache unbounded once the playing
+    // source ages to the front.
+    for (const key of [...cache.keys()]) {
+      if (cache.size <= MAX_DECODERS) break;
+      if (key === sessionRef.current?.sourceId) continue;
+      cache.delete(key);
     }
     return opened;
   };
@@ -110,7 +120,14 @@ export function EngineCanvas(props: {
       }
     })()
       .catch((e) => {
-        if (!abort.signal.aborted) propsRef.current.onError?.(`engine: ${String(e)}`);
+        if (!abort.signal.aborted) {
+          propsRef.current.onError?.(`engine: ${String(e)}`);
+          // A dead session must not pin the canvas for the rest of the
+          // segment — clearing it lets the next tick restart (retry).
+          if (sessionRef.current === session) {
+            endSession();
+          }
+        }
       })
       .finally(() => {
         session.done = true;
@@ -133,9 +150,18 @@ export function EngineCanvas(props: {
       }
       const targetUs = Math.round(sourceTime(seg, props.time) * 1e6);
       const s = sessionRef.current;
-      // (Re)start on: source switch, or a backward jump the decode-forward
-      // generator can't serve (scrub-while-playing restarts playback).
-      if (!s || s.sourceId !== seg.sourceId || targetUs < s.lastPaintedUs - 250_000) {
+      // (Re)start on: source switch; a backward jump the decode-forward
+      // generator can't serve; or a same-source FORWARD discontinuity —
+      // blade+delete cuts jump the in-point within one source, and chasing
+      // it by decoding through the removed span would smear exactly the
+      // footage the editor cut. Forward restarts are gated on !done so the
+      // overhang freeze (source shorter than clip) doesn't churn restarts.
+      if (
+        !s ||
+        s.sourceId !== seg.sourceId ||
+        targetUs < s.lastPaintedUs - 250_000 ||
+        (!s.done && targetUs > s.lastPaintedUs + 1_000_000)
+      ) {
         startSession(seg.sourceId, sourceTime(seg, props.time));
       }
       const live = sessionRef.current!;
@@ -158,14 +184,21 @@ export function EngineCanvas(props: {
     // invalidates its forward-only position anyway.
     endSession();
     if (!seg) {
+      scrubKeyRef.current = null;
       const c = canvasRef.current;
       if (c) c.getContext("2d")!.clearRect(0, 0, c.width, c.height);
       return;
     }
+    const target = sourceTime(seg, props.time);
+    // Dedupe: the effect fires on EVERY parent render (segments identity),
+    // and re-decoding the same (source, frame) on drag-previews / autosave
+    // status ticks is pure hardware-decoder churn.
+    const scrubKey = `${seg.sourceId}:${Math.round(target * 1e6)}`;
+    if (scrubKey === scrubKeyRef.current && !scrubAbortRef.current?.signal.aborted) return;
+    scrubKeyRef.current = scrubKey;
     scrubAbortRef.current?.abort();
     const abort = new AbortController();
     scrubAbortRef.current = abort;
-    const target = sourceTime(seg, props.time);
     void (async () => {
       try {
         const dec = await decoderFor(seg.sourceId);
