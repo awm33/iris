@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipAt, reduceTimeline, TimelineDoc, type TimelineOp, timelineDuration, bladeOps, snapTime } from "./timeline";
+import { clipAt, reduceTimeline, TimelineDoc, type TimelineOp, timelineDuration, bladeOps, rippleOps, snapTime } from "./timeline";
 
 const track = (id: string, kind: "video" | "audio" = "video"): TimelineOp => ({
   op_id: `t_${id}`, type: "add_track", track: { id, kind },
@@ -192,5 +192,56 @@ describe("reduce: combined trim_clip", () => {
       { op_id: "tr", type: "trim_clip", clip_id: "x", start: 3.5, duration: 4.5, in_point: 2.5 },
     ]);
     expect(st.tracks[0].clips[0]).toMatchObject({ start: 3.5, duration: 4.5, inPoint: 2.5 });
+  });
+});
+
+describe("rippleOps", () => {
+  const state = reduceTimeline([
+    { op_id: "t1", type: "add_track", track: { id: "v1", kind: "video" } },
+    { op_id: "t2", type: "add_track", track: { id: "a1", kind: "audio" } },
+    { op_id: "c1", type: "add_clip", track_id: "v1", clip: { id: "a", name: "a", start: 0, duration: 2 } },
+    { op_id: "c2", type: "add_clip", track_id: "v1", clip: { id: "b", name: "b", start: 2, duration: 3 } },
+    { op_id: "c3", type: "add_clip", track_id: "v1", clip: { id: "c", name: "c", start: 6, duration: 1 } },
+    { op_id: "c4", type: "add_clip", track_id: "a1", clip: { id: "x", name: "x", start: 3, duration: 2 } },
+  ]);
+
+  it("shifts clips at-or-after the pivot on ONE track; other tracks untouched", () => {
+    const ops = rippleOps(state, "v1", 2, 1.5);
+    expect(ops).toEqual([
+      expect.objectContaining({ type: "move_clip", clip_id: "b", start: 3.5 }),
+      expect.objectContaining({ type: "move_clip", clip_id: "c", start: 7.5 }),
+    ]);
+  });
+
+  it("negative delta closes gaps; starts clamp at 0", () => {
+    const ops = rippleOps(state, "v1", 2, -3);
+    expect(ops.map((o) => (o as { start: number }).start)).toEqual([0, 3]); // b clamped, c 6→3
+  });
+
+  it("epsilon catches r2-rounded starts just before the pivot", () => {
+    expect(rippleOps(state, "v1", 2.004, 1).length).toBe(2); // b at 2.0 still ripples
+  });
+
+  it("no-ops on zero delta or unknown track", () => {
+    expect(rippleOps(state, "v1", 0, 0)).toEqual([]);
+    expect(rippleOps(state, "nope", 0, 1)).toEqual([]);
+  });
+
+  it("applying ripple after a delete closes the gap exactly", () => {
+    const ops = [
+      { op_id: "rm", type: "remove_clip", clip_id: "b" } as const,
+      ...rippleOps(state, "v1", 2 + 3, -3), // after b's END, shift left by b's duration
+    ];
+    const after = reduceTimeline([
+      { op_id: "t1", type: "add_track", track: { id: "v1", kind: "video" } },
+      { op_id: "c1", type: "add_clip", track_id: "v1", clip: { id: "a", name: "a", start: 0, duration: 2 } },
+      { op_id: "c2", type: "add_clip", track_id: "v1", clip: { id: "b", name: "b", start: 2, duration: 3 } },
+      { op_id: "c3", type: "add_clip", track_id: "v1", clip: { id: "c", name: "c", start: 6, duration: 1 } },
+      ...ops,
+    ]);
+    expect(after.tracks[0].clips.map((c) => [c.id, c.start])).toEqual([
+      ["a", 0],
+      ["c", 3],
+    ]);
   });
 });
