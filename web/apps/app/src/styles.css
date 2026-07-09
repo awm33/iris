@@ -207,6 +207,12 @@ body {
 .board-shot-actions { display: flex; gap: 4px; flex-wrap: wrap; }
 .board-add input { width: 100%; background: var(--bg); border: 1px dashed var(--border); border-radius: 6px; color: var(--text); padding: 6px 8px; font-size: 12px; }
 
+.board-chain { text-align: center; font-size: 11px; color: var(--ok); line-height: 1; margin: -2px 0; }
+.board-chain-stale { color: #fbbf24; }
+.board-chip-stale { border-color: #fbbf24; }
+.chain-inspector { display: flex; gap: 14px; align-items: flex-start; }
+.chain-thumb { width: 160px; height: 100px; object-fit: cover; border-radius: 6px; background: var(--bg); flex-shrink: 0; }
+
 /* Story surfaces */
 .scene-section { margin-bottom: 28px; }
 .section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }

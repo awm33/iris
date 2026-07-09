@@ -29,6 +29,7 @@ export function useEvents() {
         void qc.invalidateQueries({ queryKey: ["scene"] });
         void qc.invalidateQueries({ queryKey: ["takes"] });
         void qc.invalidateQueries({ queryKey: ["shot"] });
+        void qc.invalidateQueries({ queryKey: ["chains"] });
       }
       if (mediaDirty) {
         mediaDirty = false;
