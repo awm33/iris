@@ -155,6 +155,23 @@ func (s *AssetServer) SignDownload(ctx context.Context, req *connect.Request[iri
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("poster not generated yet"))
 		}
 		key, contentType = info.PosterKey, "image/jpeg"
+	case "proxy", "filmstrip", "first_frame", "last_frame", "waveform":
+		k, ok := info.DerivedKeys[req.Msg.Variant]
+		if !ok {
+			return nil, connect.NewError(connect.CodeNotFound,
+				errors.New(req.Msg.Variant+" not generated yet"))
+		}
+		key = k
+		switch req.Msg.Variant {
+		case "proxy":
+			contentType = "video/mp4"
+		case "filmstrip":
+			contentType = "image/jpeg"
+		case "waveform":
+			contentType = "application/json"
+		default:
+			contentType = "image/png"
+		}
 	default:
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unknown variant: "+req.Msg.Variant))
 	}

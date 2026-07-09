@@ -122,6 +122,8 @@ func (w *Worker) execute(ctx context.Context, job *queue.MediaJob) {
 	switch job.Kind {
 	case "probe":
 		err = w.runProbe(jctx, job)
+	case "prep":
+		err = w.runPrep(jctx, job)
 	default:
 		err = permanent(fmt.Errorf("unknown media job kind %q", job.Kind))
 	}
@@ -236,6 +238,14 @@ func (w *Worker) runProbe(ctx context.Context, job *queue.MediaJob) error {
 		WHERE id = $1`,
 		in.VersionID, width, height, info.DurationS, fps, metaJSON); err != nil {
 		return fmt.Errorf("update version: %w", err)
+	}
+	// Chain the heavier prep pass (proxy/filmstrip/frames/waveform) for
+	// playable media — atomically with probe completion.
+	if isVideo || strings.HasPrefix(contentType, "audio/") {
+		if err := queue.EnqueueMediaJob(ctx, tx, job.WorkspaceID, "prep",
+			map[string]string{"version_id": in.VersionID}); err != nil {
+			return err
+		}
 	}
 	if err := queue.CompleteMediaJob(ctx, tx, job.ID, w.Name); err != nil {
 		return err

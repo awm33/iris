@@ -65,6 +65,13 @@
 - **PR 11 — LaMa endpoint trial:** a small dockerized endpoint (ONNX runtime) implementing spec/inference-api.md tasks:["inpaint"] — drop-in by manifest negotiation, zero UI change, conformance-tested incl. mask_semantics. First real local model; consistent with the environment stance (local, not a remote).
 - Then: SAM subject select (click-to-mask feeding remove/gen-fill), text layer v0.
 
+**M4 — ✅ COMPLETE** (PRs #10 remove tool, #11 LaMa endpoint, #12 SAM subject select, #13 text layer — each independently reviewed, all findings fixed). The image studio ships: canvas/layers/brush/eraser, gen-fill with in-place candidates, the full Remove ladder (SAM click-to-mask → LaMa fast tier → removal-tuned Qwen-Edit as the standing R&D quality-tier ask, with dogfood eval cases recorded), promote-to-View, text v0. Notable infra: first two REAL local models (LaMa, MobileSAM) as sha256-pinned dockerized services; conformance suite is manifest-aware with mask_semantics + removal checks; `features.prompt` capability flag.
+
+**M5 slicing (started 2026-07-09):**
+- **PR 14 — media prep:** probe chains a `prep` job — 720p H.264 proxy, filmstrip strip (~50 tiles), first/last full-res frames (the carry-last-frame input, HLD W3), waveform peaks JSON. Keys in version meta; SignDownload variants.
+- **PR 15 — playback engine v1:** WebCodecs proxy playback, J/K/L + scrub, 2V+2A tracks, blade/ripple trim, snapping.
+- **PR 16 — timeline doc + shots as clips:** timeline op vocabulary on the shared doc runtime, placeholder clips at target duration, generate-into-slot, selected-take resolution.
+
 **Remove tool strategy (decided 2026-07-08):** removal is served by the existing `inpaint` task with **pluggable backends** — the manifest already negotiates capability, so no contract change. Rationale: removal is a distinct task from generative inpainting (instruction editors have a re-insertion bias; Photoshop's Remove beat Nano Banana Pro at pure removal in our testing), but our masked-layer commit neutralizes whole-image drift by construction, so the gap is in-mask only. Plan: trial **LaMa-class ONNX** on the media worker (instant, unmetered — same runner as SAM subject-select, slice 2) as the fast tier; **Qwen-Image-Edit** as the quality tier — R&D's automated person-from-background removal (training-data pipeline) already validated it, and that same pipeline produces the counterfactual pairs (with/without object) a **removal-specialized Qwen-Edit fine-tune** would train on (RORem/ObjectClear recipe) if/when the stock editor's re-insertion bias or shadow handling warrants it. Route by mask size (Photoshop Mode:Auto pattern), manual override. Commercial APIs are for gen-fill insertion/replacement, not removal.
 
 ---
