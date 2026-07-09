@@ -109,7 +109,9 @@ Terminal states are immutable and MUST be retrievable for ≥24h. Webhook (if co
 
 JSON document validating against [`manifest.schema.json`](manifest.schema.json). It is the **entire** capability negotiation: Iris renders UI, validates jobs, estimates cost, and routes tasks purely from it. See the schema file for field-level docs; the shape follows TDD §3.4:
 
-`spec_version, id, family, version, modality, tasks[], profiles{}, duration{}, resolutions{}, references{image|video|audio → {max, roles[]}}, conditioning{first_frame,last_frame,keyframes,depth_sequence,pose_sequence,mask,source_video,source_image,multi_view}, features{seed,negative_prompt,native_batch,lip_sync_in_gen,lip_sync_post,audio_gen,camera_control,v2v_restyle,video_inpaint}, params_schema{JSON Schema}, pricing{unit,per_profile_estimates}, limits{concurrency,max_queue}`
+`spec_version, id, family, version, modality, tasks[], profiles{}, duration{}, resolutions{}, references{image|video|audio → {max, roles[]}}, conditioning{first_frame,last_frame,keyframes,depth_sequence,pose_sequence,mask,source_video,source_image,multi_view}, features{prompt,seed,negative_prompt,native_batch,lip_sync_in_gen,lip_sync_post,audio_gen,camera_control,v2v_restyle,video_inpaint}, params_schema{JSON Schema}, pricing{unit,per_profile_estimates}, limits{concurrency,max_queue}`
+
+`features.prompt` defaults to **true** when omitted; `false` declares a prompt-ignoring specialist (e.g., a removal-only inpainter) — Iris rejects prompted jobs against such endpoints at click time rather than letting a prompt be silently ignored.
 
 **Manifest honesty rule:** if it isn't declared, Iris won't send it and the UI won't show it. Under-declare when unsure.
 

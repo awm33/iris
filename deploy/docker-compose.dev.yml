@@ -51,9 +51,19 @@ services:
       MOCK_MODEL_MODALITY: "image"
     ports: ["8901:8901"]
 
+  # LaMa removal endpoint — first REAL local model (spec-conformant inpaint
+  # specialist; the Remove tool's fast tier). Weights (~200MB, Apache-2.0)
+  # download into the lama-models volume on first start.
+  lama:
+    build:
+      context: ../deploy/lama
+    ports: ["8902:8900"]
+    volumes: [lama-models:/models]
+
   # keycloak: deferred — auth v0 is session-cookie against a seeded user (M1);
   # OSS IdP lands per plan §M8/backlog.
 
 volumes:
   pgdata:
   miniodata:
+  lama-models:

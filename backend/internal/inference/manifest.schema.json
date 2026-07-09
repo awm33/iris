@@ -201,6 +201,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "prompt": {
+          "type": "boolean",
+          "description": "Model conditions on text prompts (default true when omitted). false = prompts are ignored — removal-only inpainters and similar specialists; Iris rejects prompted jobs against such endpoints."
+        },
         "seed": {
           "type": "boolean"
         },

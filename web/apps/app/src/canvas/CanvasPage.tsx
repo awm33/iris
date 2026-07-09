@@ -501,6 +501,8 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
       {(selection || genFill) && (
         <GenFillBar
           endpoints={gfEndpoints}
+          docW={canvas.width}
+          docH={canvas.height}
           state={genFill}
           progress={gfJob.data?.job?.progress}
           error={genFillError}

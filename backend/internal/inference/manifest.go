@@ -44,8 +44,11 @@ type Manifest struct {
 		MultiView    bool `json:"multi_view"`
 	} `json:"conditioning"`
 	Features struct {
-		Seed           bool `json:"seed"`
-		NegativePrompt bool `json:"negative_prompt"`
+		// Prompt defaults to true when omitted (pointer keeps the tri-state):
+		// false = a prompt-ignoring specialist (removal-only inpainters).
+		Prompt         *bool `json:"prompt"`
+		Seed           bool  `json:"seed"`
+		NegativePrompt bool  `json:"negative_prompt"`
 	} `json:"features"`
 	Pricing struct {
 		Unit      string             `json:"unit"`
@@ -79,6 +82,11 @@ func invalid(format string, args ...any) error {
 
 // Validate checks a job request against the manifest. Everything the request
 // uses must be declared — the manifest honesty rule (spec §5), enforced.
+// PromptSupported: features.prompt defaults to true when omitted.
+func (m *Manifest) PromptSupported() bool {
+	return m.Features.Prompt == nil || *m.Features.Prompt
+}
+
 func (m *Manifest) Validate(req *CreateJobRequest) error {
 	if !contains(m.Tasks, req.Task) {
 		return invalid("model %s does not support task %q (tasks: %v)", m.ID, req.Task, m.Tasks)
@@ -129,6 +137,9 @@ func (m *Manifest) Validate(req *CreateJobRequest) error {
 	}
 	if req.Seed != 0 && !m.Features.Seed {
 		return invalid("model %s does not support seeds", m.ID)
+	}
+	if req.Prompt != "" && !m.PromptSupported() {
+		return invalid("model %s ignores prompts (removal specialist) — submit without one", m.ID)
 	}
 	if req.NegativePrompt != "" && !m.Features.NegativePrompt {
 		return invalid("model %s does not support negative prompts", m.ID)

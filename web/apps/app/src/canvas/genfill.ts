@@ -40,6 +40,10 @@ export function renderMaskBlob(sel: Selection, docW: number, docH: number): Prom
 export interface GenFillEndpoint {
   id: string;
   name: string;
+  /** features.prompt !== false — prompt-ignoring specialists (removal-only
+   * inpainters like LaMa) are never offered for prompted generation, and are
+   * PREFERRED for Remove (they're the fast tier). */
+  promptable: boolean;
   profiles: { name: string; maxW: number; maxH: number }[];
 }
 
@@ -53,6 +57,7 @@ export function genFillEndpoints(endpoints: ModelEndpoint[]): GenFillEndpoint[] 
       const m = JSON.parse(ep.manifestJson) as {
         tasks?: string[];
         conditioning?: { mask?: boolean; source_image?: boolean };
+        features?: { prompt?: boolean };
         profiles?: Record<string, { max_width?: number; max_height?: number }>;
       };
       if (!m.tasks?.includes("inpaint") || !m.conditioning?.mask || !m.conditioning?.source_image) continue;
@@ -61,12 +66,23 @@ export function genFillEndpoints(endpoints: ModelEndpoint[]): GenFillEndpoint[] 
         maxW: p.max_width ?? 0,
         maxH: p.max_height ?? 0,
       }));
-      out.push({ id: ep.id, name: ep.displayName, profiles });
+      out.push({ id: ep.id, name: ep.displayName, promptable: m.features?.prompt !== false, profiles });
     } catch {
       /* unparseable manifest → not offered */
     }
   }
   return out;
+}
+
+/** Removal routing (Photoshop Mode:Auto spirit): prefer a prompt-ignoring
+ * specialist that fits the canvas; fall back to any fitting endpoint. */
+export function pickRemovalEndpoint(
+  endpoints: GenFillEndpoint[],
+  w: number,
+  h: number,
+): GenFillEndpoint | undefined {
+  const fits = (e: GenFillEndpoint) => pickProfile(e, w, h) !== null;
+  return endpoints.find((e) => !e.promptable && fits(e)) ?? endpoints.find(fits);
 }
 
 /** Cheapest profile that fits the canvas; null when none does. */
