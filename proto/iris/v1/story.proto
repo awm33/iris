@@ -96,6 +96,7 @@ service StoryService {
   rpc UpdateCharacter(UpdateCharacterRequest) returns (UpdateCharacterResponse);
   // Promote-to-Character: attach a library asset as a reference.
   rpc AddCharacterRef(AddCharacterRefRequest) returns (AddCharacterRefResponse);
+  rpc RemoveCharacterRef(RemoveCharacterRefRequest) returns (RemoveCharacterRefResponse);
 }
 
 message CreateSceneRequest {
@@ -138,12 +139,16 @@ message CreateShotResponse { Shot shot = 1; }
 message UpdateShotRequest {
   string id = 1;
   optional string description = 2;
+  // Omitted = unchanged; 0 = clear (matches CreateShot's "no target").
   optional double duration_target_s = 3;
   optional string view_id = 4;
-  repeated string cast_ids = 5; // full replacement when set_cast is true
+  repeated string cast_ids = 5; // full replacement (incl. clearing) when set_cast is true
   bool set_cast = 6;
   optional int32 position = 7;
   optional bool pinned = 8;
+  // Detach the shot from its view ("" in view_id means unchanged, so
+  // clearing needs an explicit signal).
+  bool clear_view = 9;
 }
 message UpdateShotResponse { Shot shot = 1; }
 
@@ -184,3 +189,10 @@ message AddCharacterRefRequest {
   AssetRef asset = 3;
 }
 message AddCharacterRefResponse { Character character = 1; }
+
+message RemoveCharacterRefRequest {
+  string character_id = 1;
+  string role = 2;
+  string asset_id = 3;
+}
+message RemoveCharacterRefResponse { Character character = 1; }

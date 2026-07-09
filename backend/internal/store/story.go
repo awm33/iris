@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/awm33/iris/backend/internal/ids"
 )
@@ -107,9 +110,17 @@ func (s *Store) ListScenes(ctx context.Context, projectID string) ([]*Scene, err
 }
 
 func (s *Store) GetScene(ctx context.Context, id string) (*Scene, []*ViewRow, []*ShotRow, error) {
+	// One REPEATABLE READ snapshot: scene, views, and shots must be mutually
+	// consistent (a concurrent delete between queries would tear the result).
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	sc := &Scene{}
 	var model3d []byte
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT sc.id, sc.project_id, sc.name, sc.position, sc.style_notes,
 		       sc.created_at, sc.updated_at, st.model3d_ref
 		FROM scenes sc JOIN sets st ON st.scene_id = sc.id
@@ -126,15 +137,15 @@ func (s *Store) GetScene(ctx context.Context, id string) (*Scene, []*ViewRow, []
 		}
 	}
 
-	views, err := s.listViews(ctx, sc.ID)
+	views, err := s.listViews(ctx, tx, sc.ID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	shots, err := s.listShots(ctx, sc.ID)
+	shots, err := s.listShots(ctx, tx, sc.ID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return sc, views, shots, nil
+	return sc, views, shots, tx.Commit(ctx)
 }
 
 func (s *Store) UpdateScene(ctx context.Context, id string, name, styleNotes *string, position *int32) (*Scene, error) {
@@ -181,11 +192,11 @@ func (s *Store) RemoveView(ctx context.Context, id string) error {
 	return err
 }
 
-func (s *Store) listViews(ctx context.Context, sceneID string) ([]*ViewRow, error) {
-	rows, err := s.pool.Query(ctx, `
+func (s *Store) listViews(ctx context.Context, q querier, sceneID string) ([]*ViewRow, error) {
+	rows, err := q.Query(ctx, `
 		SELECT v.id, $1::text, v.name, v.plate_ref, v.position
 		FROM views v JOIN sets st ON st.id = v.set_id
-		WHERE st.scene_id = $1 ORDER BY v.position`, sceneID)
+		WHERE st.scene_id = $1 ORDER BY v.position, v.id`, sceneID)
 	if err != nil {
 		return nil, err
 	}
@@ -225,19 +236,28 @@ func (s *Store) CreateShot(ctx context.Context, sceneID, description string, dur
 	return sh, nil
 }
 
-func (s *Store) UpdateShot(ctx context.Context, id string, description *string, durationTargetS *float64, viewID *string, castIDs []string, setCast bool, position *int32, pinned *bool) (*ShotRow, error) {
+func (s *Store) UpdateShot(ctx context.Context, id string, description *string, durationTargetS *float64, viewID *string, castIDs []string, setCast bool, position *int32, pinned *bool, clearView bool) (*ShotRow, error) {
 	sh := &ShotRow{}
 	var vID, selected *string
 	var duration *float64
 	var cast any
 	if setCast {
+		if castIDs == nil {
+			// proto3 empty repeated arrives as nil; pgx encodes nil as SQL
+			// NULL, which COALESCE would swallow — "clear the cast" must
+			// actually clear it.
+			castIDs = []string{}
+		}
 		cast = castIDs
 	}
+	// duration: omitted = keep; 0 = clear (NULL, matching CreateShot).
 	err := s.pool.QueryRow(ctx, `
 		UPDATE shots SET
 			description = COALESCE($2, description),
-			duration_target_s = COALESCE($3, duration_target_s),
-			view_id = COALESCE(NULLIF($4, ''), view_id),
+			duration_target_s = CASE WHEN $3::float8 IS NULL THEN duration_target_s
+			                         ELSE NULLIF($3, 0.0) END,
+			view_id = CASE WHEN $8 THEN NULL
+			               ELSE COALESCE(NULLIF($4, ''), view_id) END,
 			cast_ids = COALESCE($5, cast_ids),
 			position = COALESCE($6, position),
 			pinned = COALESCE($7, pinned),
@@ -245,7 +265,7 @@ func (s *Store) UpdateShot(ctx context.Context, id string, description *string, 
 		WHERE id = $1
 		RETURNING id, scene_id, position, description, duration_target_s, view_id,
 		          cast_ids, selected_take_id, continuity_stale, pinned, created_at, updated_at`,
-		id, description, durationTargetS, viewID, cast, position, pinned).
+		id, description, durationTargetS, viewID, cast, position, pinned, clearView).
 		Scan(&sh.ID, &sh.SceneID, &sh.Position, &sh.Description, &duration, &vID,
 			&sh.CastIDs, &selected, &sh.ContinuityStale, &sh.Pinned, &sh.CreatedAt, &sh.UpdatedAt)
 	if err != nil {
@@ -253,6 +273,35 @@ func (s *Store) UpdateShot(ctx context.Context, id string, description *string, 
 	}
 	derefShot(sh, duration, vID, selected)
 	return sh, nil
+}
+
+// CharactersExist reports whether every id names a character in the workspace.
+func (s *Store) CharactersExist(ctx context.Context, workspaceID string, ids []string) (bool, error) {
+	if len(ids) == 0 {
+		return true, nil
+	}
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(DISTINCT id) FROM characters
+		WHERE workspace_id = $1 AND id = ANY($2)`, workspaceID, ids).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	uniq := map[string]bool{}
+	for _, id := range ids {
+		uniq[id] = true
+	}
+	return n == len(uniq), nil
+}
+
+// ShotProjectID resolves a shot to its owning project (cross-project target
+// checks in CreateJob).
+func (s *Store) ShotProjectID(ctx context.Context, shotID string) (string, error) {
+	var projectID string
+	err := s.pool.QueryRow(ctx, `
+		SELECT sc.project_id FROM shots sh JOIN scenes sc ON sc.id = sh.scene_id
+		WHERE sh.id = $1`, shotID).Scan(&projectID)
+	return projectID, wrapNotFound(err)
 }
 
 func (s *Store) DeleteShot(ctx context.Context, id string) error {
@@ -263,6 +312,14 @@ func (s *Store) DeleteShot(ctx context.Context, id string) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx,
 		`UPDATE shots SET selected_take_id = NULL WHERE id = $1`, id); err != nil {
+		return err
+	}
+	// Lineage edges to the deleted takes would dangle otherwise; the asset
+	// versions themselves survive in the library (deliberate).
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM asset_links
+		WHERE role = 'used_in_take'
+		  AND to_entity_id IN (SELECT id FROM takes WHERE shot_id = $1)`, id); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM takes WHERE shot_id = $1`, id); err != nil {
@@ -278,8 +335,13 @@ func (s *Store) DeleteShot(ctx context.Context, id string) error {
 	return tx.Commit(ctx)
 }
 
-func (s *Store) listShots(ctx context.Context, sceneID string) ([]*ShotRow, error) {
-	rows, err := s.pool.Query(ctx, `
+// querier abstracts pool vs tx for the scene-snapshot reads.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func (s *Store) listShots(ctx context.Context, q querier, sceneID string) ([]*ShotRow, error) {
+	rows, err := q.Query(ctx, `
 		SELECT sh.id, sh.scene_id, sh.position, sh.description, sh.duration_target_s,
 		       sh.view_id, sh.cast_ids, sh.selected_take_id, sh.continuity_stale, sh.pinned,
 		       sh.created_at, sh.updated_at,
@@ -438,8 +500,13 @@ func (s *Store) UpdateCharacter(ctx context.Context, id string, name *string) (*
 	return c, nil
 }
 
+// ErrRefLimit distinguishes "bundle full" from NotFound in AddCharacterRef.
+var ErrRefLimit = errors.New("character reference limit reached")
+
+const maxCharacterRefs = 50
+
 // AddCharacterRef appends a reference to the character's bundle (atomic
-// jsonb append — no read-modify-write race).
+// jsonb append — no read-modify-write race), bounded at maxCharacterRefs.
 func (s *Store) AddCharacterRef(ctx context.Context, characterID string, ref CharacterRefJSON) (*CharacterRow, error) {
 	refJSON, _ := json.Marshal(ref)
 	c := &CharacterRow{}
@@ -447,9 +514,43 @@ func (s *Store) AddCharacterRef(ctx context.Context, characterID string, ref Cha
 	var pID *string
 	err := s.pool.QueryRow(ctx, `
 		UPDATE characters SET refs = refs || $2::jsonb, updated_at = now()
+		WHERE id = $1 AND jsonb_array_length(refs) < $3
+		RETURNING id, workspace_id, project_id, name, refs, created_at, updated_at`,
+		characterID, refJSON, maxCharacterRefs).
+		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		if e := s.pool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM characters WHERE id = $1)`, characterID).Scan(&exists); e == nil && exists {
+			return nil, ErrRefLimit
+		}
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if pID != nil {
+		c.ProjectID = *pID
+	}
+	_ = json.Unmarshal(refsRaw, &c.Refs)
+	return c, nil
+}
+
+// RemoveCharacterRef drops every ref matching (role, asset_id).
+func (s *Store) RemoveCharacterRef(ctx context.Context, characterID, role, assetID string) (*CharacterRow, error) {
+	c := &CharacterRow{}
+	var refsRaw []byte
+	var pID *string
+	err := s.pool.QueryRow(ctx, `
+		UPDATE characters SET
+			refs = COALESCE(
+				(SELECT jsonb_agg(e) FROM jsonb_array_elements(refs) e
+				 WHERE NOT (e->>'role' = $2 AND e->'asset'->>'asset_id' = $3)),
+				'[]'::jsonb),
+			updated_at = now()
 		WHERE id = $1
 		RETURNING id, workspace_id, project_id, name, refs, created_at, updated_at`,
-		characterID, refJSON).
+		characterID, role, assetID).
 		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, wrapNotFound(err)
@@ -459,4 +560,14 @@ func (s *Store) AddCharacterRef(ctx context.Context, characterID string, ref Cha
 	}
 	_ = json.Unmarshal(refsRaw, &c.Refs)
 	return c, nil
+}
+
+// VersionBelongsToAsset validates a client-supplied (asset, version) pair —
+// plate_ref/character refs store version ids without FKs.
+func (s *Store) VersionBelongsToAsset(ctx context.Context, versionID, assetID string) (bool, error) {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM asset_versions WHERE id = $1 AND asset_id = $2)`,
+		versionID, assetID).Scan(&ok)
+	return ok, err
 }

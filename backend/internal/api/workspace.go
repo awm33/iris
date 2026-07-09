@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"connectrpc.com/connect"
+	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	irisv1 "github.com/awm33/iris/backend/gen/iris/v1"
@@ -99,6 +100,17 @@ func ts(created, updated store.Time) *irisv1.Timestamps {
 func connectErr(err error) error {
 	if errors.Is(err, store.ErrNotFound) {
 		return connect.NewError(connect.CodeNotFound, err)
+	}
+	// FK/unique violations are client errors (bad references), not server
+	// faults — and raw Postgres text should not leak to clients.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23503":
+			return connect.NewError(connect.CodeInvalidArgument, errors.New("referenced entity does not exist"))
+		case "23505":
+			return connect.NewError(connect.CodeAlreadyExists, errors.New("already exists"))
+		}
 	}
 	return connect.NewError(connect.CodeInternal, err)
 }

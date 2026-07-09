@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"math"
 
 	"connectrpc.com/connect"
 
@@ -14,9 +15,85 @@ type StoryServer struct {
 	Store *store.Store
 }
 
+// Input bounds, matching the generation surface's discipline.
+const (
+	maxNameLen      = 200
+	maxLongTextLen  = 20_000
+	maxDurationS    = 3600.0
+	maxCastSize     = 20
+	maxPositionsVal = 1_000_000
+)
+
+func invalidArg(msg string) error {
+	return connect.NewError(connect.CodeInvalidArgument, errors.New(msg))
+}
+
+func checkName(name string) error {
+	if name == "" {
+		return invalidArg("name is required")
+	}
+	if len([]rune(name)) > maxNameLen {
+		return invalidArg("name too long")
+	}
+	return nil
+}
+
+func checkLongText(s string) error {
+	if len([]rune(s)) > maxLongTextLen {
+		return invalidArg("text too long")
+	}
+	return nil
+}
+
+func checkDuration(d float64) error {
+	if math.IsNaN(d) || math.IsInf(d, 0) || d < 0 || d > maxDurationS {
+		return invalidArg("duration_target_s out of bounds")
+	}
+	return nil
+}
+
+func checkPosition(p *int32) error {
+	if p != nil && (*p < 0 || *p > maxPositionsVal) {
+		return invalidArg("position out of bounds")
+	}
+	return nil
+}
+
+// assetOfKind loads an asset and enforces its kind ("" = any). NotFound maps
+// to InvalidArgument (a bad reference in the request), everything else stays
+// a server error.
+func (s *StoryServer) assetOfKind(ctx context.Context, ref *irisv1.AssetRef, kind, what string) error {
+	if ref == nil || ref.AssetId == "" {
+		return invalidArg(what + " asset is required")
+	}
+	a, _, err := s.Store.GetAsset(ctx, ref.AssetId)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return invalidArg(what + " asset not found")
+		}
+		return connectErr(err)
+	}
+	if kind != "" && a.Kind != kind {
+		return invalidArg(what + " must be " + kind)
+	}
+	if ref.VersionId != "" {
+		ok, err := s.Store.VersionBelongsToAsset(ctx, ref.VersionId, ref.AssetId)
+		if err != nil {
+			return connectErr(err)
+		}
+		if !ok {
+			return invalidArg(what + " version does not belong to the asset")
+		}
+	}
+	return nil
+}
+
 func (s *StoryServer) CreateScene(ctx context.Context, req *connect.Request[irisv1.CreateSceneRequest]) (*connect.Response[irisv1.CreateSceneResponse], error) {
-	if req.Msg.ProjectId == "" || req.Msg.Name == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("project_id and name are required"))
+	if req.Msg.ProjectId == "" {
+		return nil, invalidArg("project_id is required")
+	}
+	if err := checkName(req.Msg.Name); err != nil {
+		return nil, err
 	}
 	sc, err := s.Store.CreateScene(ctx, req.Msg.ProjectId, req.Msg.Name)
 	if err != nil {
@@ -46,6 +123,19 @@ func (s *StoryServer) GetScene(ctx context.Context, req *connect.Request[irisv1.
 }
 
 func (s *StoryServer) UpdateScene(ctx context.Context, req *connect.Request[irisv1.UpdateSceneRequest]) (*connect.Response[irisv1.UpdateSceneResponse], error) {
+	if req.Msg.Name != nil {
+		if err := checkName(*req.Msg.Name); err != nil {
+			return nil, err
+		}
+	}
+	if req.Msg.StyleNotes != nil {
+		if err := checkLongText(*req.Msg.StyleNotes); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkPosition(req.Msg.Position); err != nil {
+		return nil, err
+	}
 	sc, err := s.Store.UpdateScene(ctx, req.Msg.Id, req.Msg.Name, req.Msg.StyleNotes, req.Msg.Position)
 	if err != nil {
 		return nil, connectErr(err)
@@ -54,17 +144,16 @@ func (s *StoryServer) UpdateScene(ctx context.Context, req *connect.Request[iris
 }
 
 func (s *StoryServer) AddView(ctx context.Context, req *connect.Request[irisv1.AddViewRequest]) (*connect.Response[irisv1.AddViewResponse], error) {
-	if req.Msg.SceneId == "" || req.Msg.Name == "" || req.Msg.Plate == nil || req.Msg.Plate.AssetId == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("scene_id, name, and plate.asset_id are required"))
+	if req.Msg.SceneId == "" {
+		return nil, invalidArg("scene_id is required")
+	}
+	if err := checkName(req.Msg.Name); err != nil {
+		return nil, err
 	}
 	// The plate must be an existing image asset — a view is a reference
 	// plate, not an arbitrary file.
-	a, _, err := s.Store.GetAsset(ctx, req.Msg.Plate.AssetId)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("plate asset not found"))
-	}
-	if a.Kind != "image" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("view plates must be images"))
+	if err := s.assetOfKind(ctx, req.Msg.Plate, "image", "plate"); err != nil {
+		return nil, err
 	}
 	v, err := s.Store.AddView(ctx, req.Msg.SceneId, req.Msg.Name, store.AssetRefJSON{
 		AssetID: req.Msg.Plate.AssetId, VersionID: req.Msg.Plate.VersionId,
@@ -84,7 +173,13 @@ func (s *StoryServer) RemoveView(ctx context.Context, req *connect.Request[irisv
 
 func (s *StoryServer) CreateShot(ctx context.Context, req *connect.Request[irisv1.CreateShotRequest]) (*connect.Response[irisv1.CreateShotResponse], error) {
 	if req.Msg.SceneId == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("scene_id is required"))
+		return nil, invalidArg("scene_id is required")
+	}
+	if err := checkLongText(req.Msg.Description); err != nil {
+		return nil, err
+	}
+	if err := checkDuration(req.Msg.DurationTargetS); err != nil {
+		return nil, err
 	}
 	sh, err := s.Store.CreateShot(ctx, req.Msg.SceneId, req.Msg.Description, req.Msg.DurationTargetS)
 	if err != nil {
@@ -95,7 +190,32 @@ func (s *StoryServer) CreateShot(ctx context.Context, req *connect.Request[irisv
 
 func (s *StoryServer) UpdateShot(ctx context.Context, req *connect.Request[irisv1.UpdateShotRequest]) (*connect.Response[irisv1.UpdateShotResponse], error) {
 	m := req.Msg
-	sh, err := s.Store.UpdateShot(ctx, m.Id, m.Description, m.DurationTargetS, m.ViewId, m.CastIds, m.SetCast, m.Position, m.Pinned)
+	if m.Description != nil {
+		if err := checkLongText(*m.Description); err != nil {
+			return nil, err
+		}
+	}
+	if m.DurationTargetS != nil {
+		if err := checkDuration(*m.DurationTargetS); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkPosition(m.Position); err != nil {
+		return nil, err
+	}
+	if m.SetCast {
+		if len(m.CastIds) > maxCastSize {
+			return nil, invalidArg("cast too large")
+		}
+		ok, err := s.Store.CharactersExist(ctx, store.DevWorkspaceID, m.CastIds)
+		if err != nil {
+			return nil, connectErr(err)
+		}
+		if !ok {
+			return nil, invalidArg("cast contains unknown characters")
+		}
+	}
+	sh, err := s.Store.UpdateShot(ctx, m.Id, m.Description, m.DurationTargetS, m.ViewId, m.CastIds, m.SetCast, m.Position, m.Pinned, m.ClearView)
 	if err != nil {
 		return nil, connectErr(err)
 	}
@@ -133,8 +253,8 @@ func (s *StoryServer) SelectTake(ctx context.Context, req *connect.Request[irisv
 }
 
 func (s *StoryServer) CreateCharacter(ctx context.Context, req *connect.Request[irisv1.CreateCharacterRequest]) (*connect.Response[irisv1.CreateCharacterResponse], error) {
-	if req.Msg.Name == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name is required"))
+	if err := checkName(req.Msg.Name); err != nil {
+		return nil, err
 	}
 	c, err := s.Store.CreateCharacter(ctx, workspaceID(req.Msg.WorkspaceId), req.Msg.ProjectId, req.Msg.Name)
 	if err != nil {
@@ -156,6 +276,11 @@ func (s *StoryServer) ListCharacters(ctx context.Context, req *connect.Request[i
 }
 
 func (s *StoryServer) UpdateCharacter(ctx context.Context, req *connect.Request[irisv1.UpdateCharacterRequest]) (*connect.Response[irisv1.UpdateCharacterResponse], error) {
+	if req.Msg.Name != nil {
+		if err := checkName(*req.Msg.Name); err != nil {
+			return nil, err
+		}
+	}
 	c, err := s.Store.UpdateCharacter(ctx, req.Msg.Id, req.Msg.Name)
 	if err != nil {
 		return nil, connectErr(err)
@@ -163,27 +288,50 @@ func (s *StoryServer) UpdateCharacter(ctx context.Context, req *connect.Request[
 	return connect.NewResponse(&irisv1.UpdateCharacterResponse{Character: characterPB(c)}), nil
 }
 
+// Character ref roles imply asset kinds: visual refs must be images, voice
+// refs audio; "other" is unconstrained.
+var refRoleKinds = map[string]string{
+	"turnaround": "image",
+	"expression": "image",
+	"voice":      "audio",
+	"other":      "",
+}
+
 func (s *StoryServer) AddCharacterRef(ctx context.Context, req *connect.Request[irisv1.AddCharacterRefRequest]) (*connect.Response[irisv1.AddCharacterRefResponse], error) {
 	m := req.Msg
-	if m.CharacterId == "" || m.Role == "" || m.Asset == nil || m.Asset.AssetId == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("character_id, role, and asset.asset_id are required"))
+	if m.CharacterId == "" || m.Role == "" {
+		return nil, invalidArg("character_id and role are required")
 	}
-	switch m.Role {
-	case "turnaround", "expression", "voice", "other":
-	default:
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unknown character ref role"))
+	kind, ok := refRoleKinds[m.Role]
+	if !ok {
+		return nil, invalidArg("unknown character ref role")
 	}
-	if _, _, err := s.Store.GetAsset(ctx, m.Asset.AssetId); err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("ref asset not found"))
+	if err := s.assetOfKind(ctx, m.Asset, kind, "ref"); err != nil {
+		return nil, err
 	}
 	c, err := s.Store.AddCharacterRef(ctx, m.CharacterId, store.CharacterRefJSON{
 		Role:  m.Role,
 		Asset: store.AssetRefJSON{AssetID: m.Asset.AssetId, VersionID: m.Asset.VersionId},
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrRefLimit) {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		}
 		return nil, connectErr(err)
 	}
 	return connect.NewResponse(&irisv1.AddCharacterRefResponse{Character: characterPB(c)}), nil
+}
+
+func (s *StoryServer) RemoveCharacterRef(ctx context.Context, req *connect.Request[irisv1.RemoveCharacterRefRequest]) (*connect.Response[irisv1.RemoveCharacterRefResponse], error) {
+	m := req.Msg
+	if m.CharacterId == "" || m.Role == "" || m.AssetId == "" {
+		return nil, invalidArg("character_id, role, and asset_id are required")
+	}
+	c, err := s.Store.RemoveCharacterRef(ctx, m.CharacterId, m.Role, m.AssetId)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	return connect.NewResponse(&irisv1.RemoveCharacterRefResponse{Character: characterPB(c)}), nil
 }
 
 // ── mapping ───────────────────────────────────────────────────────────────────
@@ -224,11 +372,14 @@ func shotPB(sh *store.ShotRow) *irisv1.Shot {
 }
 
 func takePB(t *store.TakeRow) *irisv1.Take {
-	return &irisv1.Take{
+	pb := &irisv1.Take{
 		Id: t.ID, ShotId: t.ShotID, JobId: t.JobID, VersionId: t.VersionID,
 		Quality: t.Quality, Starred: t.Starred, RecipeJson: string(t.Recipe),
 		Timestamps: ts(t.CreatedAt, t.CreatedAt),
 	}
+	// Takes are immutable (bar starring) — don't fabricate an updated_at.
+	pb.Timestamps.UpdatedAt = nil
+	return pb
 }
 
 func characterPB(c *store.CharacterRow) *irisv1.Character {
