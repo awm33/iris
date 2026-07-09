@@ -3,10 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { AssetKind, type Asset } from "@iris/api-client";
 import { assetClient, storyClient, uploadFile } from "../api";
+import { StockPicker } from "../components/StockPicker";
 
 export function LibraryPage(props: { projectId?: string; onGenerate?: () => void }) {
   const qc = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
+  const [stockOpen, setStockOpen] = useState(false);
 
   const assets = useQuery({
     queryKey: ["assets", props.projectId ?? ""],
@@ -30,6 +32,11 @@ export function LibraryPage(props: { projectId?: string; onGenerate?: () => void
         <button className="btn secondary" onClick={() => fileInput.current?.click()} disabled={upload.isPending}>
           {upload.isPending ? "Uploading…" : "Upload media"}
         </button>
+        {props.projectId && (
+          <button className="btn secondary" onClick={() => setStockOpen(true)}>
+            📷 Stock photos
+          </button>
+        )}
         <input
           ref={fileInput}
           type="file"
@@ -51,6 +58,7 @@ export function LibraryPage(props: { projectId?: string; onGenerate?: () => void
       <div className="grid">
         {assets.data?.assets.map((a) => <AssetCard key={a.id} asset={a} projectId={props.projectId} />)}
       </div>
+      {stockOpen && props.projectId && <StockPicker projectId={props.projectId} onClose={() => setStockOpen(false)} />}
     </div>
   );
 }

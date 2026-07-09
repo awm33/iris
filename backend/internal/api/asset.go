@@ -1,9 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,12 +19,15 @@ import (
 
 	irisv1 "github.com/awm33/iris/backend/gen/iris/v1"
 	"github.com/awm33/iris/backend/internal/blob"
+	"github.com/awm33/iris/backend/internal/ids"
+	"github.com/awm33/iris/backend/internal/sources/pexels"
 	"github.com/awm33/iris/backend/internal/store"
 )
 
 type AssetServer struct {
-	Store *store.Store
-	Blob  *blob.Store
+	Store  *store.Store
+	Blob   *blob.Store
+	Pexels *pexels.Client // nil = source not configured
 }
 
 const (
@@ -85,7 +92,7 @@ func (s *AssetServer) CompleteUpload(ctx context.Context, req *connect.Request[i
 	// Video/audio need the ffprobe pass (duration/fps/dims, poster); the job
 	// is enqueued in the same transaction as the asset rows.
 	needsProbe := a.Kind == "video" || a.Kind == "audio"
-	if err := s.Store.CreateAssetWithVersion(ctx, a, v, needsProbe); err != nil {
+	if err := s.Store.CreateAssetWithVersion(ctx, a, v, needsProbe, nil); err != nil {
 		return nil, connectErr(err)
 	}
 	return connect.NewResponse(&irisv1.CompleteUploadResponse{
@@ -159,6 +166,159 @@ func (s *AssetServer) SignDownload(ctx context.Context, req *connect.Request[iri
 		Url:         url,
 		ExpiresUnix: time.Now().Add(getExpiry).Unix(),
 	}), nil
+}
+
+// ── stock sources ─────────────────────────────────────────────────────────────
+
+const maxStockQueryLen = 200
+
+func (s *AssetServer) SearchStock(ctx context.Context, req *connect.Request[irisv1.SearchStockRequest]) (*connect.Response[irisv1.SearchStockResponse], error) {
+	if s.Pexels == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("no stock source configured — set IRIS_PEXELS_API_KEY and restart the api"))
+	}
+	q := strings.TrimSpace(req.Msg.Query)
+	if q == "" || len([]rune(q)) > maxStockQueryLen {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("query is required (max 200 chars)"))
+	}
+	photos, hasMore, err := s.Pexels.Search(ctx, q, int(req.Msg.Page))
+	if err != nil {
+		return nil, pexelsErr(err)
+	}
+	resp := &irisv1.SearchStockResponse{HasMore: hasMore}
+	for _, p := range photos {
+		resp.Photos = append(resp.Photos, &irisv1.StockPhoto{
+			Source: "pexels", Id: strconv.FormatInt(p.ID, 10),
+			ThumbUrl: p.ThumbURL, Width: int32(p.Width), Height: int32(p.Height),
+			Alt: p.Alt, Photographer: p.Photographer, PhotographerUrl: p.PhotographerURL,
+		})
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *AssetServer) ImportStock(ctx context.Context, req *connect.Request[irisv1.ImportStockRequest]) (*connect.Response[irisv1.ImportStockResponse], error) {
+	if s.Pexels == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("no stock source configured — set IRIS_PEXELS_API_KEY and restart the api"))
+	}
+	if req.Msg.Source != "pexels" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unknown stock source"))
+	}
+	id, err := strconv.ParseInt(req.Msg.Id, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("bad photo id"))
+	}
+
+	// Idempotent: re-importing a photo returns the existing asset (matched on
+	// provenance meta) instead of a duplicate row — and skips the Pexels
+	// quota entirely.
+	if existingID, err := s.Store.FindStockAsset(ctx,
+		store.DevWorkspaceID, req.Msg.ProjectId, "pexels", req.Msg.Id); err == nil {
+		a, versions, err := s.Store.GetAsset(ctx, existingID)
+		if err == nil && len(versions) > 0 {
+			return connect.NewResponse(&irisv1.ImportStockResponse{
+				Asset:   assetPB(a),
+				Version: versionPB(versions[0]),
+			}), nil
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, connectErr(err)
+	}
+
+	// The server resolves the download URL from the Pexels API itself — the
+	// client only names an id; no user-supplied URL is ever fetched (and the
+	// pexels client re-validates the resolved URL: https, *.pexels.com only).
+	photo, err := s.Pexels.Resolve(ctx, id)
+	if err != nil {
+		return nil, pexelsErr(err)
+	}
+	data, contentType, err := s.Pexels.Download(ctx, photo)
+	if err != nil {
+		return nil, pexelsErr(err)
+	}
+
+	// Trust neither the header nor the bytes alone: normalize the reported
+	// type, sniff when it isn't an image, and require a successful decode —
+	// a CDN error page must fail the import, not land as a "healthy" asset.
+	contentType, _, _ = strings.Cut(contentType, ";")
+	contentType = strings.TrimSpace(contentType)
+	if !strings.HasPrefix(contentType, "image/") {
+		contentType = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			fmt.Errorf("pexels returned non-image content (%s)", contentType))
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			fmt.Errorf("downloaded photo did not decode as an image: %w", err))
+	}
+
+	tempKey := "uploads/stock/" + ids.New("imp")
+	if err := s.Blob.PutObject(ctx, tempKey, contentType, bytes.NewReader(data), int64(len(data))); err != nil {
+		return nil, connectErr(err)
+	}
+	hash, size, _, err := s.Blob.HashAndPromote(ctx, tempKey)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+
+	v := &store.AssetVersion{
+		SHA256: hash, ContentType: contentType, SizeBytes: size,
+		Width: int32(cfg.Width), Height: int32(cfg.Height),
+	}
+	name := photo.Alt
+	if name == "" {
+		name = "pexels " + req.Msg.Id
+	}
+	if photo.Photographer != "" {
+		name = fmt.Sprintf("%s — %s", name, photo.Photographer)
+	}
+	a := &store.Asset{
+		WorkspaceID: store.DevWorkspaceID,
+		ProjectID:   req.Msg.ProjectId,
+		Kind:        "image",
+		Name:        truncateRunes(name, 200),
+	}
+	// Attribution rides on the version, written in the same transaction as
+	// the asset rows (Pexels guidelines: credit the photographer and Pexels).
+	meta := map[string]any{
+		"source":           "pexels",
+		"source_id":        req.Msg.Id,
+		"photographer":     photo.Photographer,
+		"photographer_url": photo.PhotographerURL,
+	}
+	if err := s.Store.CreateAssetWithVersion(ctx, a, v, false, meta); err != nil {
+		return nil, connectErr(err)
+	}
+	return connect.NewResponse(&irisv1.ImportStockResponse{
+		Asset:   assetPB(a),
+		Version: versionPB(v),
+	}), nil
+}
+
+// pexelsErr maps connector sentinels to accurate codes — a dead key is a
+// configuration problem, not a retryable outage.
+func pexelsErr(err error) *connect.Error {
+	switch {
+	case errors.Is(err, pexels.ErrAuth):
+		return connect.NewError(connect.CodeFailedPrecondition, err)
+	case errors.Is(err, pexels.ErrRateLimited):
+		return connect.NewError(connect.CodeResourceExhausted, err)
+	case errors.Is(err, pexels.ErrPhotoNotFound):
+		return connect.NewError(connect.CodeNotFound, err)
+	default:
+		return connect.NewError(connect.CodeUnavailable, err)
+	}
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 // ── mapping helpers ───────────────────────────────────────────────────────────

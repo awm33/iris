@@ -18,6 +18,7 @@ import (
 	"github.com/awm33/iris/backend/internal/events"
 	"github.com/awm33/iris/backend/internal/queue"
 	"github.com/awm33/iris/backend/internal/registry"
+	"github.com/awm33/iris/backend/internal/sources/pexels"
 	"github.com/awm33/iris/backend/internal/store"
 )
 
@@ -71,7 +72,11 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.Handle("GET /events", bridge)
 	mux.Handle(irisv1connect.NewWorkspaceServiceHandler(&api.WorkspaceServer{Store: st}))
-	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl}))
+	pex := pexels.New(os.Getenv("IRIS_PEXELS_API_KEY"))
+	if pex == nil {
+		slog.Info("pexels source not configured (IRIS_PEXELS_API_KEY unset)")
+	}
+	mux.Handle(irisv1connect.NewAssetServiceHandler(&api.AssetServer{Store: st, Blob: bl, Pexels: pex}))
 	mux.Handle(irisv1connect.NewGenerationServiceHandler(&api.GenerationServer{Store: st, Registry: reg}))
 	mux.Handle(irisv1connect.NewStoryServiceHandler(&api.StoryServer{Store: st}))
 
