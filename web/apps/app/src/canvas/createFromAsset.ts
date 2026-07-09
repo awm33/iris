@@ -16,22 +16,28 @@ export async function createCanvasFromAsset(projectId: string, assetId: string):
 
   const created = await canvasClient.createCanvas({ projectId, name: asset.name, width, height });
   const canvas = created.canvas!;
-  await canvasClient.appendOps({
-    canvasId: canvas.id,
-    baseSeq: 0n,
-    payloads: [
-      JSON.stringify({
-        op_id: newOpId(),
-        type: "add_layer",
-        layer: { id: `lyr_${newOpId().slice(3)}`, name: asset.name, kind: "image", version_id: head.id },
-      }),
-      // Start with a paint layer on top so the first brush stroke just works.
-      JSON.stringify({
-        op_id: newOpId(),
-        type: "add_layer",
-        layer: { id: `lyr_${newOpId().slice(3)}`, name: "Layer 1", kind: "paint" },
-      }),
-    ],
-  });
+  try {
+    await canvasClient.appendOps({
+      canvasId: canvas.id,
+      baseSeq: 0n,
+      payloads: [
+        JSON.stringify({
+          op_id: newOpId(),
+          type: "add_layer",
+          layer: { id: `lyr_${newOpId().slice(3)}`, name: asset.name, kind: "image", version_id: head.id },
+        }),
+        // Start with a paint layer on top so the first brush stroke just works.
+        JSON.stringify({
+          op_id: newOpId(),
+          type: "add_layer",
+          layer: { id: `lyr_${newOpId().slice(3)}`, name: "Layer 1", kind: "paint" },
+        }),
+      ],
+    });
+  } catch (err) {
+    // Don't strand an empty orphan canvas when seeding fails.
+    await canvasClient.deleteCanvas({ id: canvas.id }).catch(() => {});
+    throw err;
+  }
   return canvas.id;
 }

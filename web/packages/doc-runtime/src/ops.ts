@@ -42,8 +42,10 @@ export type CanvasOp =
    */
   | { op_id: string; type: "undo"; target: string };
 
-/** Monotonic-ish unique op ids (single actor per tab is the v1 reality). */
-let counter = 0;
+/** Monotonic-ish unique op ids (single actor per tab is the v1 reality).
+ * Counter starts at a random offset so two tabs opened in the same
+ * millisecond don't walk the same sequence. */
+let counter = Math.floor(Math.random() * 46656);
 export function newOpId(): string {
   counter = (counter + 1) % 46656; // base36 ^3
   return `op_${Date.now().toString(36)}${counter.toString(36).padStart(3, "0")}${Math.floor(

@@ -11,6 +11,15 @@ export const generationClient = createClient(GenerationService, transport);
 export const storyClient = createClient(StoryService, transport);
 export const canvasClient = createClient(CanvasService, transport);
 
+// keepalive lets a final autosave batch survive tab close/hide (browsers
+// kill ordinary fetches on unload). Only for small unload-time appends —
+// keepalive bodies are capped at 64KB by the platform.
+const keepaliveTransport = createConnectTransport({
+  baseUrl: "/",
+  fetch: (input, init) => fetch(input, { ...init, keepalive: true }),
+});
+export const canvasKeepaliveClient = createClient(CanvasService, keepaliveTransport);
+
 /** Full presigned upload flow: StartUpload → PUT bytes → CompleteUpload. */
 export async function uploadFile(file: File, projectId?: string) {
   const start = await assetClient.startUpload({

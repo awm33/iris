@@ -34,6 +34,13 @@ describe("activeOps (undo-as-op)", () => {
     const ops = [addLayer("a"), stroke("s1", "a"), undo("u1", "s1"), undo("u2", "u1"), undo("u3", "u2")];
     expect(activeOps(ops).map((o) => o.op_id)).toEqual(["add_a"]);
   });
+
+  it("forward- and self-targeting undos (corrupt payloads) are inert", () => {
+    const forward = [undo("u1", "s1"), stroke("s1", "a")];
+    expect(activeOps(forward).map((o) => o.op_id)).toEqual(["s1"]);
+    const self = [addLayer("a"), { op_id: "u1", type: "undo", target: "u1" } as CanvasOp];
+    expect(activeOps(self).map((o) => o.op_id)).toEqual(["add_a"]);
+  });
 });
 
 describe("reduce", () => {

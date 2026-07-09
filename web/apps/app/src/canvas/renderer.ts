@@ -18,10 +18,18 @@ interface LayerEntry {
    * (an undo can remove a stroke from the middle of history). */
   rasterized: string[];
   imageDrawn: boolean;
+  /** The canvas was wiped this update — live (uncommitted) stroke pixels
+   * were lost with it and must be redrawn from the live-stroke hook. */
+  cleared: boolean;
 }
 
 export class LayerRasterCache {
   private entries = new Map<string, LayerEntry>();
+  /** The in-progress stroke, if any: a mid-gesture rebuild (undo via
+   * keyboard, image arriving) wipes its already-drawn pixels — the hook lets
+   * the rebuild re-rasterize the partial stroke so nothing visibly vanishes
+   * under the artist's cursor. */
+  private live: { layerId: string; getPartial: () => StrokeOp | null } | null = null;
 
   constructor(
     private docW: number,
@@ -30,6 +38,14 @@ export class LayerRasterCache {
     private getImage: (versionId: string) => HTMLImageElement | null,
   ) {}
 
+  setLiveStroke(layerId: string, getPartial: () => StrokeOp | null) {
+    this.live = { layerId, getPartial };
+  }
+
+  clearLiveStroke() {
+    this.live = null;
+  }
+
   /** Returns the layer's raster, updating it incrementally where possible. */
   layerCanvas(layer: LayerState): HTMLCanvasElement {
     let e = this.entries.get(layer.id);
@@ -37,7 +53,7 @@ export class LayerRasterCache {
       const canvas = document.createElement("canvas");
       canvas.width = this.docW;
       canvas.height = this.docH;
-      e = { canvas, ctx: canvas.getContext("2d")!, rasterized: [], imageDrawn: false };
+      e = { canvas, ctx: canvas.getContext("2d")!, rasterized: [], imageDrawn: false, cleared: true };
       this.entries.set(layer.id, e);
     }
 
@@ -55,13 +71,16 @@ export class LayerRasterCache {
       e.ctx.clearRect(0, 0, this.docW, this.docH);
       e.rasterized = [];
       e.imageDrawn = false;
+      e.cleared = true;
       prefix = 0;
     }
 
     if (layer.kind === "image" && layer.versionId && !e.imageDrawn) {
       const img = this.getImage(layer.versionId);
       if (img) {
-        e.ctx.drawImage(img, 0, 0, this.docW, this.docH);
+        // Natural size, no stretch: the canvas is sized to the version's
+        // dims on creation, and a dims-less fallback must not distort.
+        e.ctx.drawImage(img, 0, 0);
         e.imageDrawn = true;
       }
     }
@@ -69,6 +88,14 @@ export class LayerRasterCache {
     for (let i = prefix; i < strokes.length; i++) {
       drawStroke(e.ctx, strokes[i]);
       e.rasterized.push(strokes[i].op_id);
+    }
+
+    if (e.cleared) {
+      e.cleared = false;
+      if (this.live?.layerId === layer.id) {
+        const partial = this.live.getPartial();
+        if (partial && partial.points.length > 0) drawStroke(e.ctx, partial);
+      }
     }
     return e.canvas;
   }
@@ -93,7 +120,19 @@ export class LayerRasterCache {
         // Force full rebuild so strokes land above the image.
         e.ctx.clearRect(0, 0, this.docW, this.docH);
         e.rasterized = [];
+        e.cleared = true;
       }
+    }
+  }
+
+  /** Drop rasters for layers no longer in the doc (a 1080p layer holds ~8MB;
+   * an undo of remove_layer just rebuilds from ops). */
+  evict(state: CanvasDocState) {
+    if (this.entries.size <= state.layers.length) return;
+    const keep = new Set(state.layers.map((l) => l.id));
+    if (this.live) keep.add(this.live.layerId);
+    for (const id of [...this.entries.keys()]) {
+      if (!keep.has(id)) this.entries.delete(id);
     }
   }
 }
@@ -163,6 +202,7 @@ export function composite(
     ctx.drawImage(cache.layerCanvas(layer), 0, 0);
   }
   ctx.globalAlpha = 1;
+  cache.evict(state);
 }
 
 /** Flatten at full doc resolution (export path — same pipeline, identity view). */

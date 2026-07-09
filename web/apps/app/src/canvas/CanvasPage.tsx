@@ -10,7 +10,7 @@ import {
   parseOp,
   type SyncStatus,
 } from "@iris/doc-runtime";
-import { assetClient, canvasClient, uploadFile } from "../api";
+import { assetClient, canvasClient, canvasKeepaliveClient, uploadFile } from "../api";
 import { flatten, LayerRasterCache } from "./renderer";
 import { CanvasViewport, type CanvasTool } from "./CanvasViewport";
 
@@ -39,6 +39,8 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   const [preview, setPreview] = useState<{ layerId: string; opacity: number }>();
   const [exportMsg, setExportMsg] = useState<string>();
   const [exporting, setExporting] = useState(false);
+  const [imageError, setImageError] = useState<string>();
+  const [retrying, setRetrying] = useState(true);
 
   // Image-layer pixels: versionId → Image, loaded via signed URLs.
   // crossOrigin=anonymous keeps the canvas untainted so export can read it.
@@ -52,18 +54,25 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
       img.crossOrigin = "anonymous";
       e = { img, loaded: false };
       images.current.set(versionId, e);
+      const failed = () => {
+        // Drop the entry so the next composite retries the load.
+        images.current.delete(versionId);
+        setImageError("A layer image failed to load — retrying on next redraw.");
+      };
+      img.onerror = failed;
       void assetClient
         .signDownload({ versionId })
         .then((r) => {
           img.onload = () => {
             e!.loaded = true;
+            setImageError(undefined);
             const s = sessionRef.current;
             if (s) s.cache.invalidateImage(versionId, s.doc.state);
             setRedrawTick((t) => t + 1);
           };
           img.src = r.url;
         })
-        .catch(() => setSyncError("failed to load a layer image"));
+        .catch(failed);
     }
     return e.loaded ? e.img : null;
   };
@@ -88,8 +97,12 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         const doc = new CanvasDoc(parseOps(payloads));
         const cache = new LayerRasterCache(canvas.width, canvas.height, getImage);
         const transport: OpSyncTransport = {
-          append: async (baseSeq, ps) => {
-            const r = await canvasClient.appendOps({
+          append: async (baseSeq, ps, opts) => {
+            // keepalive only for unload-time flushes: it survives tab close
+            // but the platform caps its body at 64KB (a big batch just fails
+            // and stays pending — no worse than a killed ordinary fetch).
+            const client = opts?.keepalive ? canvasKeepaliveClient : canvasClient;
+            const r = await client.appendOps({
               canvasId: props.canvasId,
               baseSeq: BigInt(baseSeq),
               payloads: ps,
@@ -116,6 +129,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         sync.onStatus = (s, err) => {
           setStatus(s);
           setSyncError(err);
+          setRetrying(sync.retrying);
         };
         setSession({ canvas, doc, sync, cache });
         const layers = doc.state.layers;
@@ -136,7 +150,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   useEffect(() => {
     if (!session) return;
     const unsub = session.doc.subscribe(() => setDocTick((t) => t + 1));
-    const flush = () => void session.sync.flush();
+    // urgent=true → keepalive fetch: an ordinary fetch is killed on unload
+    // and the debounced batch would be silently lost.
+    const flush = () => void session.sync.flush(true);
     window.addEventListener("beforeunload", flush);
     document.addEventListener("visibilitychange", flush);
     return () => {
@@ -169,6 +185,17 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   const layers = doc.state.layers;
   const active = layers.find((l) => l.id === activeLayerId);
 
+  const commitOpacityPreview = () => {
+    if (!preview) return;
+    doc.apply({
+      op_id: newOpId(),
+      type: "set_layer",
+      layer_id: preview.layerId,
+      props: { opacity: preview.opacity },
+    });
+    setPreview(undefined);
+  };
+
   const addLayer = () => {
     const id = `lyr_${newOpId().slice(3)}`;
     doc.apply({
@@ -180,6 +207,15 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   };
 
   const doExport = async () => {
+    // An image layer still loading composites as a blank raster — exporting
+    // now would silently upload a PNG missing the base image.
+    const stillLoading = doc.state.layers.some(
+      (l) => l.kind === "image" && l.visible && l.versionId && !images.current.get(l.versionId)?.loaded,
+    );
+    if (stillLoading) {
+      setExportMsg("Layer images are still loading — try again in a moment.");
+      return;
+    }
     setExporting(true);
     setExportMsg(undefined);
     try {
@@ -250,8 +286,10 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           {status === "saved" && "saved"}
           {status === "pending" && "…"}
           {status === "saving" && "saving…"}
-          {status === "error" && `save failed: ${syncError ?? ""} (retrying)`}
+          {status === "error" &&
+            `save failed: ${syncError ?? ""} ${retrying ? "(retrying)" : "(ops kept locally — not retryable)"}`}
         </span>
+        {imageError && <span className="status error">{imageError}</span>}
         <span style={{ flex: 1 }} />
         {exportMsg && <span className="status">{exportMsg}</span>}
         <button className="btn" disabled={exporting} onClick={() => void doExport()}>
@@ -326,17 +364,12 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
                 max={100}
                 value={Math.round((preview?.layerId === active.id ? preview.opacity : active.opacity) * 100)}
                 onChange={(e) => setPreview({ layerId: active.id, opacity: Number(e.target.value) / 100 })}
-                onPointerUp={() => {
-                  if (preview?.layerId === active.id) {
-                    doc.apply({
-                      op_id: newOpId(),
-                      type: "set_layer",
-                      layer_id: active.id,
-                      props: { opacity: preview.opacity },
-                    });
-                    setPreview(undefined);
-                  }
-                }}
+                // Commit on every way the gesture can end — a missed
+                // pointerup would leave the preview diverged from the doc.
+                onPointerUp={commitOpacityPreview}
+                onPointerCancel={commitOpacityPreview}
+                onLostPointerCapture={commitOpacityPreview}
+                onBlur={commitOpacityPreview}
               />
             </label>
           )}

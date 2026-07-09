@@ -132,6 +132,9 @@ export function App() {
         )}
         {view === "canvases" && project && canvasId && (
           <CanvasPage
+            // Session identity is per-canvas: never reuse a mounted editor
+            // across canvas ids.
+            key={canvasId}
             canvasId={canvasId}
             projectId={project.id}
             onBack={() => {

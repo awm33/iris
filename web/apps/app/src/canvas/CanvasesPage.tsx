@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { newOpId } from "@iris/doc-runtime";
 import { canvasClient } from "../api";
 
 export function CanvasesPage(props: { projectId: string; onOpen: (id: string) => void }) {
@@ -13,8 +14,28 @@ export function CanvasesPage(props: { projectId: string; onOpen: (id: string) =>
   });
 
   const create = useMutation({
-    mutationFn: (n: string) =>
-      canvasClient.createCanvas({ projectId: props.projectId, name: n, width: 1920, height: 1080 }),
+    mutationFn: async (n: string) => {
+      const r = await canvasClient.createCanvas({
+        projectId: props.projectId,
+        name: n,
+        width: 1920,
+        height: 1080,
+      });
+      // Seed a paint layer: a blank canvas where the brush silently does
+      // nothing is a dead end.
+      await canvasClient.appendOps({
+        canvasId: r.canvas!.id,
+        baseSeq: 0n,
+        payloads: [
+          JSON.stringify({
+            op_id: newOpId(),
+            type: "add_layer",
+            layer: { id: `lyr_${newOpId().slice(3)}`, name: "Layer 1", kind: "paint" },
+          }),
+        ],
+      });
+      return r;
+    },
     onSuccess: (r) => {
       setName("");
       void qc.invalidateQueries({ queryKey: ["canvases"] });

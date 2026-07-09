@@ -20,13 +20,23 @@ export interface CanvasDocState {
  * Resolve undo-as-op semantics: an op is active unless targeted by an active
  * undo. Walking the log in reverse makes this one pass — an undo that is
  * itself suppressed (i.e. redone) never suppresses its target, so chains of
- * undo→redo→undo resolve correctly.
+ * undo→redo→undo resolve correctly. An undo may only suppress ops EARLIER in
+ * the log: everything this runtime authors satisfies that, and the guard pins
+ * the semantics against corrupt/foreign payloads (forward- or self-targeting
+ * undos are inert instead of resolving arbitrarily).
  */
 export function activeOps(ops: CanvasOp[]): CanvasOp[] {
+  const firstIndex = new Map<string, number>();
+  ops.forEach((op, i) => {
+    if (!firstIndex.has(op.op_id)) firstIndex.set(op.op_id, i);
+  });
   const suppressed = new Set<string>();
   for (let i = ops.length - 1; i >= 0; i--) {
     const op = ops[i];
-    if (op.type === "undo" && !suppressed.has(op.op_id)) suppressed.add(op.target);
+    if (op.type === "undo" && !suppressed.has(op.op_id)) {
+      const ti = firstIndex.get(op.target);
+      if (ti !== undefined && ti < i) suppressed.add(op.target);
+    }
   }
   return ops.filter((op) => op.type !== "undo" && !suppressed.has(op.op_id));
 }
@@ -122,11 +132,16 @@ export class CanvasDoc {
     this.commit(op);
   }
 
-  /** Ops arriving from the server (another tab/actor): append + replay. */
+  /** Ops arriving from the server (another tab/actor): append + replay.
+   * Dedups against the held log AND within the batch itself (a refetch over
+   * a log with historical duplicates must not double-apply live).
+   * Known divergence, accepted for v1: refetched remote ops append AFTER any
+   * unpushed local ops here, while the server orders them before — a
+   * two-tabs-of-one-user render can differ from the reload until then. */
   applyRemote(ops: CanvasOp[]) {
     if (ops.length === 0) return;
     const known = new Set(this.ops.map((o) => o.op_id));
-    const fresh = ops.filter((o) => !known.has(o.op_id));
+    const fresh = ops.filter((o) => !known.has(o.op_id) && (known.add(o.op_id), true));
     if (fresh.length === 0) return;
     this.ops.push(...fresh);
     this.state = reduce(this.ops);

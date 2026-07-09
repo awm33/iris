@@ -105,8 +105,73 @@ describe("OpSync", () => {
     sync.enqueue(op("a"));
     await sync.flush();
     expect(sync.status).toBe("error");
+    expect(sync.retrying).toBe(true);
     expect(sync.pendingCount).toBe(1); // nothing lost
     expect(statuses).toContain("saving");
+  });
+
+  it("does not schedule retries for batches the server called invalid", async () => {
+    class ConnectInvalid extends Error {
+      code = 3;
+    }
+    const transport: OpSyncTransport = {
+      append: async () => {
+        throw new ConnectInvalid("[invalid_argument] op 0 exceeds 64KB");
+      },
+      fetchSince: async () => ({ headSeq: 0, payloads: [] }),
+    };
+    const sync = new OpSync(transport, 0);
+    sync.enqueue(op("a"));
+    await sync.flush();
+    expect(sync.status).toBe("error");
+    expect(sync.retrying).toBe(false); // resending the same bytes can't help
+    expect(sync.pendingCount).toBe(1); // but nothing is lost
+  });
+
+  it("caps consecutive conflicts (livelock backstop) and fails instead of spinning", async () => {
+    let appends = 0;
+    const transport: OpSyncTransport = {
+      append: async () => {
+        appends++;
+        throw new ConnectAborted("[aborted] base_seq is stale");
+      },
+      // The refetch never returns our op, so the conflict repeats forever.
+      fetchSince: async () => ({ headSeq: 0, payloads: [] }),
+    };
+    const sync = new OpSync(transport, 0);
+    sync.enqueue(op("a"));
+    await sync.flush();
+    expect(sync.status).toBe("error");
+    expect(appends).toBeLessThanOrEqual(6); // MAX_CONSECUTIVE_CONFLICTS + the failing try
+    expect(sync.pendingCount).toBe(1);
+  });
+
+  it("flush awaited during an in-flight flush resolves only after ops are drained", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    let head = 0;
+    const transport: OpSyncTransport = {
+      append: async (base, payloads) => {
+        await gate;
+        head = base + payloads.length;
+        return head;
+      },
+      fetchSince: async () => ({ headSeq: head, payloads: [] }),
+    };
+    const sync = new OpSync(transport, 0);
+    sync.enqueue(op("a"));
+    const first = sync.flush(); // blocks on the gate
+    sync.enqueue(op("b"));
+    const second = sync.flush(); // must not resolve while b is pending
+    let secondDone = false;
+    void second.then(() => (secondDone = true));
+    await Promise.resolve();
+    expect(secondDone).toBe(false);
+    release();
+    await second;
+    expect(sync.pendingCount).toBe(0);
+    expect(sync.baseSeq).toBe(2);
+    await first;
   });
 
   it("splits oversized queues into server-cap batches", async () => {

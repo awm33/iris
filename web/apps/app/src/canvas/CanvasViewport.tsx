@@ -33,8 +33,20 @@ export function CanvasViewport(props: {
   const propsRef = useRef(props);
   propsRef.current = props;
 
-  const stroke = useRef<{ points: [number, number][]; layerId: string } | null>(null);
+  // Style is snapshotted at gesture start: a mid-drag tool/color/size change
+  // (second pointer on the controls) must not misattribute the committed op.
+  const stroke = useRef<{
+    points: [number, number][];
+    layerId: string;
+    tool: "brush" | "eraser";
+    color: string;
+    size: number;
+  } | null>(null);
   const panning = useRef<{ startX: number; startY: number; vtX: number; vtY: number } | null>(null);
+
+  // Strokes split at this many points: a single unbounded scribble would
+  // blow the server's 64KB per-op cap and poison the save queue.
+  const MAX_STROKE_POINTS = 2000;
 
   const requestDraw = () => {
     if (drawPending.current) return;
@@ -117,12 +129,6 @@ export function CanvasViewport(props: {
     return [(e.clientX - rect.left - vt.x) / vt.scale, (e.clientY - rect.top - vt.y) / vt.scale];
   };
 
-  const liveStrokeStyle = (): Pick<StrokeOp, "tool" | "color" | "size"> => ({
-    tool: props.tool === "eraser" ? "eraser" : "brush",
-    color: props.color,
-    size: props.brushSize,
-  });
-
   // Capture keeps strokes/pans alive when the pointer leaves the viewport;
   // it can throw for already-released pointers — losing capture only means
   // the stroke ends at the edge, so never let it break the gesture.
@@ -145,12 +151,72 @@ export function CanvasViewport(props: {
     const layer = p.doc.state.layers.find((l) => l.id === p.activeLayerId);
     if (!layer || layer.kind !== "paint" || !layer.visible) return;
     const pt = toDoc(e);
-    stroke.current = { points: [pt], layerId: layer.id };
+    stroke.current = {
+      points: [pt],
+      layerId: layer.id,
+      tool: p.tool === "eraser" ? "eraser" : "brush",
+      color: p.color,
+      size: p.brushSize,
+    };
     capture(e);
+    // If anything rebuilds the layer raster mid-gesture (keyboard undo, an
+    // image layer's pixels arriving), the rebuild re-draws the partial
+    // stroke from this hook — otherwise its pixels silently vanish and the
+    // committed op would disagree with the raster until reload.
+    p.cache.setLiveStroke(layer.id, () => {
+      const s = stroke.current;
+      if (!s) return null;
+      return {
+        op_id: "",
+        type: "stroke",
+        layer_id: s.layerId,
+        tool: s.tool,
+        color: s.color,
+        size: s.size,
+        points: s.points,
+      };
+    });
     const ctx = p.cache.liveContext(layer.id);
     // A press with no movement is a dot — same shape the replay draws.
-    if (ctx) drawStroke(ctx, { op_id: "", type: "stroke", layer_id: layer.id, points: [pt], ...liveStrokeStyle() });
+    if (ctx)
+      drawStroke(ctx, {
+        op_id: "",
+        type: "stroke",
+        layer_id: layer.id,
+        points: [pt],
+        tool: stroke.current.tool,
+        color: stroke.current.color,
+        size: stroke.current.size,
+      });
     requestDraw();
+  };
+
+  /** Commit the in-progress stroke as an op; with `continueAt`, immediately
+   * begin a follow-on stroke (the point-cap split). */
+  const finishStroke = (continueAt?: [number, number]) => {
+    const s = stroke.current;
+    if (!s) return;
+    stroke.current = null;
+    const p = propsRef.current;
+    const op: StrokeOp = {
+      op_id: newOpId(),
+      type: "stroke",
+      layer_id: s.layerId,
+      points: s.points.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]),
+      tool: s.tool,
+      color: s.color,
+      size: s.size,
+    };
+    // The live segments already rasterized these exact pixels — record the
+    // op as drawn BEFORE the doc replays it, or it would draw twice (visible
+    // as darkened anti-aliased edges).
+    p.cache.noteLiveStrokeCommitted(s.layerId, op.op_id);
+    if (continueAt) {
+      stroke.current = { points: [continueAt], layerId: s.layerId, tool: s.tool, color: s.color, size: s.size };
+    } else {
+      p.cache.clearLiveStroke();
+    }
+    p.doc.apply(op);
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -166,33 +232,28 @@ export function CanvasViewport(props: {
     }
     const s = stroke.current;
     if (!s) return;
+    if (e.buttons === 0) {
+      // The release happened where we couldn't see it (capture failed, tab
+      // switch): finalize instead of leaving orphaned raster pixels.
+      finishStroke();
+      return;
+    }
     const pt = toDoc(e);
     const last = s.points[s.points.length - 1];
-    if (Math.hypot(pt[0] - last[0], pt[1] - last[1]) * vtRef.current.scale < 1.5) return; // decimate
+    // Decimate in screen space but cap in doc space: zoomed-out strokes
+    // must not bake angularity into the op (ops are the source of truth).
+    const docDist = Math.hypot(pt[0] - last[0], pt[1] - last[1]);
+    if (docDist < Math.min(1.5 / vtRef.current.scale, 2)) return;
     const ctx = propsRef.current.cache.liveContext(s.layerId);
-    if (ctx) drawLiveSegment(ctx, liveStrokeStyle(), last, pt);
+    if (ctx) drawLiveSegment(ctx, s, last, pt);
     s.points.push(pt);
+    if (s.points.length >= MAX_STROKE_POINTS) finishStroke(pt);
     requestDraw();
   };
 
   const onPointerUp = () => {
     panning.current = null;
-    const s = stroke.current;
-    if (!s) return;
-    stroke.current = null;
-    const p = propsRef.current;
-    const op: StrokeOp = {
-      op_id: newOpId(),
-      type: "stroke",
-      layer_id: s.layerId,
-      points: s.points.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]),
-      ...liveStrokeStyle(),
-    };
-    // The live segments already rasterized these exact pixels — record the
-    // op as drawn BEFORE the doc replays it, or it would draw twice (visible
-    // as darkened anti-aliased edges).
-    p.cache.noteLiveStrokeCommitted(s.layerId, op.op_id);
-    p.doc.apply(op);
+    finishStroke();
   };
 
   const cursor = props.tool === "pan" ? "grab" : "crosshair";
@@ -205,6 +266,7 @@ export function CanvasViewport(props: {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onLostPointerCapture={onPointerUp}
       />
     </div>
   );
