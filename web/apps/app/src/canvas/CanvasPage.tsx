@@ -346,7 +346,13 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         id,
         name: "Text",
         kind: "text",
-        text: { content: "Text", x: Math.round(pt[0]), y: Math.round(pt[1]), size: 64, color },
+        text: {
+          content: "Text",
+          x: Math.round(Math.min(Math.max(pt[0], 0), canvas.width)),
+          y: Math.round(Math.min(Math.max(pt[1], 0), canvas.height)),
+          size: 64,
+          color,
+        },
       },
     });
     setActiveLayerId(id);
@@ -707,14 +713,24 @@ function TextProps(props: {
   onCommit: (t: { content: string; x: number; y: number; size: number; color: string }) => void;
 }) {
   const [draft, setDraft] = useState(props.value);
+  // Resync on external change (undo/remote): a stale draft re-committed on
+  // blur would silently revert the user's undo and destroy the redo chain.
+  const valueJson = JSON.stringify(props.value);
+  useEffect(() => {
+    setDraft(props.value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valueJson]);
   const commit = () => {
-    if (JSON.stringify(draft) !== JSON.stringify(props.value)) props.onCommit(draft);
+    // Cap defensively too: one >64KB op would poison the whole save queue.
+    const next = { ...draft, content: draft.content.slice(0, 10_000) };
+    if (JSON.stringify(next) !== valueJson) props.onCommit(next);
   };
   return (
     <div className="layer-opacity">
       <span className="meta">text</span>
       <textarea
         rows={3}
+        maxLength={10000}
         value={draft.content}
         onChange={(e) => setDraft({ ...draft, content: e.target.value })}
         onBlur={commit}

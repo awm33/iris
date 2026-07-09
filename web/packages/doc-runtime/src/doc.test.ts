@@ -97,6 +97,18 @@ describe("text layers", () => {
     ops.push(undo("u1", "a2"));
     expect(reduce(ops).layers[0].text?.content).toBe("Hello");
   });
+
+  it("set_layer text on non-text layers and strokes on text layers are ignored", () => {
+    const t = { content: "x", x: 0, y: 0, size: 10, color: "#fff" };
+    const state = reduce([
+      addLayer("p"),
+      { op_id: "s1", type: "set_layer", layer_id: "p", props: { text: t } },
+      { op_id: "a1", type: "add_layer", layer: { id: "t1", name: "T", kind: "text", text: t } },
+      stroke("st", "t1"),
+    ]);
+    expect(state.layers[0].text).toBeUndefined();
+    expect(state.layers[1].strokes).toEqual([]);
+  });
 });
 
 describe("CanvasDoc undo/redo", () => {
