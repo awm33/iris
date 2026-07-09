@@ -265,7 +265,7 @@ function ShotCard(props: {
   );
 }
 
-function truncate(s: string, n: number): string {
+export function truncate(s: string, n: number): string {
   const r = [...s];
   return r.length > n ? r.slice(0, n).join("") + "…" : s;
 }
