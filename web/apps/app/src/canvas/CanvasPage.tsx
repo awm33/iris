@@ -15,7 +15,14 @@ import { assetClient, canvasClient, canvasKeepaliveClient, generationClient, sto
 import { flatten, LayerRasterCache } from "./renderer";
 import { CanvasViewport, type CanvasTool } from "./CanvasViewport";
 import { GenFillBar, type GenFillState } from "./GenFillBar";
-import { type GenFillEndpoint, genFillEndpoints, pickProfile, renderMaskBlob, type Selection } from "./genfill";
+import {
+  type GenFillEndpoint,
+  genFillEndpoints,
+  pickProfile,
+  removalDilation,
+  renderMaskBlob,
+  type Selection,
+} from "./genfill";
 
 interface Session {
   canvas: Canvas;
@@ -314,7 +321,11 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
       const profile = pickProfile(ep, canvas.width, canvas.height);
       if (!profile) throw new Error(`canvas exceeds ${ep.name}'s max resolution`);
       const src = await uploadFile(await flattenToFile(" (gen-fill source)"), props.projectId);
-      const maskBlob = await renderMaskBlob(selection, canvas.width, canvas.height);
+      // Removal grows the mask (Photoshop-style): fringes and slight
+      // under-selection must not leave amputated object edges behind.
+      // Prompted gen-fill keeps the exact selection — it IS the intent.
+      const dilate = prompt === "" ? removalDilation(selection) : 0;
+      const maskBlob = await renderMaskBlob(selection, canvas.width, canvas.height, dilate);
       const mask = await uploadFile(
         new File([maskBlob], `${canvas.name} (gen-fill mask).png`, { type: "image/png" }),
         props.projectId,

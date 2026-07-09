@@ -21,8 +21,12 @@ export function traceSelection(ctx: CanvasRenderingContext2D, sel: Selection) {
   }
 }
 
-/** Render the selection as a black/white mask PNG at doc resolution. */
-export function renderMaskBlob(sel: Selection, docW: number, docH: number): Promise<Blob> {
+/** Render the selection as a black/white mask PNG at doc resolution.
+ * dilatePx > 0 grows the mask outward (stroke + fill ≈ morphological
+ * dilation) — removal wants this (Photoshop does it too): it covers object
+ * fringes and slight under-selection, and gives the model clean background
+ * as boundary context instead of amputated object edges. */
+export function renderMaskBlob(sel: Selection, docW: number, docH: number, dilatePx = 0): Promise<Blob> {
   const c = document.createElement("canvas");
   c.width = docW;
   c.height = docH;
@@ -32,9 +36,33 @@ export function renderMaskBlob(sel: Selection, docW: number, docH: number): Prom
   ctx.fillStyle = "#fff";
   traceSelection(ctx, sel);
   ctx.fill();
+  if (dilatePx > 0) {
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = dilatePx * 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    traceSelection(ctx, sel);
+    ctx.stroke();
+  }
   return new Promise((resolve, reject) => {
     c.toBlob((b) => (b ? resolve(b) : reject(new Error("mask encode failed"))), "image/png");
   });
+}
+
+/** Removal dilation: scale with the selection, bounded sanely. */
+export function removalDilation(sel: Selection): number {
+  let w = 0;
+  let h = 0;
+  if (sel.kind === "rect") {
+    w = sel.w;
+    h = sel.h;
+  } else {
+    const xs = sel.points.map((p) => p[0]);
+    const ys = sel.points.map((p) => p[1]);
+    w = Math.max(...xs) - Math.min(...xs);
+    h = Math.max(...ys) - Math.min(...ys);
+  }
+  return Math.min(48, Math.max(8, Math.round(Math.max(w, h) * 0.04)));
 }
 
 export interface GenFillEndpoint {
