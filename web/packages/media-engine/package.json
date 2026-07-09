@@ -1,0 +1,20 @@
+{
+  "name": "@iris/media-engine",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "WebCodecs playback engine (M5 compositor arc): mp4box demux + VideoDecoder pipeline. Pure sample/queue math is framework- and API-free for tests; the decoder shell is browser-only.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "mp4box": "^0.5.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

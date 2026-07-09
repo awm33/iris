@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Code, ConnectError } from "@connectrpc/connect";
+import { ClipDecoder } from "@iris/media-engine";
 import { assetClient } from "../api";
 import { useEscape } from "./AssetThumb";
+import { EnginePlayer } from "./EnginePlayer";
 
 // Clip player (M5 slice 2): native <video> over the prep proxy — the
 // profiling-not-ideology choice for a single clip. The WebCodecs decode
@@ -42,6 +44,9 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
   };
 
   const [src, setSrc] = useState<string>();
+  // WebCodecs testbed (PR 22): decode the same proxy through the media
+  // engine instead of <video>. Dev affordance until the compositor lands.
+  const [engineMode, setEngineMode] = useState(false);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -88,7 +93,7 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
       if (e.key === " ") e.preventDefault(); // before the repeat check: uncancelled repeats scroll / re-arm focused-button clicks
       if (e.key === " " && e.repeat) return; // holding space must not machine-gun toggles
       const el = v();
-      if (!el) return;
+      if (!el) return; // engine mode unmounts the <video> — keys are inert
       switch (e.key.toLowerCase()) {
         case " ":
           e.preventDefault();
@@ -161,14 +166,24 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
           <h3 className="truncate">{props.title ?? "Clip"}</h3>
           <span className="meta">
             {usingProxy === false && "no proxy — playing original · "}
-            J/K/L · space · ←/→ frame
+            {engineMode ? "engine testbed — transport keys off" : "J/K/L · space · ←/→ frame"}
           </span>
+          {ClipDecoder.supported() && (
+            <button
+              className={`btn secondary${engineMode ? " tool-active" : ""}`}
+              title="Decode via the WebCodecs media engine (compositor testbed)"
+              onClick={() => setEngineMode((m) => !m)}
+            >
+              ⚙ engine
+            </button>
+          )}
           <button className="btn secondary" onClick={props.onClose}>
             Close
           </button>
         </div>
         {error && <div className="status error">{error}</div>}
-        {src && (
+        {src && engineMode && <EnginePlayer src={src} />}
+        {src && !engineMode && (
           <video
             ref={videoRef}
             src={src}
@@ -189,6 +204,7 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
             }}
           />
         )}
+        {!engineMode && (
         <div
           className="player-scrub"
           onPointerDown={(e) => {
@@ -203,20 +219,23 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
           {waveform && <Waveform peaks={waveform} />}
           {duration > 0 && <div className="player-head" style={{ left: `calc(${Math.min(100, (time / duration) * 100)}% - 2px)` }} />}
         </div>
-        <div className="toolbar" style={{ marginBottom: 0 }}>
-          <button
-            className="btn secondary"
-            onClick={() => {
-              const el = videoRef.current!;
-              el.paused ? void el.play() : el.pause();
-            }}
-          >
-            {playing ? "⏸" : "▶"}
-          </button>
-          <span className="meta">
-            {fmt(time)} / {fmt(duration)}
-          </span>
-        </div>
+        )}
+        {!engineMode && (
+          <div className="toolbar" style={{ marginBottom: 0 }}>
+            <button
+              className="btn secondary"
+              onClick={() => {
+                const el = videoRef.current!;
+                el.paused ? void el.play() : el.pause();
+              }}
+            >
+              {playing ? "⏸" : "▶"}
+            </button>
+            <span className="meta">
+              {fmt(time)} / {fmt(duration)}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
