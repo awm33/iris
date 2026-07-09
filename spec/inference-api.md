@@ -44,7 +44,8 @@ GET    /v1/healthz             → liveness (200 = accepting jobs)
     "keyframes":     [ { "t": 0.0, "url": "..." }, { "t": 3.5, "url": "..." } ],   // multi-keyframe (superset of first/last)
     "depth_sequence":{ "url": "https://...zip-or-video..." },                      // per-frame depth maps
     "source_video":  { "url": "https://...", "strength": 0.6 },                    // v2v / restyle / extension input
-    "mask":          { "url": "https://..." }                                      // inpaint (image: static; video: mask video)
+    "source_image":  { "url": "https://..." },                                     // i2i / inpaint / outpaint source (requires manifest.conditioning.source_image)
+    "mask":          { "url": "https://..." }                                      // inpaint (image: static; video: mask video); white = generate, black = preserve
   },
   "params": { },                        // model-specific; validated against manifest.params_schema (JSON Schema)
   "upload": {                           // Iris-provided presigned PUT targets; endpoint uploads artifacts here
@@ -106,7 +107,7 @@ Terminal states are immutable and MUST be retrievable for ≥24h. Webhook (if co
 
 JSON document validating against [`manifest.schema.json`](manifest.schema.json). It is the **entire** capability negotiation: Iris renders UI, validates jobs, estimates cost, and routes tasks purely from it. See the schema file for field-level docs; the shape follows TDD §3.4:
 
-`spec_version, id, family, version, modality, tasks[], profiles{}, duration{}, resolutions{}, references{image|video|audio → {max, roles[]}}, conditioning{first_frame,last_frame,keyframes,depth_sequence,pose_sequence,mask,source_video,multi_view}, features{seed,negative_prompt,native_batch,lip_sync_in_gen,lip_sync_post,audio_gen,camera_control,v2v_restyle,video_inpaint}, params_schema{JSON Schema}, pricing{unit,per_profile_estimates}, limits{concurrency,max_queue}`
+`spec_version, id, family, version, modality, tasks[], profiles{}, duration{}, resolutions{}, references{image|video|audio → {max, roles[]}}, conditioning{first_frame,last_frame,keyframes,depth_sequence,pose_sequence,mask,source_video,source_image,multi_view}, features{seed,negative_prompt,native_batch,lip_sync_in_gen,lip_sync_post,audio_gen,camera_control,v2v_restyle,video_inpaint}, params_schema{JSON Schema}, pricing{unit,per_profile_estimates}, limits{concurrency,max_queue}`
 
 **Manifest honesty rule:** if it isn't declared, Iris won't send it and the UI won't show it. Under-declare when unsure.
 

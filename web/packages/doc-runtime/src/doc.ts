@@ -5,6 +5,7 @@ export interface LayerState {
   name: string;
   kind: LayerKind;
   versionId?: string;
+  maskVersionId?: string;
   opacity: number;
   visible: boolean;
   /** Active strokes in application order — the renderer rasterizes these. */
@@ -54,6 +55,7 @@ export function reduce(ops: CanvasOp[]): CanvasDocState {
           name: op.layer.name,
           kind: op.layer.kind,
           versionId: op.layer.version_id,
+          maskVersionId: op.layer.mask_version_id,
           opacity: op.layer.opacity ?? 1,
           visible: op.layer.visible ?? true,
           strokes: [],

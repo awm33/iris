@@ -39,6 +39,7 @@ type Manifest struct {
 		} `json:"depth_sequence"`
 		PoseSequence bool `json:"pose_sequence"`
 		Mask         bool `json:"mask"`
+		SourceImage  bool `json:"source_image"`
 		SourceVideo  bool `json:"source_video"`
 		MultiView    bool `json:"multi_view"`
 	} `json:"conditioning"`
@@ -165,6 +166,8 @@ func (m *Manifest) Validate(req *CreateJobRequest) error {
 			return invalid("model %s does not support source_video input", m.ID)
 		case c.Mask != nil && !m.Conditioning.Mask:
 			return invalid("model %s does not support mask conditioning", m.ID)
+		case c.SourceImage != nil && !m.Conditioning.SourceImage:
+			return invalid("model %s does not support source_image conditioning", m.ID)
 		}
 	}
 	// TODO(M2 follow-up): validate req.Params against manifest.params_schema

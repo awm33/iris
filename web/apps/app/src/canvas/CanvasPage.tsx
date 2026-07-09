@@ -1,18 +1,21 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import type { Canvas } from "@iris/api-client";
+import { type Canvas, JobState } from "@iris/api-client";
 import {
   CanvasDoc,
   type CanvasOp,
+  type LayerState,
   newOpId,
   OpSync,
   type OpSyncTransport,
   parseOp,
   type SyncStatus,
 } from "@iris/doc-runtime";
-import { assetClient, canvasClient, canvasKeepaliveClient, uploadFile } from "../api";
+import { assetClient, canvasClient, canvasKeepaliveClient, generationClient, storyClient, uploadFile } from "../api";
 import { flatten, LayerRasterCache } from "./renderer";
 import { CanvasViewport, type CanvasTool } from "./CanvasViewport";
+import { GenFillBar, type GenFillState } from "./GenFillBar";
+import { type GenFillEndpoint, genFillEndpoints, pickProfile, renderMaskBlob, type Selection } from "./genfill";
 
 interface Session {
   canvas: Canvas;
@@ -41,6 +44,10 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   const [exporting, setExporting] = useState(false);
   const [imageError, setImageError] = useState<string>();
   const [retrying, setRetrying] = useState(true);
+  const [selection, setSelection] = useState<Selection>();
+  const [genFill, setGenFill] = useState<GenFillState>();
+  const [genFillError, setGenFillError] = useState<string>();
+  const [promoting, setPromoting] = useState(false);
 
   // Image-layer pixels: versionId → Image, loaded via signed URLs.
   // crossOrigin=anonymous keeps the canvas untainted so export can read it.
@@ -163,7 +170,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     };
   }, [session]);
 
-  // Cmd/Ctrl+Z undo, +Shift redo — never while typing in a field.
+  // Cmd/Ctrl+Z undo, +Shift redo — never while typing in a field. While the
+  // candidate strip is open: ←/→ compare, Enter commits, Esc discards; Esc
+  // otherwise clears the selection.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
@@ -172,11 +181,81 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         e.preventDefault();
         if (e.shiftKey) session?.doc.redo();
         else session?.doc.undo();
+        return;
       }
+      if (genFill?.phase === "choosing") {
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+          e.preventDefault();
+          const d = e.key === "ArrowRight" ? 1 : -1;
+          setGenFill({
+            ...genFill,
+            index: (genFill.index + d + genFill.candidates.length) % genFill.candidates.length,
+          });
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          commitCandidate();
+        } else if (e.key === "Escape") {
+          setGenFill(undefined);
+        }
+        return;
+      }
+      // Esc never clears the selection while a gen-fill is in flight — the
+      // vanishing marching ants would read as a cancel the flow didn't do.
+      if (e.key === "Escape" && selection && !genFill) setSelection(undefined);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [session]);
+  });
+
+  // Gen-fill stances, stated once (v1, single-user):
+  // - Navigating away mid-generation cancels nothing: the job completes and
+  //   its candidates land in the Library (reachable via Jobs), but the
+  //   choosing UI does not reattach on return.
+  // - Editing while generating is allowed; the eventual commit is a masked
+  //   layer over the doc AS IT IS THEN — "fill this region as it was when I
+  //   asked". Strokes painted inside the selection meanwhile end up occluded
+  //   (undo or hide-layer reveals them).
+  // - Esc in choosing returns to the prompt bar with the selection armed
+  //   (retry loop); a second Esc clears the selection.
+  // Gen-fill capable endpoints (manifest-negotiated).
+  const endpoints = useQuery({
+    queryKey: ["endpoints"],
+    staleTime: 60_000,
+    queryFn: () => generationClient.listModelEndpoints({}),
+  });
+  const gfEndpoints = genFillEndpoints(endpoints.data?.endpoints ?? []);
+
+  // Poll the gen-fill job while it runs (SSE invalidation accelerates this;
+  // polling is the backstop, same stance as everywhere else).
+  const gfJobId = genFill?.phase === "generating" ? genFill.jobId : "";
+  const gfJob = useQuery({
+    queryKey: ["job", gfJobId],
+    enabled: gfJobId !== "",
+    refetchInterval: 1500,
+    queryFn: () => generationClient.getJob({ id: gfJobId }),
+  });
+  useEffect(() => {
+    const j = gfJob.data?.job;
+    if (!j || genFill?.phase !== "generating") return;
+    if (j.state === JobState.COMPLETE && j.artifactVersionIds.length > 0) {
+      setGenFill({
+        phase: "choosing",
+        jobId: genFill.jobId,
+        maskVersionId: genFill.maskVersionId,
+        maskAssetId: genFill.maskAssetId,
+        candidates: j.artifactVersionIds,
+        index: 0,
+      });
+    } else if (j.state === JobState.COMPLETE) {
+      // Terminal with nothing to choose — without this branch the poll would
+      // spin on a complete job forever with the UI stuck at "Generating…".
+      setGenFillError("generation completed without candidates");
+      setGenFill(undefined);
+    } else if (j.state === JobState.FAILED || j.state === JobState.CANCELED) {
+      setGenFillError(j.errorMessage || `generation ${j.state === JobState.FAILED ? "failed" : "was canceled"}`);
+      setGenFill(undefined);
+    }
+  }, [gfJob.data, genFill]);
 
   if (loadError) return <div className="status error">Couldn’t open canvas: {loadError}</div>;
   if (!session) return <div className="empty">Opening canvas…</div>;
@@ -206,24 +285,121 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     setActiveLayerId(id);
   };
 
-  const doExport = async () => {
-    // An image layer still loading composites as a blank raster — exporting
-    // now would silently upload a PNG missing the base image.
+  // Flatten the current composite to a PNG File (shared by export, gen-fill
+  // source, and promote-to-View). Throws while image layers are loading —
+  // masks included: the renderer draws a masked layer only when BOTH are
+  // loaded, so a missing mask would silently drop the whole layer from the
+  // flatten.
+  async function flattenToFile(suffix: string): Promise<File> {
+    const notLoaded = (versionId?: string) => versionId && !images.current.get(versionId)?.loaded;
     const stillLoading = doc.state.layers.some(
-      (l) => l.kind === "image" && l.visible && l.versionId && !images.current.get(l.versionId)?.loaded,
+      (l) => l.kind === "image" && l.visible && (notLoaded(l.versionId) || notLoaded(l.maskVersionId)),
     );
-    if (stillLoading) {
-      setExportMsg("Layer images are still loading — try again in a moment.");
-      return;
+    if (stillLoading) throw new Error("layer images are still loading — try again in a moment");
+    await session!.sync.flush();
+    const flat = flatten(doc.state, cache, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((res) => flat.toBlob(res, "image/png"));
+    if (!blob) throw new Error("could not encode PNG");
+    return new File([blob], `${canvas.name}${suffix}.png`, { type: "image/png" });
+  }
+
+  async function submitGenFill(prompt: string, count: number, ep: GenFillEndpoint) {
+    // The genFill guard doubles as a re-entrancy lock: a second submit would
+    // overwrite the first job's id — never polled, never cancelable, billed.
+    if (!selection || genFill) return;
+    setGenFillError(undefined);
+    setGenFill({ phase: "submitting" });
+    try {
+      const profile = pickProfile(ep, canvas.width, canvas.height);
+      if (!profile) throw new Error(`canvas exceeds ${ep.name}'s max resolution`);
+      const src = await uploadFile(await flattenToFile(" (gen-fill source)"), props.projectId);
+      const maskBlob = await renderMaskBlob(selection, canvas.width, canvas.height);
+      const mask = await uploadFile(
+        new File([maskBlob], `${canvas.name} (gen-fill mask).png`, { type: "image/png" }),
+        props.projectId,
+      );
+      void qc.invalidateQueries({ queryKey: ["assets"] });
+      const r = await generationClient.createJob({
+        job: {
+          projectId: props.projectId,
+          modelEndpointId: ep.id,
+          task: "inpaint",
+          profile,
+          prompt,
+          count,
+          targetEntityId: props.canvasId,
+          output: { width: canvas.width, height: canvas.height },
+          conditioning: {
+            sourceImage: { assetId: src.asset!.id, versionId: src.version!.id },
+            mask: { assetId: mask.asset!.id, versionId: mask.version!.id },
+          },
+        },
+      });
+      setGenFill({
+        phase: "generating",
+        jobId: r.job!.id,
+        maskVersionId: mask.version!.id,
+        maskAssetId: mask.asset!.id,
+      });
+    } catch (e) {
+      setGenFillError(String(e));
+      setGenFill(undefined);
     }
+  }
+
+  function commitCandidate() {
+    if (genFill?.phase !== "choosing") return;
+    const id = `lyr_${newOpId().slice(3)}`;
+    doc.apply({
+      op_id: newOpId(),
+      type: "add_layer",
+      layer: {
+        id,
+        name: "Gen fill",
+        kind: "image",
+        version_id: genFill.candidates[genFill.index],
+        mask_version_id: genFill.maskVersionId,
+      },
+    });
+    setActiveLayerId(id);
+    setGenFill(undefined);
+    setSelection(undefined);
+  }
+
+  async function discardGenFill() {
+    const jobId = genFill?.phase === "generating" ? genFill.jobId : undefined;
+    // Clear state BEFORE the cancel roundtrip: if the poll fetches CANCELED
+    // mid-await, the effect would surface the user's own cancel as an error.
+    setGenFill(undefined);
+    if (jobId) {
+      // Best-effort: stop paying for candidates nobody will look at.
+      await generationClient.cancelJob({ id: jobId }).catch(() => {});
+    }
+  }
+
+  async function promoteToView(sceneId: string) {
+    setPromoting(false);
+    setExportMsg(undefined);
+    try {
+      const up = await uploadFile(await flattenToFile(""), props.projectId);
+      await storyClient.addView({
+        sceneId,
+        name: canvas.name,
+        plate: { assetId: up.asset!.id, versionId: up.version!.id },
+      });
+      void qc.invalidateQueries({ queryKey: ["assets"] });
+      void qc.invalidateQueries({ queryKey: ["scene"] });
+      setExportMsg("Added as view ✓");
+    } catch (e) {
+      setExportMsg(`Promote failed: ${String(e)}`);
+    }
+  }
+
+  const doExport = async () => {
     setExporting(true);
     setExportMsg(undefined);
     try {
-      await session.sync.flush();
-      const flat = flatten(doc.state, cache, canvas.width, canvas.height);
-      const blob = await new Promise<Blob | null>((res) => flat.toBlob(res, "image/png"));
-      if (!blob) throw new Error("could not encode PNG");
-      await uploadFile(new File([blob], `${canvas.name}.png`, { type: "image/png" }), props.projectId);
+      await uploadFile(await flattenToFile(""), props.projectId);
       void qc.invalidateQueries({ queryKey: ["assets"] });
       setExportMsg("Exported to Library ✓");
     } catch (e) {
@@ -232,6 +408,22 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
       setExporting(false);
     }
   };
+
+  // The candidate under the arrow keys, rendered as an ephemeral masked
+  // layer on top of the composite — comparing happens in place, in context.
+  const overlayLayer: LayerState | undefined =
+    genFill?.phase === "choosing"
+      ? {
+          id: `__preview_${genFill.candidates[genFill.index]}`,
+          name: "preview",
+          kind: "image",
+          versionId: genFill.candidates[genFill.index],
+          maskVersionId: genFill.maskVersionId,
+          opacity: 1,
+          visible: true,
+          strokes: [],
+        }
+      : undefined;
 
   const toolButton = (t: CanvasTool, label: string) => (
     <button className={`btn secondary${tool === t ? " tool-active" : ""}`} onClick={() => setTool(t)}>
@@ -254,6 +446,8 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         {toolButton("pan", "✋ Pan")}
         {toolButton("brush", "🖌 Brush")}
         {toolButton("eraser", "◻ Eraser")}
+        {toolButton("marquee", "▭ Select")}
+        {toolButton("lasso", "◯ Lasso")}
         <input
           type="color"
           value={color}
@@ -292,10 +486,26 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         {imageError && <span className="status error">{imageError}</span>}
         <span style={{ flex: 1 }} />
         {exportMsg && <span className="status">{exportMsg}</span>}
+        <button className="btn secondary" onClick={() => setPromoting((p) => !p)}>
+          → View
+        </button>
         <button className="btn" disabled={exporting} onClick={() => void doExport()}>
           {exporting ? "Exporting…" : "Export to Library"}
         </button>
       </div>
+      {promoting && <ScenePickerRow projectId={props.projectId} onPick={(id) => void promoteToView(id)} onClose={() => setPromoting(false)} />}
+      {(selection || genFill) && (
+        <GenFillBar
+          endpoints={gfEndpoints}
+          state={genFill}
+          progress={gfJob.data?.job?.progress}
+          error={genFillError}
+          onGenerate={(prompt, count, ep) => void submitGenFill(prompt, count, ep)}
+          onPick={(index) => genFill?.phase === "choosing" && setGenFill({ ...genFill, index })}
+          onCommit={commitCandidate}
+          onDiscard={() => void discardGenFill()}
+        />
+      )}
 
       <div className="canvas-body">
         <CanvasViewport
@@ -309,6 +519,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           activeLayerId={activeLayerId}
           redrawTick={redrawTick}
           preview={preview}
+          selection={selection}
+          onSelectionChange={setSelection}
+          overlayLayer={overlayLayer}
         />
         <aside className="layers-panel">
           <div className="section-head">
@@ -340,7 +553,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
               </button>
               <span className="truncate" style={{ flex: 1 }}>
                 {l.name}
-                {l.kind === "image" && <span className="meta"> · image</span>}
+                {l.kind === "image" && <span className="meta">{l.maskVersionId ? " · gen-fill" : " · image"}</span>}
               </span>
               <button
                 className="chip-x"
@@ -378,6 +591,29 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           )}
         </aside>
       </div>
+    </div>
+  );
+}
+
+/** Inline scene picker for promote-to-View (same shape as the Library's). */
+function ScenePickerRow(props: { projectId: string; onPick: (sceneId: string) => void; onClose: () => void }) {
+  const scenes = useQuery({
+    queryKey: ["scenes", props.projectId],
+    queryFn: () => storyClient.listScenes({ projectId: props.projectId }),
+  });
+  return (
+    <div className="genfill-bar">
+      <span className="meta">Add flattened canvas as a view of…</span>
+      {scenes.isLoading && <span className="meta">Loading…</span>}
+      {scenes.data?.scenes.length === 0 && <span className="meta">No scenes yet — create one on the Scenes page.</span>}
+      {scenes.data?.scenes.map((s) => (
+        <button key={s.id} className="btn secondary chip-add" onClick={() => props.onPick(s.id)}>
+          {s.name}
+        </button>
+      ))}
+      <button className="chip-x" onClick={props.onClose}>
+        ×
+      </button>
     </div>
   );
 }

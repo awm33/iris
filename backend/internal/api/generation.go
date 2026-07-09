@@ -102,7 +102,7 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 		TargetEntityID: j.TargetEntityId,
 		CostEstimate:   ep.Manifest.Pricing.Estimates[j.Profile] * float64(count),
 	}
-	if _, err := s.Store.CreateGenerationFanout(ctx, parent, count); err != nil {
+	if _, err := s.Store.CreateGenerationFanout(ctx, parent, count, ep.Manifest.Features.Seed); err != nil {
 		return nil, connectErr(err)
 	}
 	created, err := s.Store.GetGenJob(ctx, parent.ID)
@@ -112,27 +112,43 @@ func (s *GenerationServer) CreateJob(ctx context.Context, req *connect.Request[i
 	return connect.NewResponse(&irisv1.CreateJobResponse{Job: genJobPB(created)}), nil
 }
 
-// validateTarget checks a generation target: shot must exist AND belong to
-// the job's project (the artifact lands in the job's project; a cross-project
-// take would silently mutate another project's shot).
+// validateTarget checks a generation target: it must exist AND belong to the
+// job's project (the artifact lands in the job's project; a cross-project
+// target would silently mutate another project's entity). Shots get Takes at
+// landing; canvas targets land library-only — the canvas references the
+// versions via layer ops, so the target is provenance + UI routing.
 func (s *GenerationServer) validateTarget(ctx context.Context, targetEntityID, projectID string) error {
 	if targetEntityID == "" {
 		return nil
 	}
-	if !strings.HasPrefix(targetEntityID, "sht_") {
+	switch {
+	case strings.HasPrefix(targetEntityID, "sht_"):
+		shotProject, err := s.Store.ShotProjectID(ctx, targetEntityID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return connect.NewError(connect.CodeInvalidArgument, errors.New("target shot not found"))
+			}
+			return connectErr(err)
+		}
+		if shotProject != projectID {
+			return connect.NewError(connect.CodeInvalidArgument, errors.New("target shot belongs to a different project"))
+		}
+		return nil
+	case strings.HasPrefix(targetEntityID, "cnv_"):
+		c, err := s.Store.GetCanvas(ctx, targetEntityID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return connect.NewError(connect.CodeInvalidArgument, errors.New("target canvas not found"))
+			}
+			return connectErr(err)
+		}
+		if c.ProjectID != projectID {
+			return connect.NewError(connect.CodeInvalidArgument, errors.New("target canvas belongs to a different project"))
+		}
+		return nil
+	default:
 		return connect.NewError(connect.CodeInvalidArgument, errors.New("unsupported target entity type"))
 	}
-	shotProject, err := s.Store.ShotProjectID(ctx, targetEntityID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return connect.NewError(connect.CodeInvalidArgument, errors.New("target shot not found"))
-		}
-		return connectErr(err)
-	}
-	if shotProject != projectID {
-		return connect.NewError(connect.CodeInvalidArgument, errors.New("target shot belongs to a different project"))
-	}
-	return nil
 }
 
 // toGenRequest converts the proto job into the stored request and its
@@ -190,8 +206,45 @@ func (s *GenerationServer) toGenRequest(j *irisv1.GenerationJob, count int) (*st
 			Kind: r.Kind, Role: r.Role, Weight: r.Weight,
 		})
 	}
-	// Conditioning payloads (frames/depth/mask) arrive with M3+ surfaces;
-	// the proto carries them but M2 validates only refs/output/params.
+	// Conditioning: gen-fill (M4) uses source_image + mask. The remaining
+	// spec keys (frames/depth/source_video) wire up with the surfaces that
+	// need them (M5+); the proto carries them but they are rejected here
+	// rather than silently dropped.
+	if c := j.Conditioning; c != nil {
+		if c.FirstFrame != nil || c.LastFrame != nil || len(c.Keyframes) > 0 ||
+			c.DepthSequence != nil || c.SourceVideo != nil {
+			return nil, nil, connect.NewError(connect.CodeUnimplemented,
+				errors.New("only source_image and mask conditioning are supported so far"))
+		}
+		if c.SourceImage != nil || c.Mask != nil {
+			genReq.Conditioning = &store.GenConditioning{}
+			infReq.Conditioning = &inference.Conditioning{}
+			if c.SourceImage != nil {
+				if c.SourceImage.AssetId == "" {
+					return nil, nil, connect.NewError(connect.CodeInvalidArgument, errors.New("conditioning.source_image missing asset"))
+				}
+				genReq.Conditioning.SourceImage = &store.GenRef{
+					AssetID: c.SourceImage.AssetId, VersionID: c.SourceImage.VersionId,
+				}
+				// URL filled at dispatch; validation only needs presence.
+				infReq.Conditioning.SourceImage = &inference.FrameRef{}
+			}
+			if c.Mask != nil {
+				if c.Mask.AssetId == "" {
+					return nil, nil, connect.NewError(connect.CodeInvalidArgument, errors.New("conditioning.mask missing asset"))
+				}
+				genReq.Conditioning.Mask = &store.GenRef{
+					AssetID: c.Mask.AssetId, VersionID: c.Mask.VersionId,
+				}
+				infReq.Conditioning.Mask = &inference.FrameRef{}
+			}
+		}
+	}
+	if j.Task == "inpaint" && (genReq.Conditioning == nil ||
+		genReq.Conditioning.SourceImage == nil || genReq.Conditioning.Mask == nil) {
+		return nil, nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("inpaint requires conditioning.source_image and conditioning.mask"))
+	}
 	return genReq, infReq, nil
 }
 
@@ -275,7 +328,13 @@ func (s *GenerationServer) RetryJob(ctx context.Context, req *connect.Request[ir
 		TargetEntityID: prev.TargetEntityID,
 		CostEstimate:   prev.CostEstimate,
 	}
-	if _, err := s.Store.CreateGenerationFanout(ctx, parent, count); err != nil {
+	// Same seed-resolution rule as CreateJob; an endpoint gone from the
+	// registry resolves conservatively (seeds stay random-at-endpoint).
+	resolveSeeds := false
+	if ep, ok := s.Registry.Get(prev.EndpointID); ok && ep.Manifest != nil {
+		resolveSeeds = ep.Manifest.Features.Seed
+	}
+	if _, err := s.Store.CreateGenerationFanout(ctx, parent, count, resolveSeeds); err != nil {
 		return nil, connectErr(err)
 	}
 	created, err := s.Store.GetGenJob(ctx, parent.ID)
@@ -349,6 +408,23 @@ func genJobPB(j *store.GenJob) *irisv1.GenerationJob {
 	}
 	if len(genReq.Params) > 0 {
 		pb.ParamsJson = string(genReq.Params)
+	}
+	// Echo the full recipe: a client must be able to reconstruct (and
+	// re-submit) a job from GetJob alone.
+	for _, r := range genReq.References {
+		pb.References = append(pb.References, &irisv1.Reference{
+			Kind: r.Kind, Role: r.Role, Weight: r.Weight,
+			Asset: &irisv1.AssetRef{AssetId: r.AssetID, VersionId: r.VersionID},
+		})
+	}
+	if c := genReq.Conditioning; c != nil {
+		pb.Conditioning = &irisv1.Conditioning{}
+		if c.SourceImage != nil {
+			pb.Conditioning.SourceImage = &irisv1.AssetRef{AssetId: c.SourceImage.AssetID, VersionId: c.SourceImage.VersionID}
+		}
+		if c.Mask != nil {
+			pb.Conditioning.Mask = &irisv1.AssetRef{AssetId: c.Mask.AssetID, VersionId: c.Mask.VersionID}
+		}
 	}
 	return pb
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"math/rand/v2"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -27,13 +28,14 @@ type GenJob struct {
 // GenRequest is the resolved request stored on each job row (asset ids, not
 // URLs — URLs are signed at dispatch time so they're never stale).
 type GenRequest struct {
-	Prompt         string          `json:"prompt"`
-	NegativePrompt string          `json:"negative_prompt,omitempty"`
-	Seed           int64           `json:"seed,omitempty"`
-	Count          int             `json:"count,omitempty"` // parent only
-	Output         json.RawMessage `json:"output,omitempty"`
-	References     []GenRef        `json:"references,omitempty"`
-	Params         json.RawMessage `json:"params,omitempty"`
+	Prompt         string           `json:"prompt"`
+	NegativePrompt string           `json:"negative_prompt,omitempty"`
+	Seed           int64            `json:"seed,omitempty"`
+	Count          int              `json:"count,omitempty"` // parent only
+	Output         json.RawMessage  `json:"output,omitempty"`
+	References     []GenRef         `json:"references,omitempty"`
+	Conditioning   *GenConditioning `json:"conditioning,omitempty"`
+	Params         json.RawMessage  `json:"params,omitempty"`
 }
 
 type GenRef struct {
@@ -44,10 +46,21 @@ type GenRef struct {
 	Weight    float64 `json:"weight,omitempty"`
 }
 
+// GenConditioning stores conditioning inputs as asset refs (ids, not URLs —
+// URLs are signed at dispatch). Gen-fill (M4) uses source_image + mask; the
+// remaining spec conditioning keys wire up with the surfaces that need them.
+type GenConditioning struct {
+	SourceImage *GenRef `json:"source_image,omitempty"`
+	Mask        *GenRef `json:"mask,omitempty"`
+}
+
 // CreateGenerationFanout inserts the parent job + count sub-jobs in one
 // transaction and NOTIFYs on commit. Sub-jobs get distinct seeds when the
 // request pins one (seed, seed+1, …) so takes differ deterministically.
-func (s *Store) CreateGenerationFanout(ctx context.Context, parent *GenJob, count int) (subIDs []string, err error) {
+// resolveRandomSeeds turns seed-0 ("random") into concrete per-sub-job seeds
+// — pass the endpoint's manifest.features.seed: inventing a seed for an
+// endpoint that rejects seeds would fail every random job at dispatch.
+func (s *Store) CreateGenerationFanout(ctx context.Context, parent *GenJob, count int, resolveRandomSeeds bool) (subIDs []string, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -73,6 +86,13 @@ func (s *Store) CreateGenerationFanout(ctx context.Context, parent *GenJob, coun
 		sub.Count = 0
 		if req.Seed != 0 {
 			sub.Seed = req.Seed + int64(i)
+		} else if resolveRandomSeeds {
+			// "Random" resolves to a CONCRETE seed here, not at the endpoint:
+			// every sub-job differs, the recipe records the real seed, and
+			// regenerate-from-this reproduces the exact take (spec: endpoints
+			// honor seeds deterministically). Seedless endpoints keep 0 — the
+			// recipe honestly records "random".
+			sub.Seed = randSeed()
 		}
 		subJSON, _ := json.Marshal(sub)
 		id := ids.New("job")
@@ -92,6 +112,13 @@ func (s *Store) CreateGenerationFanout(ctx context.Context, parent *GenJob, coun
 		return nil, err
 	}
 	return subIDs, tx.Commit(ctx)
+}
+
+// randSeed: non-zero (zero means "random" in the request vocabulary) and
+// within JS safe-integer range — seeds round-trip through the web UI's
+// recipe JSON, and 2^53+ would corrupt there.
+func randSeed() int64 {
+	return rand.Int64N(1<<53-2) + 1
 }
 
 const genJobCols = `id, workspace_id, project_id, endpoint_id,
@@ -117,13 +144,17 @@ func (s *Store) GetGenJob(ctx context.Context, id string) (*GenJob, error) {
 		return nil, wrapNotFound(err)
 	}
 	// Artifacts land as lineage edges; surface their version ids on the job.
+	// Ordered like ListGenJobs — candidate order must be stable across calls
+	// (index-based UIs) and consistent between list and detail.
 	rows, err := s.pool.Query(ctx, `
-		SELECT from_version_id FROM asset_links
-		WHERE to_entity_id = $1 AND role = 'generated_by'
-		UNION
-		SELECT l.from_version_id FROM asset_links l
-		JOIN generation_jobs sub ON sub.id = l.to_entity_id
-		WHERE sub.parent_job_id = $1 AND l.role = 'generated_by'`, id)
+		SELECT from_version_id FROM (
+			SELECT from_version_id, created_at FROM asset_links
+			WHERE to_entity_id = $1 AND role = 'generated_by'
+			UNION
+			SELECT l.from_version_id, l.created_at FROM asset_links l
+			JOIN generation_jobs sub ON sub.id = l.to_entity_id
+			WHERE sub.parent_job_id = $1 AND l.role = 'generated_by'
+		) u ORDER BY created_at, from_version_id`, id)
 	if err != nil {
 		return nil, err
 	}

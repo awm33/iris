@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
-import { type CanvasDoc, newOpId, type StrokeOp } from "@iris/doc-runtime";
+import { type CanvasDoc, type LayerState, newOpId, type StrokeOp } from "@iris/doc-runtime";
 import { composite, drawLiveSegment, drawStroke, type LayerRasterCache, type ViewTransform } from "./renderer";
+import { type Selection, traceSelection } from "./genfill";
 
-export type CanvasTool = "pan" | "brush" | "eraser";
+export type CanvasTool = "pan" | "brush" | "eraser" | "marquee" | "lasso";
 
 /**
  * The drawing surface: composites the doc under a pan/zoom transform and
@@ -24,6 +25,11 @@ export function CanvasViewport(props: {
   redrawTick: number;
   /** Uncommitted layer-prop preview (opacity slider mid-drag). */
   preview?: { layerId: string; opacity: number };
+  /** Active selection (doc coordinates) — drawn as marching ants. */
+  selection?: Selection;
+  onSelectionChange?: (sel: Selection | undefined) => void;
+  /** Ephemeral top layer (gen-fill candidate being previewed in place). */
+  overlayLayer?: LayerState;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -43,6 +49,12 @@ export function CanvasViewport(props: {
     size: number;
   } | null>(null);
   const panning = useRef<{ startX: number; startY: number; vtX: number; vtY: number } | null>(null);
+  // Gesture-owned selection points: accumulating through props.selection
+  // would read back a render-stale array and drop points between frames
+  // (state read-modify-write across the async render boundary).
+  const selecting = useRef<
+    { kind: "rect"; anchor: [number, number] } | { kind: "lasso"; points: [number, number][] } | null
+  >(null);
 
   // Strokes split at this many points: a single unbounded scribble would
   // blow the server's 64KB per-op cap and poison the save queue.
@@ -59,15 +71,35 @@ export function CanvasViewport(props: {
       const dpr = window.devicePixelRatio || 1;
       // Layer-prop preview: composite with the overridden opacity without
       // touching the doc (the op commits on slider release).
-      const state = p.preview
-        ? {
-            layers: p.doc.state.layers.map((l) =>
-              l.id === p.preview!.layerId ? { ...l, opacity: p.preview!.opacity } : l,
-            ),
-          }
-        : p.doc.state;
-      composite(canvas, state, p.cache, vtRef.current, p.docW, p.docH, dpr);
+      let layers = p.preview
+        ? p.doc.state.layers.map((l) =>
+            l.id === p.preview!.layerId ? { ...l, opacity: p.preview!.opacity } : l,
+          )
+        : p.doc.state.layers;
+      // Gen-fill candidate preview: an ephemeral masked layer on top.
+      if (p.overlayLayer) layers = [...layers, p.overlayLayer];
+      composite(canvas, { layers }, p.cache, vtRef.current, p.docW, p.docH, dpr);
+      drawSelectionOverlay(canvas, dpr);
     });
+  };
+
+  /** Marching-ants outline over the composite (two-pass dash for contrast). */
+  const drawSelectionOverlay = (canvas: HTMLCanvasElement, dpr: number) => {
+    const sel = propsRef.current.selection;
+    if (!sel) return;
+    const vt = vtRef.current;
+    const ctx = canvas.getContext("2d")!;
+    ctx.save();
+    ctx.setTransform(vt.scale * dpr, 0, 0, vt.scale * dpr, vt.x * dpr, vt.y * dpr);
+    traceSelection(ctx, sel);
+    ctx.lineWidth = 1.5 / vt.scale;
+    ctx.strokeStyle = "rgba(0,0,0,0.85)";
+    ctx.setLineDash([6 / vt.scale, 6 / vt.scale]);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.95)";
+    ctx.lineDashOffset = 6 / vt.scale;
+    ctx.stroke();
+    ctx.restore();
   };
   const requestDrawRef = useRef(requestDraw);
   requestDrawRef.current = requestDraw;
@@ -103,7 +135,7 @@ export function CanvasViewport(props: {
   useEffect(() => props.doc.subscribe(() => requestDrawRef.current()), [props.doc]);
   useEffect(() => {
     requestDrawRef.current();
-  }, [props.redrawTick, props.preview]);
+  }, [props.redrawTick, props.preview, props.selection, props.overlayLayer]);
 
   // Wheel zoom must preventDefault → non-passive listener.
   useEffect(() => {
@@ -147,6 +179,18 @@ export function CanvasViewport(props: {
       return;
     }
     if (e.button !== 0) return;
+    if (props.tool === "marquee" || props.tool === "lasso") {
+      const pt = toDoc(e);
+      capture(e);
+      if (props.tool === "marquee") {
+        selecting.current = { kind: "rect", anchor: pt };
+        propsRef.current.onSelectionChange?.({ kind: "rect", x: pt[0], y: pt[1], w: 0, h: 0 });
+      } else {
+        selecting.current = { kind: "lasso", points: [pt] };
+        propsRef.current.onSelectionChange?.({ kind: "lasso", points: [pt] });
+      }
+      return;
+    }
     const p = propsRef.current;
     const layer = p.doc.state.layers.find((l) => l.id === p.activeLayerId);
     if (!layer || layer.kind !== "paint" || !layer.visible) return;
@@ -230,6 +274,29 @@ export function CanvasViewport(props: {
       requestDraw();
       return;
     }
+    if (selecting.current) {
+      const p = propsRef.current;
+      const pt = toDoc(e);
+      if (selecting.current.kind === "rect") {
+        const [ax, ay] = selecting.current.anchor;
+        p.onSelectionChange?.({
+          kind: "rect",
+          x: Math.min(ax, pt[0]),
+          y: Math.min(ay, pt[1]),
+          w: Math.abs(pt[0] - ax),
+          h: Math.abs(pt[1] - ay),
+        });
+      } else {
+        const pts = selecting.current.points;
+        const last = pts[pts.length - 1];
+        if (Math.hypot(pt[0] - last[0], pt[1] - last[1]) >= 2) {
+          pts.push(pt);
+          p.onSelectionChange?.({ kind: "lasso", points: [...pts] });
+        }
+      }
+      requestDraw();
+      return;
+    }
     const s = stroke.current;
     if (!s) return;
     if (e.buttons === 0) {
@@ -253,10 +320,21 @@ export function CanvasViewport(props: {
 
   const onPointerUp = () => {
     panning.current = null;
+    if (selecting.current) {
+      selecting.current = null;
+      const p = propsRef.current;
+      const sel = p.selection;
+      // Degenerate selections (a stray click) clear instead of lingering as
+      // an invisible 0-area target.
+      if (sel?.kind === "rect" && (sel.w < 3 || sel.h < 3)) p.onSelectionChange?.(undefined);
+      if (sel?.kind === "lasso" && sel.points.length < 3) p.onSelectionChange?.(undefined);
+      requestDraw();
+      return;
+    }
     finishStroke();
   };
 
-  const cursor = props.tool === "pan" ? "grab" : "crosshair";
+  const cursor = props.tool === "pan" ? "grab" : "crosshair"; // marquee/lasso/brush all aim
   return (
     <div ref={containerRef} className="canvas-viewport">
       <canvas
