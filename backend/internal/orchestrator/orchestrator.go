@@ -386,9 +386,13 @@ func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef, wan
 
 // resolveFrameURL resolves a conditioning FRAME ref: an image version is
 // used as-is; a VIDEO version means "its last frame" — the prep artifact
-// extracted for exactly this carry (HLD W3). Prep-not-finished is a
-// ValidationError (invalid_input park): retrying won't run prep, and the
-// message tells the user what to wait for.
+// extracted for exactly this carry (HLD W3). Prep-not-finished is a PLAIN
+// error (transient, retried): prep is auto-chained from probe for every
+// video version, so the key appears on its own — the flagship flow is
+// "generate shot N, immediately carry into N+1", and a user faster than
+// prep must not park the job.
+// TODO(workspace-scoping): like resolveRefURL, this presigns any version id
+// with no ownership check — must be scoped before multi-workspace lands.
 func (o *Orchestrator) resolveFrameURL(ctx context.Context, ref *store.GenRef) (string, error) {
 	versionID := ref.VersionID
 	if versionID == "" {
@@ -412,8 +416,8 @@ func (o *Orchestrator) resolveFrameURL(ctx context.Context, ref *store.GenRef) (
 	if strings.HasPrefix(info.ContentType, "video/") {
 		key := info.DerivedKeys["last_frame"]
 		if key == "" {
-			return "", &inference.ValidationError{Msg: fmt.Sprintf(
-				"first_frame source %s is a video whose last frame isn't extracted yet — media prep may still be running", versionID)}
+			return "", fmt.Errorf(
+				"first_frame source %s: last frame not extracted yet (media prep in flight — transient)", versionID)
 		}
 		url, err := o.Blob.PresignGetExternal(ctx, key, "image/png", refGetTTL)
 		if err != nil {
