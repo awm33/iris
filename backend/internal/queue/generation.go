@@ -30,6 +30,7 @@ type GenerationJob struct {
 	Task           string
 	Profile        string
 	Request        []byte // resolved request JSON (prompt, refs as asset ids, output, params, seed)
+	DependsOnJobID string // set = the dispatch-time carry source (chain regeneration)
 	Attempts       int
 }
 
@@ -53,7 +54,7 @@ func ClaimGenerationJobs(ctx context.Context, pool *pgxpool.Pool, worker string,
 		FROM next WHERE j.id = next.id
 		RETURNING j.id, j.workspace_id, j.project_id, j.endpoint_id,
 		          COALESCE(j.parent_job_id, ''), COALESCE(j.target_entity_id, ''),
-		          j.task, j.profile, j.request, j.attempts`,
+		          j.task, j.profile, j.request, COALESCE(j.depends_on_job_id, ''), j.attempts`,
 		limit, worker)
 	if err != nil {
 		return nil, err
@@ -63,7 +64,8 @@ func ClaimGenerationJobs(ctx context.Context, pool *pgxpool.Pool, worker string,
 	for rows.Next() {
 		j := &GenerationJob{}
 		if err := rows.Scan(&j.ID, &j.WorkspaceID, &j.ProjectID, &j.EndpointID,
-			&j.ParentJobID, &j.TargetEntityID, &j.Task, &j.Profile, &j.Request, &j.Attempts); err != nil {
+			&j.ParentJobID, &j.TargetEntityID, &j.Task, &j.Profile, &j.Request,
+			&j.DependsOnJobID, &j.Attempts); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, j)
