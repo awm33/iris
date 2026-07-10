@@ -7,6 +7,8 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +39,10 @@ type Orchestrator struct {
 	Registry *registry.Registry
 	DSN      string
 	Name     string
+	// CacheEnabled turns on the generation response cache (IRIS_GEN_CACHE):
+	// identical resolved requests reuse landed artifacts — a dev/test
+	// helper that keeps repeated runs off the bill. Never on by default.
+	CacheEnabled bool
 }
 
 const (
@@ -212,6 +218,13 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 		return &inference.ValidationError{Msg: "corrupt job request: " + err.Error()}
 	}
 
+	if o.CacheEnabled && req.Seed != 0 {
+		// Pin floating refs before signing: one resolution point for both
+		// the generation inputs and the cache key (see pinFloatingRefs).
+		if perr := o.pinFloatingRefs(ctx, &req); perr != nil {
+			slog.Warn("ref pinning failed; dispatching uncached", "job", job.ID, "err", perr)
+		}
+	}
 	infReq, artifactKey, err := o.buildInferenceRequest(ctx, job, ep, &req)
 	if err != nil {
 		return err
@@ -227,6 +240,29 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 	// dispatching without the lease would double-generate on the endpoint.
 	if err := queue.HeartbeatGenerationJob(ctx, o.Pool, job.ID, o.Name, "dispatched", 0); err != nil {
 		return err // ErrNotOwner surfaces to execute()
+	}
+
+	// Generation cache (dev/test): identical RESOLVED requests reuse the
+	// landed artifact — repeated test runs stay off the bill. Keyed after
+	// carry resolution so chains cache correctly; never keyed on presigned
+	// URLs (they differ every dispatch). Seed 0 reaches dispatch only on
+	// seedless endpoints (fan-out materializes seeds everywhere else) —
+	// caching there would collapse fan-out variety into clones of the
+	// first landing, so non-deterministic requests are never cached.
+	var cacheKey string
+	if o.CacheEnabled && req.Seed != 0 {
+		if key, kerr := genCacheHash(ep, job, &req); kerr == nil {
+			cacheKey = key
+			if hit, herr := o.Store.GetGenCache(ctx, key); herr == nil && hit != nil &&
+				o.Blob.ContentExists(ctx, hit.SHA256) {
+				slog.Info("generation cache hit — landing cached artifact", "job", job.ID)
+				return o.landVersion(ctx, job, ep, &req, hit.SHA256, hit.SizeBytes, 0)
+			} else if herr != nil {
+				slog.Warn("generation cache lookup failed; dispatching uncached", "job", job.ID, "err", herr)
+			}
+		} else {
+			slog.Warn("generation cache key failed; dispatching uncached", "job", job.ID, "err", kerr)
+		}
 	}
 
 	client := inference.New(ep.BaseURL, ep.Token)
@@ -279,7 +315,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 		return errCanceled
 	}
 
-	return o.landArtifact(ctx, job, ep, &req, status, artifactKey)
+	return o.landArtifact(ctx, job, ep, &req, status, artifactKey, cacheKey)
 }
 
 // buildInferenceRequest resolves library references to signed URLs and
@@ -409,6 +445,102 @@ func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef, wan
 	return url, nil
 }
 
+// pinFloatingRefs resolves head-floating references (and conditioning refs)
+// to concrete version ids IN the request, BEFORE URL signing — one
+// resolution point, so the cache key and the actual generation inputs can
+// never disagree (a concurrent head move between two resolutions would
+// otherwise poison the key). In-memory only unless the carry write-back
+// re-marshals the request. Cache mode only — behavior elsewhere unchanged.
+func (o *Orchestrator) pinFloatingRefs(ctx context.Context, req *store.GenRequest) error {
+	pin := func(r *store.GenRef) error {
+		if r == nil || r.VersionID != "" {
+			return nil
+		}
+		a, _, err := o.Store.GetAsset(ctx, r.AssetID)
+		if err != nil {
+			return err
+		}
+		r.VersionID = a.HeadVersionID
+		return nil
+	}
+	for i := range req.References {
+		if err := pin(&req.References[i]); err != nil {
+			return err
+		}
+	}
+	if c := req.Conditioning; c != nil {
+		for _, r := range []*store.GenRef{c.FirstFrame, c.SourceImage, c.Mask} {
+			if err := pin(r); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// TODO(workspace-scoping): the cache is global — key + table need a
+// workspace dimension before multi-tenancy (same pass as resolveRefURL's
+// marker; cross-tenant content reuse is otherwise automatic).
+// genCacheHash hashes the SEMANTIC identity of a fully-RESOLVED request:
+// model identity (manifest id@version, not the env-specific endpoint id),
+// task, profile, prompt, seed, output, params, and reference/conditioning
+// VERSION ids (pinFloatingRefs ran first; presigned URLs never participate
+// — they change per dispatch). Pure over the request: no queries, no
+// re-resolution race. Fan-out sub-jobs key separately via resolved seeds;
+// seedless (seed 0) requests are never cached at all.
+func genCacheHash(ep *registry.Endpoint, job *queue.GenerationJob, req *store.GenRequest) (string, error) {
+	type refID struct {
+		Kind, Role, Version string
+		Weight              float64
+	}
+	key := struct {
+		Model      string          `json:"model"`
+		Task       string          `json:"task"`
+		Profile    string          `json:"profile"`
+		Prompt     string          `json:"prompt"`
+		Negative   string          `json:"negative"`
+		Seed       int64           `json:"seed"`
+		Output     json.RawMessage `json:"output"`
+		Params     json.RawMessage `json:"params"`
+		Refs       []refID         `json:"refs"`
+		FirstFrame string          `json:"first_frame"`
+		SourceImg  string          `json:"source_image"`
+		Mask       string          `json:"mask"`
+	}{
+		Model:    ep.Manifest.ID + "@" + ep.Manifest.Version,
+		Task:     job.Task,
+		Profile:  job.Profile,
+		Prompt:   req.Prompt,
+		Negative: req.NegativePrompt,
+		Seed:     req.Seed,
+		Output:   req.Output,
+		Params:   req.Params,
+	}
+	for i := range req.References {
+		key.Refs = append(key.Refs, refID{
+			Kind: req.References[i].Kind, Role: req.References[i].Role,
+			Version: req.References[i].VersionID, Weight: req.References[i].Weight,
+		})
+	}
+	if c := req.Conditioning; c != nil {
+		if c.FirstFrame != nil {
+			key.FirstFrame = c.FirstFrame.VersionID
+		}
+		if c.SourceImage != nil {
+			key.SourceImg = c.SourceImage.VersionID
+		}
+		if c.Mask != nil {
+			key.Mask = c.Mask.VersionID
+		}
+	}
+	b, err := json.Marshal(key)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // resolveFrameURL resolves a conditioning FRAME ref: an image version is
 // used as-is; a VIDEO version means "its last frame" — the prep artifact
 // extracted for exactly this carry (HLD W3). Prep-not-finished is a PLAIN
@@ -474,7 +606,7 @@ var hexSHA = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 // SignDownload), dimensions/duration/fps are left null for the probe worker
 // to measure from the actual bytes, and the reported sha256 must be a
 // well-formed hash matching what actually arrived.
-func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJob, ep *registry.Endpoint, req *store.GenRequest, status *inference.JobStatus, artifactKey string) error {
+func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJob, ep *registry.Endpoint, req *store.GenRequest, status *inference.JobStatus, artifactKey, cacheKey string) error {
 	if len(status.Artifacts) == 0 || !status.Artifacts[0].Uploaded {
 		return fmt.Errorf("endpoint reported complete without an uploaded artifact")
 	}
@@ -493,8 +625,23 @@ func (o *Orchestrator) landArtifact(ctx context.Context, job *queue.GenerationJo
 		return fmt.Errorf("artifact sha256 mismatch: endpoint reported %s, received %s", art.SHA256, hash)
 	}
 
-	gpuSeconds := clampGPUSeconds(status)
+	if err := o.landVersion(ctx, job, ep, req, hash, size, clampGPUSeconds(status)); err != nil {
+		return err
+	}
+	if cacheKey != "" {
+		// Recorded only after a successful landing; non-fatal — the cache
+		// is an optimization, never a landing gate.
+		if cerr := o.Store.PutGenCache(ctx, cacheKey, hash, expectedContentType(ep.Manifest.Modality), size); cerr != nil {
+			slog.Warn("generation cache record failed", "job", job.ID, "err", cerr)
+		}
+	}
+	return nil
+}
 
+// landVersion is the landing transaction with the artifact identity already
+// established — shared by the normal promote path and generation-cache hits
+// (which skip promotion AND report zero GPU seconds: nothing burned).
+func (o *Orchestrator) landVersion(ctx context.Context, job *queue.GenerationJob, ep *registry.Endpoint, req *store.GenRequest, hash string, size int64, gpuSeconds float64) error {
 	tx, err := o.Pool.Begin(ctx)
 	if err != nil {
 		return err

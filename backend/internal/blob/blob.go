@@ -150,6 +150,13 @@ func (s *Store) PutObject(ctx context.Context, key, contentType string, r io.Rea
 
 func ContentKey(sha string) string { return "sha256/" + sha }
 
+// ContentExists: is the content-addressed object still present? Cache hits
+// must re-verify — a future blob GC could orphan cache rows.
+func (s *Store) ContentExists(ctx context.Context, sha string) bool {
+	_, err := s.client.StatObject(ctx, s.cfg.Bucket, ContentKey(sha), minio.StatObjectOptions{})
+	return err == nil
+}
+
 func (s *Store) public(u *url.URL) string {
 	if s.cfg.PublicEndpoint != "" {
 		u.Host = s.cfg.PublicEndpoint
