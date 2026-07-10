@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useEscape } from "./AssetThumb";
 
 // Keyboard shortcut reference (?): the vocabulary accumulated across
@@ -50,8 +51,16 @@ const GROUPS: [string, [string, string][]][] = [
 
 export function ShortcutHelp(props: { onClose: () => void }) {
   useEscape(props.onClose);
+  useEffect(() => {
+    // Hotkey guards stop the timeline's handlers, but a button focused
+    // BEFORE ? opened would still receive Space/Enter activation through
+    // the overlay (e.g. a just-clicked × would delete a clip). Drop focus.
+    (document.activeElement as HTMLElement | null)?.blur?.();
+  }, []);
   return (
-    <div className="overlay" onClick={props.onClose}>
+    // help-overlay: page-level hotkey surfaces (timeline, clip player)
+    // check for it so Delete/B/Space read the shortcut list, not the doc.
+    <div className="overlay help-overlay" onClick={props.onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={(e) => e.stopPropagation()}>
         <div className="panel-header">
           <h3>Keyboard shortcuts</h3>

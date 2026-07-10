@@ -170,6 +170,11 @@ export function TimelinePage(props: {
       // invisibly behind the overlay — and Escape belongs to the modal) or
       // mid-drag (the pending gesture would commit from a stale orig).
       if (pickingRef.current || dragRef.current) return;
+      // App-shell overlays (⌘K palette, ? help) sit outside this page's
+      // component tree — Space/B/Delete must read them, not the doc.
+      // Deliberately NOT a blanket .overlay check: page-owned modals
+      // (ClipPlayer, pickers) already gate via pickingRef.
+      if (document.querySelector(".palette-overlay, .help-overlay")) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? session?.doc.redo() : session?.doc.undo();

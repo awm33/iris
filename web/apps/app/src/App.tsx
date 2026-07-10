@@ -25,6 +25,13 @@ import { useEvents } from "./useEvents";
 
 type View = "projects" | "story" | "scenes" | "characters" | "canvases" | "timelines" | "library" | "jobs";
 
+// localStorage can throw (Safari private mode, storage-disabled embeds) —
+// a rail-width nicety must never crash the shell at boot.
+const railPref = {
+  get: () => { try { return localStorage.getItem("iris.rail"); } catch { return null; } },
+  set: (v: string) => { try { localStorage.setItem("iris.rail", v); } catch { /* session-only */ } },
+};
+
 export function App() {
   useEvents();
   const qc = useQueryClient();
@@ -38,7 +45,7 @@ export function App() {
     { shotId: string; label: string; prefill?: GeneratePrefill; nonce: number } | true | false
   >(false);
   const generateNonce = useRef(0);
-  const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem("iris.rail") === "min");
+  const [railCollapsed, setRailCollapsed] = useState(() => railPref.get() === "min");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
 
@@ -47,13 +54,15 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      if ((e.metaKey || e.ctrlKey) && !e.repeat && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((v) => !v);
         return;
       }
       if (t.isContentEditable || t.closest?.("input,textarea,select,[contenteditable]")) return;
-      if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) setHelpOpen(true);
+      // No alt guard: on many layouts "?" itself needs a modifier, and
+      // e.key already tells us the layout produced a question mark.
+      if (e.key === "?" && !e.metaKey && !e.ctrlKey) setHelpOpen(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -61,9 +70,22 @@ export function App() {
 
   const toggleRail = () => {
     setRailCollapsed((v) => {
-      localStorage.setItem("iris.rail", v ? "" : "min");
+      railPref.set(v ? "" : "min");
       return !v;
     });
+  };
+
+  // EVERY navigation — rail, palette command, palette entity jump — goes
+  // through here. Nav returns Scenes/Canvases/Timelines to their lists and
+  // closes the generate panel: a shot-targeted panel surviving navigation
+  // would submit into a shot the user is no longer looking at. Jumps that
+  // want a detail view set the id AFTER goTo.
+  const goTo = (v: View) => {
+    setView(v);
+    setSceneId(undefined);
+    setCanvasId(undefined);
+    setTimelineId(undefined);
+    setGenerating(false);
   };
 
   const jobs = useQuery({
@@ -94,16 +116,7 @@ export function App() {
       className={view === v ? "active" : ""}
       disabled={!project}
       title={project ? label : "Open a project first"}
-      onClick={() => {
-        setView(v);
-        // Nav always returns Scenes/Canvases to their lists, and closes the
-        // generate panel: a shot-targeted panel surviving navigation would
-        // submit into a shot the user is no longer looking at.
-        setSceneId(undefined);
-        setCanvasId(undefined);
-        setTimelineId(undefined);
-        setGenerating(false);
-      }}
+      onClick={() => goTo(v)}
     >
       {railCollapsed ? glyphs[v] ?? label[0] : label}
     </button>
@@ -115,8 +128,12 @@ export function App() {
         <div className="logo" title={project ? `Iris · ${project.name}` : "Iris"}>
           ⬡{!railCollapsed && <> Iris{project ? ` · ${project.name}` : ""}</>}
         </div>
-        <button className={view === "projects" ? "active" : ""} onClick={() => setView("projects")}>
-          Projects
+        <button
+          className={view === "projects" ? "active" : ""}
+          title="Projects"
+          onClick={() => goTo("projects")}
+        >
+          {railCollapsed ? "⌂" : "Projects"}
         </button>
         {navButton("story", "Story")}
         {navButton("scenes", "Scenes")}
@@ -243,23 +260,23 @@ export function App() {
           commands={([
             ...(project
               ? ([
-                  { label: "Go to Story board", hint: "nav", run: () => { setView("story"); setSceneId(undefined); setCanvasId(undefined); setTimelineId(undefined); } },
-                  { label: "Go to Scenes", hint: "nav", run: () => { setView("scenes"); setSceneId(undefined); } },
-                  { label: "Go to Characters", hint: "nav", run: () => setView("characters") },
-                  { label: "Go to Canvases", hint: "nav", run: () => { setView("canvases"); setCanvasId(undefined); } },
-                  { label: "Go to Timelines", hint: "nav", run: () => { setView("timelines"); setTimelineId(undefined); } },
-                  { label: "Go to Library", hint: "nav", run: () => setView("library") },
-                  { label: "Go to Jobs", hint: "nav", run: () => setView("jobs") },
-                  { label: "Generate (library)", hint: "action", run: () => setGenerating(true) },
+                  { label: "Go to Story board", hint: "nav", run: () => goTo("story") },
+                  { label: "Go to Scenes", hint: "nav", run: () => goTo("scenes") },
+                  { label: "Go to Characters", hint: "nav", run: () => goTo("characters") },
+                  { label: "Go to Canvases", hint: "nav", run: () => goTo("canvases") },
+                  { label: "Go to Timelines", hint: "nav", run: () => goTo("timelines") },
+                  { label: "Go to Library", hint: "nav", run: () => goTo("library") },
+                  { label: "Go to Jobs", hint: "nav", run: () => goTo("jobs") },
+                  { label: "Generate (library)", hint: "action", run: () => { goTo("library"); setGenerating(true); } },
                 ] satisfies PaletteCommand[])
               : []),
-            { label: "Go to Projects", hint: "nav", run: () => setView("projects") },
+            { label: "Go to Projects", hint: "nav", run: () => goTo("projects") },
             { label: railCollapsed ? "Expand rail" : "Collapse rail", hint: "action", run: toggleRail },
             { label: "Keyboard shortcuts", hint: "help", run: () => setHelpOpen(true) },
           ] as PaletteCommand[])}
-          onOpenScene={(id) => { setView("scenes"); setSceneId(id); }}
-          onOpenCanvas={(id) => { setView("canvases"); setCanvasId(id); }}
-          onOpenTimeline={(id) => { setView("timelines"); setTimelineId(id); }}
+          onOpenScene={(id) => { goTo("scenes"); setSceneId(id); }}
+          onOpenCanvas={(id) => { goTo("canvases"); setCanvasId(id); }}
+          onOpenTimeline={(id) => { goTo("timelines"); setTimelineId(id); }}
           onClose={() => setPaletteOpen(false)}
         />
       )}

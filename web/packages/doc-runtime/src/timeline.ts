@@ -325,6 +325,22 @@ export class TimelineDoc {
     if (!target) return;
     this.commit({ op_id: newOpId(), type: "undo", target });
   }
+
+  /** Undo every ACTIVE op after the op at log index `index` — the history
+   * panel's "revert". Implemented as repeated undo() so activity comes
+   * from the reducer's own activeOps (an undone-then-redone op counts as
+   * active) and every step lands on redoTargets: ⇧⌘Z walks the whole
+   * revert back. */
+  undoTo(index: number) {
+    for (;;) {
+      const active = activeOps(this.ops as unknown as CanvasOp[]) as unknown as TimelineOp[];
+      const last = active[active.length - 1];
+      if (!last) return;
+      const i = this.ops.findIndex((o) => o.op_id === last.op_id);
+      if (i <= index) return;
+      this.undo();
+    }
+  }
 }
 
 

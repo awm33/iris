@@ -266,3 +266,36 @@ describe("rippleOps", () => {
     ]);
   });
 });
+
+describe("undoTo (history revert)", () => {
+  const base: TimelineOp[] = [
+    { op_id: "t1", type: "add_track", track: { id: "v1", kind: "video" } },
+    { op_id: "a", type: "add_clip", track_id: "v1", clip: { id: "x", name: "x", start: 0, duration: 2 } },
+    { op_id: "b", type: "move_clip", clip_id: "x", start: 5 },
+  ];
+
+  it("undoes every active op after the index, and redo walks it back", () => {
+    const doc = new TimelineDoc([...base]);
+    doc.undoTo(1);
+    expect(doc.state.tracks[0].clips[0].start).toBe(0);
+    expect(doc.canRedo).toBe(true);
+    doc.redo();
+    expect(doc.state.tracks[0].clips[0].start).toBe(5);
+  });
+
+  it("treats an undone-then-REDONE op as active (the reducer's semantics)", () => {
+    const doc = new TimelineDoc([...base]);
+    doc.undo();
+    doc.redo();
+    expect(doc.state.tracks[0].clips[0].start).toBe(5);
+    doc.undoTo(1);
+    expect(doc.state.tracks[0].clips[0].start).toBe(0);
+  });
+
+  it("no-ops when nothing active follows the index", () => {
+    const doc = new TimelineDoc([...base]);
+    const before = doc.ops.length;
+    doc.undoTo(doc.ops.length - 1);
+    expect(doc.ops.length).toBe(before);
+  });
+});
