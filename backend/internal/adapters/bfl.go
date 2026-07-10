@@ -33,6 +33,13 @@ import (
 //
 // Inputs are BASE64: our references/conditioning arrive as presigned URLs,
 // so CreateJob downloads them (size-capped) and inlines. Auth: x-key.
+//
+// LIVE-VERIFY before real keys (beyond field names): does submit-time
+// moderation exist (a 422 carrying a moderation reason must map to
+// safety_blocked, not invalid_input); does polling_url require x-key;
+// input_image_N naming + the >10-ref rejection shape; seed range vs their
+// schema; delivery Content-Type reliability; the Error status details
+// shape; the health-probe choice.
 type bfl struct {
 	baseURL string
 	token   string
@@ -60,7 +67,7 @@ func newBFL(baseURL, token string) *bfl {
 // FLUX documents ~20MP inputs; 32MB of PNG clears that with headroom, and
 // an oversize input errors loudly rather than truncating (custody rule,
 // input-side).
-const maxInlineInputBytes = 32 << 20
+var maxInlineInputBytes int64 = 32 << 20
 
 var bflManifest = json.RawMessage(`{
   "spec_version": "1.0",
@@ -84,8 +91,8 @@ var bflManifest = json.RawMessage(`{
     "properties": {
       "output_format": {
         "type": "string",
-        "enum": ["png", "jpeg"],
-        "description": "Artifact encoding (default png)"
+        "enum": ["png"],
+        "description": "Artifact encoding — png only until per-request artifact content-type plumbing exists (a jpeg would land stored/served as image/png)"
       }
     }
   },
@@ -132,7 +139,7 @@ func (b *bfl) inlineInput(ctx context.Context, url, what string) (string, error)
 		return "", &inference.JobError{Code: "transient", Retryable: true,
 			Message: fmt.Sprintf("bfl: read %s input: %v", what, err)}
 	}
-	if len(data) > maxInlineInputBytes {
+	if int64(len(data)) > maxInlineInputBytes {
 		return "", &inference.ValidationError{Msg: fmt.Sprintf("bfl: %s input exceeds %dMB", what, maxInlineInputBytes>>20)}
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
@@ -148,6 +155,14 @@ func (b *bfl) CreateJob(ctx context.Context, req *inference.CreateJobRequest) (*
 			outputFormat = p.OutputFormat
 		}
 	}
+
+	// The whole input-inlining phase gets ONE bounded budget: up to 12
+	// sequential downloads on a 120s client timeout could otherwise hold
+	// CreateJob ~22 minutes with no heartbeat — past the 5m lease, the
+	// reaper double-dispatches and real keys pay twice. 2m inlining +
+	// ≤120s submit keeps the attempt provably inside the lease.
+	inlineCtx, cancelInline := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancelInline()
 
 	var path string
 	body := map[string]any{
@@ -175,7 +190,7 @@ func (b *bfl) CreateJob(ctx context.Context, req *inference.CreateJobRequest) (*
 			if n > 10 {
 				return nil, &inference.ValidationError{Msg: "bfl: more than 10 image references"}
 			}
-			b64, err := b.inlineInput(ctx, ref.URL, fmt.Sprintf("reference %d", n))
+			b64, err := b.inlineInput(inlineCtx, ref.URL, fmt.Sprintf("reference %d", n))
 			if err != nil {
 				return nil, err
 			}
@@ -190,11 +205,11 @@ func (b *bfl) CreateJob(ctx context.Context, req *inference.CreateJobRequest) (*
 		if req.Conditioning == nil || req.Conditioning.SourceImage == nil || req.Conditioning.Mask == nil {
 			return nil, &inference.ValidationError{Msg: "bfl: inpaint requires source_image and mask"}
 		}
-		img, err := b.inlineInput(ctx, req.Conditioning.SourceImage.URL, "source_image")
+		img, err := b.inlineInput(inlineCtx, req.Conditioning.SourceImage.URL, "source_image")
 		if err != nil {
 			return nil, err
 		}
-		mask, err := b.inlineInput(ctx, req.Conditioning.Mask.URL, "mask")
+		mask, err := b.inlineInput(inlineCtx, req.Conditioning.Mask.URL, "mask")
 		if err != nil {
 			return nil, err
 		}
@@ -302,10 +317,26 @@ func (b *bfl) GetJob(ctx context.Context, id string) (*inference.JobStatus, erro
 		return nil, &inference.JobError{Code: "safety_blocked", Retryable: false,
 			Message: fmt.Sprintf("bfl moderation: %s", polled.Status)}
 	case "Error":
-		return nil, &inference.JobError{Code: "invalid_input", Retryable: false,
-			Message: fmt.Sprintf("bfl error: %s", strings.TrimSpace(string(polled.Details)))}
+		// BFL's generic catch-all: genuine input errors already surface as
+		// 422 at submit, so default the poll-time failure to TRANSIENT
+		// (attempt-bounded) and only classify on recognizable details —
+		// the seedance rule for unknown vendor failures.
+		d := strings.ToLower(strings.TrimSpace(string(polled.Details)))
+		switch {
+		case strings.Contains(d, "moderat"):
+			return nil, &inference.JobError{Code: "safety_blocked", Retryable: false,
+				Message: fmt.Sprintf("bfl moderation (Error details): %s", d)}
+		case strings.Contains(d, "invalid") || strings.Contains(d, "validation"):
+			return nil, &inference.JobError{Code: "invalid_input", Retryable: false,
+				Message: fmt.Sprintf("bfl error: %s", d)}
+		default:
+			return nil, &inference.JobError{Code: "transient", Retryable: true,
+				Message: fmt.Sprintf("bfl error: %s", d)}
+		}
 	case "Task not found":
-		return nil, &inference.JobError{Code: "invalid_input", Retryable: false,
+		// Mid-dispatch expiry: an attempt-bounded re-submit recovers, and
+		// this is the state PR 41's poll-re-attach expects to encounter.
+		return nil, &inference.JobError{Code: "transient", Retryable: true,
 			Message: "bfl: task expired or unknown at the provider"}
 	case "Ready":
 		// Fall through to custody below.
@@ -360,7 +391,13 @@ func (b *bfl) bridgeArtifact(ctx context.Context, url string, upload *inference.
 		return nil, fmt.Errorf("bfl result exceeds %dMB cap", maxArtifactBytes>>20)
 	}
 	contentType := res.Header.Get("Content-Type")
-	if contentType == "" || !strings.HasPrefix(contentType, "image/") {
+	if contentType != "" && !strings.HasPrefix(contentType, "image/") {
+		// A 200 with a non-image body (CDN error page, JSON interstitial)
+		// must not land as a "verified" image asset that only fails at
+		// probe/render — the elevenlabs rule, image edition.
+		return nil, fmt.Errorf("bfl delivery returned %q, want image/*", contentType)
+	}
+	if contentType == "" {
 		contentType = "image/png"
 	}
 

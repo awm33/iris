@@ -86,18 +86,39 @@ func (s *Server) respondCreated(w http.ResponseWriter, r *http.Request, id strin
 	})
 }
 
+// t2iField matches exactly the recorded request surface: a misspelled or
+// invented adapter field must 422 here, or the mock's shape-lock is
+// theater (review PR40-L2).
+func t2iFieldOK(k string) bool {
+	switch k {
+	case "prompt", "seed", "width", "height", "output_format", "input_image":
+		return true
+	}
+	if n, ok := strings.CutPrefix(k, "input_image_"); ok {
+		i := 0
+		_, err := fmt.Sscanf(n, "%d", &i)
+		return err == nil && i >= 2 && i <= 10
+	}
+	return false
+}
+
 func (s *Server) submitT2I(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Prompt string          `json:"prompt"`
-		Seed   int64           `json:"seed"`
-		Width  int             `json:"width"`
-		Height int             `json:"height"`
-		Extra  json.RawMessage `json:"-"`
+		Prompt string `json:"prompt"`
+		Seed   int64  `json:"seed"`
+		Width  int    `json:"width"`
+		Height int    `json:"height"`
 	}
 	raw := map[string]json.RawMessage{}
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		http.Error(w, `{"detail":"bad json"}`, http.StatusBadRequest)
 		return
+	}
+	for k := range raw {
+		if !t2iFieldOK(k) {
+			http.Error(w, fmt.Sprintf(`{"detail":"unknown field %q"}`, k), http.StatusUnprocessableEntity)
+			return
+		}
 	}
 	get := func(k string, v any) { _ = json.Unmarshal(raw[k], v) }
 	get("prompt", &body.Prompt)
@@ -118,7 +139,7 @@ func (s *Server) submitT2I(w http.ResponseWriter, r *http.Request) {
 	// References tint the output so multi-ref plumbing is visible.
 	refs := 0
 	for k := range raw {
-		if strings.HasPrefix(k, "input_image") {
+		if k == "input_image" || strings.HasPrefix(k, "input_image_") {
 			refs++
 		}
 	}
@@ -132,13 +153,16 @@ func (s *Server) submitT2I(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) submitFill(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Image  string `json:"image"`
-		Mask   string `json:"mask"`
-		Prompt string `json:"prompt"`
-		Seed   int64  `json:"seed"`
+		Image        string `json:"image"`
+		Mask         string `json:"mask"`
+		Prompt       string `json:"prompt"`
+		Seed         int64  `json:"seed"`
+		OutputFormat string `json:"output_format"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"detail":"bad json"}`, http.StatusBadRequest)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields() // shape-lock: invented fields must 422
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, `{"detail":"bad json or unknown field"}`, http.StatusUnprocessableEntity)
 		return
 	}
 	src, err1 := decodePNGb64(body.Image)

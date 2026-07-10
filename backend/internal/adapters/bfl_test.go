@@ -256,13 +256,87 @@ func TestBFLAuthFailure(t *testing.T) {
 	}
 }
 
-// base64 sanity: the adapter inlines inputs; the mock decodes them — this
-// pair test would catch an encoding mismatch.
-func TestBFLInlineRoundtrip(t *testing.T) {
+// inlineInput drives the real download-and-encode path: bytes must survive
+// the roundtrip exactly, and an oversize input must error loudly (never
+// truncate — custody rule, input side).
+func TestBFLInlineInput(t *testing.T) {
 	data := pngBytes(t, 4, 4, color.RGBA{1, 2, 3, 255})
-	enc := base64.StdEncoding.EncodeToString(data)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+	a := newBFL("http://unused", "k")
+	enc, err := a.inlineInput(context.Background(), srv.URL+"/in.png", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	dec, err := base64.StdEncoding.DecodeString(enc)
 	if err != nil || !bytes.Equal(dec, data) {
-		t.Fatal("b64 roundtrip broken")
+		t.Fatal("inlined bytes differ from source")
+	}
+
+	old := maxInlineInputBytes
+	maxInlineInputBytes = 8
+	defer func() { maxInlineInputBytes = old }()
+	_, err = a.inlineInput(context.Background(), srv.URL+"/in.png", "test")
+	var ve *inference.ValidationError
+	if !asValidationError(err, &ve) {
+		t.Fatalf("oversize input must be a loud validation error, got %v", err)
+	}
+}
+
+// The 10-reference ceiling: the manifest caps upstream, so only a direct
+// call exercises the adapter's own guard — pin it anyway (defense in depth
+// against a manifest edit).
+func TestBFLRefLimit(t *testing.T) {
+	a, _, uploads := bflPair(t)
+	ref := putFixture(t, uploads, "/r.png", pngBytes(t, 4, 4, color.RGBA{9, 9, 9, 255}))
+	refs := make([]inference.Reference, 11)
+	for i := range refs {
+		refs[i] = inference.Reference{Kind: "image", Role: "object", URL: ref}
+	}
+	_, err := a.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "j-refs", Task: "t2i", Prompt: "x", References: refs,
+	})
+	var ve *inference.ValidationError
+	if !asValidationError(err, &ve) {
+		t.Fatalf("11 refs must be a validation error, got %v", err)
+	}
+	// 10 refs is fine and the mock (strict field allowlist) accepts them.
+	if _, err := a.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "j-refs-10", Task: "t2i", Prompt: "x", References: refs[:10],
+	}); err != nil {
+		t.Fatalf("10 refs must submit: %v", err)
+	}
+}
+
+// Poll-time Error defaults to transient (submit-time 422 carries the real
+// validation story); recognizable moderation details classify.
+func TestBFLPollErrorClassification(t *testing.T) {
+	details := `"input was moderated"`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/flux-2-pro"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "t", "polling_url": "http://" + r.Host + "/v1/poll/t"})
+		default:
+			_, _ = w.Write([]byte(`{"id":"t","status":"Error","details":` + details + `}`))
+		}
+	}))
+	defer srv.Close()
+	a := newBFL(srv.URL, "k")
+	if _, err := a.CreateJob(context.Background(), &inference.CreateJobRequest{ID: "j", Task: "t2i", Prompt: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := a.GetJob(context.Background(), "j")
+	var je *inference.JobError
+	if !asJobError(err, &je) || je.Code != "safety_blocked" {
+		t.Fatalf("moderation details must classify safety_blocked, got %v", err)
+	}
+	details = `"gpu fell over"`
+	a2 := newBFL(srv.URL, "k")
+	_, _ = a2.CreateJob(context.Background(), &inference.CreateJobRequest{ID: "j2", Task: "t2i", Prompt: "x"})
+	_, err = a2.GetJob(context.Background(), "j2")
+	if !asJobError(err, &je) || je.Code != "transient" || !je.Retryable {
+		t.Fatalf("unknown Error details must default transient, got %v", err)
 	}
 }
