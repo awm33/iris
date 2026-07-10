@@ -82,6 +82,42 @@ func TestElevenLabsEmptyTextIsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestElevenLabsOverloadMapsToOverloaded(t *testing.T) {
+	mock := httptest.NewServer(mockelevenlabs.New("k").Handler())
+	defer mock.Close()
+	el := newElevenLabs(mock.URL, "k")
+	// The mock's overload simulation header exists for exactly this test.
+	el.http.Transport = headerInjector{next: http.DefaultTransport}
+	_, err := el.CreateJob(context.Background(), &inference.CreateJobRequest{ID: "att-5", Task: "tts", Prompt: "x"})
+	jerr, ok := err.(*inference.JobError)
+	if !ok || jerr.Code != "overloaded" || !jerr.Retryable {
+		t.Fatalf("429 must map to retryable overloaded, got %v", err)
+	}
+}
+
+type headerInjector struct{ next http.RoundTripper }
+
+func (h headerInjector) RoundTrip(r *http.Request) (*http.Response, error) {
+	r.Header.Set("X-Mock-Overload", "1")
+	return h.next.RoundTrip(r)
+}
+
+func TestElevenLabsPutFailureIsTaxonomyTransient(t *testing.T) {
+	el, _, _ := elevenStack(t, "k")
+	badSink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer badSink.Close()
+	_, err := el.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "att-6", Task: "tts", Prompt: "x",
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: badSink.URL + "/up"}}},
+	})
+	jerr, ok := err.(*inference.JobError)
+	if !ok || jerr.Code != "transient" || !jerr.Retryable {
+		t.Fatalf("PUT failure after paid tts must be a taxonomy transient (never a url.Error chain), got %v", err)
+	}
+}
+
 func TestElevenLabsOversizeErrors(t *testing.T) {
 	old := maxArtifactBytes
 	maxArtifactBytes = 64

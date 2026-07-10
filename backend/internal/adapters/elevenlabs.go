@@ -93,6 +93,16 @@ func (e *elevenlabs) CreateJob(ctx context.Context, req *inference.CreateJobRequ
 	post.Header.Set("Content-Type", "application/json")
 	res, err := e.http.Do(post)
 	if err != nil {
+		// A timeout here is AFTER the request was sent — for a synchronous
+		// vendor the generation may have run (money spent). The unreachable
+		// fast-path would re-submit a paid TTS per loop at zero attempt
+		// cost; a taxonomy transient burns attempts and parks honestly.
+		// Pre-send dial failures stay raw: genuinely free, unreachable is
+		// the right classification.
+		if isPostSendTimeout(err) {
+			return nil, &inference.JobError{Code: "transient", Retryable: true,
+				Message: fmt.Sprintf("elevenlabs tts timed out after send: %v", err)}
+		}
 		return nil, err
 	}
 	defer res.Body.Close()
@@ -109,6 +119,11 @@ func (e *elevenlabs) CreateJob(ctx context.Context, req *inference.CreateJobRequ
 		return nil, fmt.Errorf("elevenlabs tts: %d", res.StatusCode)
 	}
 
+	if ct := res.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "audio/") {
+		// A 200 with a non-audio body (JSON error page) must not land as a
+		// "verified" audio asset that only fails later at probe.
+		return nil, fmt.Errorf("elevenlabs returned %q, want audio/*", ct)
+	}
 	// Synchronous response IS the artifact — same truncation discipline as
 	// every custody bridge: an oversize body errors, never silently cuts.
 	data, err := io.ReadAll(io.LimitReader(res.Body, maxArtifactBytes+1))

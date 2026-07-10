@@ -9,7 +9,10 @@ package adapters
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 
 	"github.com/awm33/iris/backend/internal/inference"
 	"github.com/awm33/iris/backend/internal/vault"
@@ -54,3 +57,24 @@ func For(kind, baseURL, authRef string) (Client, error) {
 func InProcess(kind string) bool {
 	return kind == "seedance" || kind == "elevenlabs"
 }
+
+// isPostSendTimeout: the request left the socket and the wait timed out —
+// paid work may have happened remotely. Dial refusals (nothing sent) are
+// excluded; they keep the orchestrator's free unreachable classification.
+func isPostSendTimeout(err error) bool {
+	var uerr *url.Error
+	if !errorsAs(err, &uerr) {
+		return false
+	}
+	return uerr.Timeout() && !isDialError(uerr)
+}
+
+func isDialError(uerr *url.Error) bool {
+	var operr *net.OpError
+	if errorsAs(uerr.Err, &operr) {
+		return operr.Op == "dial"
+	}
+	return false
+}
+
+func errorsAs(err error, target any) bool { return errors.As(err, target) }

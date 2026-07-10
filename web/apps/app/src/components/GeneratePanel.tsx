@@ -9,7 +9,7 @@ import { AssetKind, type ModelEndpoint } from "@iris/api-client";
 import { assetClient, generationClient, storyClient } from "../api";
 
 type Manifest = {
-  modality: "image" | "video";
+  modality: "image" | "video" | "audio";
   tasks: string[];
   profiles: Record<string, { max_width: number; max_height: number }>;
   duration?: { min_s: number; max_s: number };
@@ -207,12 +207,18 @@ export function GeneratePanel(props: {
           count,
           seed: seedSupported ? (seedValue ?? 0n) : 0n,
           targetEntityId: props.target?.shotId ?? "",
-          output: {
-            width: profileSpec?.max_width ?? 512,
-            height: profileSpec?.max_height ?? 512,
-            durationS: isVideo ? durationS : 0,
-            fps: isVideo ? 24 : 0,
-          },
+          // Non-spatial modalities (audio) declare 0-dim profiles: sending
+          // ANY output block would fail validation (0×0 is out of bounds,
+          // and nonzero exceeds a 0 max) — omit it entirely.
+          output:
+            (profileSpec?.max_width ?? 0) > 0
+              ? {
+                  width: profileSpec?.max_width ?? 512,
+                  height: profileSpec?.max_height ?? 512,
+                  durationS: isVideo ? durationS : 0,
+                  fps: isVideo ? 24 : 0,
+                }
+              : undefined,
           references: effectiveRefs.map((r) => ({
             kind: "image",
             role: r.role,
