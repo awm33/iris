@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -118,6 +119,27 @@ func TestElevenLabsPutFailureIsTaxonomyTransient(t *testing.T) {
 	}
 }
 
+func TestElevenLabsVoiceParamRoutesAndUnknownParks(t *testing.T) {
+	el, sink, _ := elevenStack(t, "k")
+	// mara is a mock-known voice: the param must reach the URL path.
+	st, err := el.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "att-7", Task: "tts", Prompt: "hi", Params: []byte(`{"voice_id":"mara"}`),
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: sink.URL + "/up"}}},
+	})
+	if err != nil || st.State != "complete" {
+		t.Fatalf("known voice must generate: %v %+v", err, st)
+	}
+	// Unknown voices 404 remotely → non-retryable invalid_input park.
+	_, err = el.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "att-8", Task: "tts", Prompt: "hi", Params: []byte(`{"voice_id":"nobody"}`),
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: sink.URL + "/up"}}},
+	})
+	jerr, ok := err.(*inference.JobError)
+	if !ok || jerr.Retryable || jerr.Code != "invalid_input" {
+		t.Fatalf("unknown voice must park invalid_input, got %v", err)
+	}
+}
+
 func TestElevenLabsOversizeErrors(t *testing.T) {
 	old := maxArtifactBytes
 	maxArtifactBytes = 64
@@ -129,5 +151,32 @@ func TestElevenLabsOversizeErrors(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("oversize audio must error, never truncate-and-land")
+	}
+}
+
+func TestElevenLabsManifestVoicesSubsetOfMock(t *testing.T) {
+	var m struct {
+		ParamsSchema struct {
+			Properties struct {
+				VoiceID struct {
+					Enum []string `json:"enum"`
+				} `json:"voice_id"`
+			} `json:"properties"`
+		} `json:"params_schema"`
+	}
+	if err := json.Unmarshal(elevenLabsManifest, &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.ParamsSchema.Properties.VoiceID.Enum) == 0 {
+		t.Fatal("manifest declares no voices")
+	}
+	known := map[string]bool{}
+	for _, v := range mockelevenlabs.Voices {
+		known[v] = true
+	}
+	for _, v := range m.ParamsSchema.Properties.VoiceID.Enum {
+		if !known[v] {
+			t.Fatalf("manifest voice %q is unknown to the mock — the two lists drifted", v)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -135,4 +136,45 @@ func TestSeedanceOversizeResultErrorsInsteadOfTruncating(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("oversize result silently succeeded")
+}
+
+func TestSeedanceAudioRefBecomesLipSyncContent(t *testing.T) {
+	// A recording endpoint (not the mock): asserts the exact recorded shape
+	// the adapter emits for an audio reference.
+	var created []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			created, _ = io.ReadAll(r.Body)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "cgt-1"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	sd := newSeedance(srv.URL, "k")
+	_, err := sd.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "att-a", Task: "i2v", Prompt: "she speaks",
+		References: []inference.Reference{{Kind: "audio", Role: "speech_lipsync", URL: "http://x/voice.mp3"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Content []struct {
+			Type     string `json:"type"`
+			Role     string `json:"role"`
+			AudioURL *struct {
+				URL string `json:"url"`
+			} `json:"audio_url"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(created, &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range body.Content {
+		if c.Type == "audio_url" && c.Role == "lip_sync" && c.AudioURL != nil && c.AudioURL.URL == "http://x/voice.mp3" {
+			return
+		}
+	}
+	t.Fatalf("audio reference did not become a lip_sync audio_url content item: %s", created)
 }

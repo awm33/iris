@@ -76,7 +76,7 @@ var seedanceManifest = json.RawMessage(`{
     "master": {"max_width": 1920, "max_height": 1080}
   },
   "duration": {"min_s": 3, "max_s": 12},
-  "references": {},
+  "references": {"audio": {"max": 1, "roles": ["speech_lipsync"]}},
   "conditioning": {"first_frame": true},
   "features": {"prompt": true, "seed": true, "lip_sync_in_gen": true, "audio_gen": true},
   "pricing": {"unit": "usd_per_second", "estimates": {"draft": 0.12, "master": 0.45}},
@@ -104,12 +104,15 @@ func (s *seedance) GetManifest(ctx context.Context) (json.RawMessage, error) {
 // --- recorded API shapes ---
 
 type sdContent struct {
-	Type     string `json:"type"` // text | image_url
+	Type     string `json:"type"` // text | image_url | audio_url
 	Text     string `json:"text,omitempty"`
 	ImageURL *struct {
 		URL string `json:"url"`
 	} `json:"image_url,omitempty"`
-	Role string `json:"role,omitempty"` // first_frame
+	AudioURL *struct {
+		URL string `json:"url"`
+	} `json:"audio_url,omitempty"`
+	Role string `json:"role,omitempty"` // first_frame | lip_sync
 }
 
 type sdCreate struct {
@@ -153,6 +156,19 @@ func (s *seedance) CreateJob(ctx context.Context, req *inference.CreateJobReques
 		text += fmt.Sprintf(" --seed %d", req.Seed)
 	}
 	body := sdCreate{Model: "seedance-1-0-pro", Content: []sdContent{{Type: "text", Text: text}}}
+	// Audio references drive in-gen lip sync — the M6 reason this adapter
+	// exists. Our spec role is speech_lipsync; the RECORDED wire shape uses
+	// their "lip_sync" role on an audio_url content item.
+	for _, ref := range req.References {
+		if ref.Kind != "audio" || ref.URL == "" {
+			continue
+		}
+		item := sdContent{Type: "audio_url", Role: "lip_sync"}
+		item.AudioURL = &struct {
+			URL string `json:"url"`
+		}{URL: ref.URL}
+		body.Content = append(body.Content, item)
+	}
 	if c := req.Conditioning; c != nil && c.FirstFrame != nil && c.FirstFrame.URL != "" {
 		img := sdContent{Type: "image_url", Role: "first_frame"}
 		img.ImageURL = &struct {
