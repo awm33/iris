@@ -171,13 +171,47 @@ export function TimelinePage(props: {
   useEffect(() => {
     if (!import.meta.env.DEV || !session) return;
     const w = window as unknown as { __irisGolden?: unknown };
+    const canvas = () => document.querySelector<HTMLCanvasElement>(".tl-engine-canvas");
     w.__irisGolden = {
-      seek: (t: number) => {
-        stopPlay();
-        seek(t);
-      },
+      // Resolves when the paints triggered by THIS seek have quiesced:
+      // the engine bumps data-iris-paint per composite, so we wait for
+      // the sequence to advance and then hold still (a blend window
+      // paints twice — outgoing and incoming one-shots). settled=false
+      // after the timeout means the harness should warn, not trust.
+      seek: (t: number) =>
+        new Promise<{ settled: boolean }>((resolve) => {
+          const c = canvas();
+          if (!c) {
+            resolve({ settled: false });
+            return;
+          }
+          const seq0 = c.dataset.irisPaint ?? "";
+          stopPlay();
+          seek(t);
+          const started = performance.now();
+          let lastSeq = seq0;
+          let stableSince = 0;
+          const poll = () => {
+            const now = performance.now();
+            const cur = canvas()?.dataset.irisPaint ?? "";
+            if (cur !== lastSeq) {
+              lastSeq = cur;
+              stableSince = now;
+            }
+            if (lastSeq !== seq0 && stableSince > 0 && now - stableSince > 500) {
+              resolve({ settled: true });
+              return;
+            }
+            if (now - started > 10_000) {
+              resolve({ settled: false });
+              return;
+            }
+            setTimeout(poll, 100);
+          };
+          setTimeout(poll, 100);
+        }),
       capture: () => {
-        const c = document.querySelector<HTMLCanvasElement>(".tl-engine-canvas");
+        const c = canvas();
         return c && c.width > 0 ? c.toDataURL("image/png") : null;
       },
     };

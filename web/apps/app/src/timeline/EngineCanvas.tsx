@@ -195,9 +195,13 @@ export function EngineCanvas(props: {
   // out = A·(1−p) + B·p with p linear over the window — draw the outgoing
   // fully, then the incoming at globalAlpha=p (or black base for a fade
   // into a gap).
+  const paintSeqRef = useRef(0);
   const composite = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    // Monotonic paint sequence: the golden harness (and anything else
+    // waiting on "did my seek land") reads it off the element.
+    canvas.dataset.irisPaint = String(++paintSeqRef.current);
     const { segments, time, grades } = propsRef.current;
     const seg = segmentAt(segments, time);
     const blend = activeBlendAt(time);
@@ -218,9 +222,18 @@ export function EngineCanvas(props: {
     }
     const gradeOf = (clipId?: string) => (clipId ? grades?.get(clipId) : undefined);
     if (blend && rawFrom && rawFrom.width > 0) {
+      // The whole WINDOW quantizes to the frame grid, not just the
+      // playhead: the export's blend piece boundaries are round(t·fps)
+      // frames and xfade evaluates on that local grid — an off-grid cut
+      // (r2-rounded 0.01s edits at 24fps) would skew alpha up to
+      // (0.5/fps)/D against a raw-origin division (review PR39-F4).
       const { fps } = propsRef.current;
       const tq = fps ? Math.floor(time * fps + 1e-6) / fps : time;
-      const p = Math.min(1, Math.max(0, (tq - blend.start) / blend.duration));
+      const b0 = fps ? Math.round(blend.start * fps) / fps : blend.start;
+      const dq = fps
+        ? Math.max(1 / fps, Math.round((blend.start + blend.duration) * fps) / fps - b0)
+        : blend.duration;
+      const p = Math.min(1, Math.max(0, (tq - b0) / dq));
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       if (seg && raw && raw.width > 0) {
@@ -301,7 +314,9 @@ export function EngineCanvas(props: {
         // the outgoing layer and let composite() ramp it out.
         const blend = activeBlendAt(props.time);
         if (blend) {
-          const fromTargetS = blend.fromSeekS + (props.time - blend.start);
+          const gfps = propsRef.current.fps;
+          const gb0 = gfps ? Math.round(blend.start * gfps) / gfps : blend.start;
+          const fromTargetS = blend.fromSeekS + Math.max(0, props.time - gb0);
           const fromTargetUs = Math.round(fromTargetS * 1e6);
           const fs = fromSessionRef.current;
           if (!fs || fs.sourceId !== blend.fromSourceId || fromTargetUs < fs.lastPaintedUs - 250_000) {
@@ -340,7 +355,9 @@ export function EngineCanvas(props: {
       // same tick.
       const blend = activeBlendAt(props.time);
       if (blend) {
-        const fromTargetS = blend.fromSeekS + (props.time - blend.start);
+        const fps = propsRef.current.fps;
+        const b0 = fps ? Math.round(blend.start * fps) / fps : blend.start;
+        const fromTargetS = blend.fromSeekS + Math.max(0, props.time - b0);
         const fromTargetUs = Math.round(fromTargetS * 1e6);
         const fs = fromSessionRef.current;
         if (
@@ -399,7 +416,9 @@ export function EngineCanvas(props: {
     // frame into its own raw layer; composite blends the pair.
     const blend = activeBlendAt(props.time);
     if (blend) {
-      const fromTarget = blend.fromSeekS + (props.time - blend.start);
+      const bfps = propsRef.current.fps;
+      const bq = bfps ? Math.round(blend.start * bfps) / bfps : blend.start;
+      const fromTarget = blend.fromSeekS + Math.max(0, props.time - bq);
       const key = `${blend.fromSourceId}:${Math.round(fromTarget * 1e6)}`;
       if (key !== scrubFromKeyRef.current || scrubFromAbortRef.current?.signal.aborted) {
         scrubFromKeyRef.current = key;
@@ -427,9 +446,10 @@ export function EngineCanvas(props: {
     }
     if (!seg) {
       scrubKeyRef.current = null;
-      const c = canvasRef.current;
-      if (c && !blend) c.getContext("2d")!.clearRect(0, 0, c.width, c.height);
-      if (blend) composite(); // fade-to-black window over a gap
+      // composite() handles the no-seg clear AND bumps the paint sequence
+      // — a raw clearRect here left golden's settle-wait blind to gap
+      // seeks.
+      composite();
       return;
     }
     const target = sourceTime(seg, props.time);

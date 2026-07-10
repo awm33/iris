@@ -64,6 +64,7 @@ type exportSource struct {
 	ContentType string
 	HasAudio    bool
 	DurationS   float64 // 0 = unknown (images, durationless containers)
+	ColorMatrix string  // probed color_space tag ("" = untagged)
 }
 
 func (w *Worker) runExport(ctx context.Context, job *queue.MediaJob) error {
@@ -435,14 +436,15 @@ func (w *Worker) fetchExportSource(ctx context.Context, tmpDir, versionID string
 	if strings.HasPrefix(contentType, "video/") || strings.HasPrefix(contentType, "audio/") {
 		out, err := exec.CommandContext(ctx, "ffprobe",
 			"-v", "error",
-			"-show_entries", "stream=codec_type:format=duration",
+			"-show_entries", "stream=codec_type,color_space:format=duration",
 			"-print_format", "json", path).Output()
 		if err != nil {
 			return nil, permanent(fmt.Errorf("source %s unreadable: %w", versionID, withStderr(err)))
 		}
 		var probed struct {
 			Streams []struct {
-				CodecType string `json:"codec_type"`
+				CodecType  string `json:"codec_type"`
+				ColorSpace string `json:"color_space"`
 			} `json:"streams"`
 			Format struct {
 				Duration string `json:"duration"`
@@ -454,6 +456,9 @@ func (w *Worker) fetchExportSource(ctx context.Context, tmpDir, versionID string
 		for _, s := range probed.Streams {
 			if s.CodecType == "audio" {
 				src.HasAudio = true
+			}
+			if s.CodecType == "video" && s.ColorSpace != "" {
+				src.ColorMatrix = s.ColorSpace
 			}
 		}
 		// The graph builder clamps video in-points against this: a seek

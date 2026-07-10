@@ -57,14 +57,24 @@ func buildExportArgs(
 	// The color grade slots between scale and pad: the preview colors only
 	// the painted FRAME (canvas filter + multiply rect), never the black
 	// letterbox — contrast ≠ 1 would lift padding to gray if applied after.
-	scaleFor := func(clip *timeline.Clip) string {
+	scaleFor := func(clip *timeline.Clip, src *exportSource) string {
 		grade := ""
 		if clip != nil {
 			grade = colorFilter(clip.Color)
 		}
+		// TAGGED non-709 SD matrices convert explicitly (601-coded pixels
+		// under the output's 709 tag would hue-shift in compliant
+		// players). Untagged sources are deliberately NOT converted:
+		// swscale would assume 601-in and shift true-709 HD (the common
+		// case). bt2020/HDR is a recorded deviation — tone-mapping is out
+		// of scope and the 8-bit grade path already crushes it.
+		conv := ""
+		if src != nil && (src.ColorMatrix == "bt470bg" || src.ColorMatrix == "smpte170m") {
+			conv = ":in_color_matrix=bt601:out_color_matrix=bt709"
+		}
 		return fmt.Sprintf(
-			"fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease%s,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p",
-			fps, p.W, p.H, grade, p.W, p.H)
+			"fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease%s%s,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p",
+			fps, p.W, p.H, conv, grade, p.W, p.H)
 	}
 
 	var inputs []string
@@ -96,7 +106,7 @@ func buildExportArgs(
 			inputs = append(inputs, "-ss", f(ss), "-t", f(dur), "-i", src.Path)
 			filters = append(filters, fmt.Sprintf(
 				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
-				nInput, scaleFor(clip), f(dur), frames, out))
+				nInput, scaleFor(clip, src), f(dur), frames, out))
 			nInput++
 		case src != nil && strings.HasPrefix(src.ContentType, "image/"):
 			// Stills (image takes) hold the frame for the piece duration —
@@ -105,7 +115,7 @@ func buildExportArgs(
 			inputs = append(inputs, "-loop", "1", "-t", f(dur), "-i", src.Path)
 			filters = append(filters, fmt.Sprintf(
 				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
-				nInput, scaleFor(nil), f(dur), frames, out))
+				nInput, scaleFor(nil, nil), f(dur), frames, out))
 			nInput++
 		default:
 			// Gap — or a clip whose source can't paint (audio on a video
@@ -195,11 +205,14 @@ func buildExportArgs(
 		"-filter_complex", strings.Join(filters, ";"),
 		"-map", "[vout]", "-map", "[aout]",
 		"-c:v", "libx264", "-preset", p.X264, "-crf", p.CRF,
-		// Explicit BT.709: untagged output makes every downstream player
-		// (and Chrome vs ffmpeg in the golden check) GUESS the YUV matrix
-		// — 601-vs-709 disagreement is a visible hue shift on saturated
-		// content. Sources of any matrix are normalized by the filter
-		// graph's RGB roundtrips; the container should say what it holds.
+		// Explicit BT.709 output tag: untagged output makes every player
+		// (and Chrome vs ffmpeg in the golden check) GUESS the matrix.
+		// What the graph actually guarantees: TAGGED 601 sources convert
+		// in scaleFor; untagged sources pass through as-coded (assumed
+		// 709 — the common HD reality; converting them would shift true-
+		// 709 content); bt2020/HDR is a recorded deviation. The tag is
+		// right for everything the dogfood produces and deterministic
+		// where guessing wasn't.
 		"-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
 		"-c:a", "aac", "-b:a", p.AudioKbs,
 		"-movflags", "+faststart",
