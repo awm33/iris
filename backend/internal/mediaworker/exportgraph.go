@@ -137,8 +137,11 @@ func buildExportArgs(
 		if i == len(captions)-1 {
 			out = "[vout]"
 		}
+		// Half-open window (gte*lt, not between): between() is inclusive on
+		// BOTH ends, so abutting captions would double-render on a shared
+		// frame-grid boundary — and the preview's clipAt is half-open.
 		filters = append(filters, fmt.Sprintf(
-			"%s[%d:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-%d:enable='between(t,%s,%s)'%s",
+			"%s[%d:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-%d:enable='gte(t,%s)*lt(t,%s)'%s",
 			cur, nInput, p.H/20, f(c.Start), f(c.End), out))
 		nInput++
 		cur = out
@@ -237,12 +240,15 @@ func captionClips(st *timeline.State) []*timeline.Clip {
 }
 
 // buildSRT renders the caption clips as SubRip. Empty string when no
-// caption text exists.
+// caption text exists. Whitespace runs (incl. interior newlines — a blank
+// line would terminate the SubRip block early) collapse to single spaces;
+// set_clip_text accepts any string from any client.
 func buildSRT(st *timeline.State) string {
 	var b strings.Builder
 	for i, c := range captionClips(st) {
 		fmt.Fprintf(&b, "%d\n%s --> %s\n%s\n\n",
-			i+1, srtTime(c.Start), srtTime(c.Start+c.Duration), strings.TrimSpace(c.Text))
+			i+1, srtTime(c.Start), srtTime(c.Start+c.Duration),
+			strings.Join(strings.Fields(c.Text), " "))
 	}
 	return b.String()
 }

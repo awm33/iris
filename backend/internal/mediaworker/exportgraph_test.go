@@ -198,8 +198,8 @@ func TestBuildExportArgsCaptionBurnIn(t *testing.T) {
 	// concat, last link labeled [vout].
 	for _, want := range []string{
 		"concat=n=1:v=1:a=0[vcat]",
-		"[vcat][1:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-36:enable='between(t,0.000000,2.500000)'[vcap0]",
-		"[vcap0][2:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-36:enable='between(t,2.500000,4.000000)'[vout]",
+		"[vcat][1:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-36:enable='gte(t,0.000000)*lt(t,2.500000)'[vcap0]",
+		"[vcap0][2:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-36:enable='gte(t,2.500000)*lt(t,4.000000)'[vout]",
 	} {
 		if !strings.Contains(graph, want) {
 			t.Errorf("graph missing %q\ngraph: %s", want, graph)
@@ -275,5 +275,43 @@ func TestBuildTranscribeArgs(t *testing.T) {
 	_, audible = buildTranscribeArgs(nil, nil, nil, 4, "/t/mix.wav")
 	if audible != 0 {
 		t.Errorf("audible = %d, want 0", audible)
+	}
+}
+
+// The full input-index space at once: video pieces (with a no-input gap),
+// caption PNGs, then audio entries — the delete-an-increment bug class
+// across ALL THREE sections must fail loudly.
+func TestBuildExportArgsCombinedInputOrdering(t *testing.T) {
+	vClip := &timeline.Clip{ID: "cv", Name: "v", VersionID: "v1"}
+	aClip := &timeline.Clip{ID: "ca", Name: "a", VersionID: "v2", InPoint: 0.5}
+	pieces := []timeline.Piece{
+		{Start: 0, Duration: 2, Clip: vClip},
+		{Start: 2, Duration: 1, Clip: nil}, // gap: no input
+		{Start: 3, Duration: 1, Clip: vClip},
+	}
+	captions := []captionOverlay{{Path: "/t/cap0.png", Start: 1, End: 3.5}}
+	entries := []timeline.AudioEntry{{Clip: aClip, Kind: "audio", Start: 0, Dur: 4}}
+	args, err := buildExportArgs(pieces, entries,
+		map[string]string{"cv": "v1", "ca": "v2"},
+		map[string]*exportSource{
+			"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30},
+			"v2": {Path: "/t/m.mp3", ContentType: "audio/mpeg", HasAudio: true, DurationS: 60},
+		},
+		exportPresets["draft"], 24, 4, captions, "/t/out.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(inputPaths(args), ","); got != "/t/a.mp4,/t/a.mp4,/t/cap0.png,/t/m.mp3" {
+		t.Fatalf("input order: %s", got)
+	}
+	graph := graphOf(t, args)
+	for _, want := range []string{
+		"[0:v]", "[1:v]", // two video piece inputs (gap consumes none)
+		"[vcat][2:v]overlay", // caption PNG is input 2
+		"[3:a]aresample",     // audio is input 3
+	} {
+		if !strings.Contains(graph, want) {
+			t.Errorf("graph missing %q\ngraph: %s", want, graph)
+		}
 	}
 }

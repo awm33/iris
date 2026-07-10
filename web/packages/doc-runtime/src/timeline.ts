@@ -83,7 +83,9 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
         const t: TrackState = {
           id: op.track.id,
           kind: op.track.kind,
-          name: op.track.name ?? (op.track.kind === "video" ? "V" : op.track.kind === "caption" ? "C" : "A"),
+          // || not ??: an explicit "" also takes the default — the Go
+          // reducer can't distinguish "" from absent, and parity wins.
+          name: op.track.name || (op.track.kind === "video" ? "V" : op.track.kind === "caption" ? "C" : "A"),
           clips: [],
         };
         const i = op.index === undefined ? tracks.length : Math.max(0, Math.min(op.index, tracks.length));
@@ -199,6 +201,7 @@ export function bladeOps(
           name: clip.name,
           version_id: clip.versionId,
           shot_id: clip.shotId,
+          text: clip.text,
           start: rt,
           // Placeholders have no source: content anchoring is meaningless,
           // and a nonzero in_point would skew their left-trim clamp.

@@ -13,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/awm33/iris/backend/internal/ids"
 	"github.com/awm33/iris/backend/internal/queue"
 	"github.com/awm33/iris/backend/internal/timeline"
 )
@@ -152,27 +151,69 @@ func (w *Worker) transcribe(ctx context.Context, job *queue.MediaJob, transcript
 	// A silent timeline (or speechless audio) is a legitimate empty result,
 	// not an error — complete with zero segments and no doc changes.
 
-	var payloads [][]byte
-	if len(segments) > 0 {
-		payloads, err = captionOps(ri.st, ri.totalS, segments)
+	// Append + row completion + job completion commit as ONE tx, retried
+	// under the CAS: a crash between "ops appended" and "job complete" was
+	// an at-least-once redelivery that re-appended everything. Op/clip/
+	// track ids are DETERMINISTIC (keyed on the transcription id), so even
+	// a redelivery that races a half-committed attempt reduces to a no-op
+	// — both reducers dedup op_ids and reject duplicate clip/track ids.
+	for attempt := 0; ; attempt++ {
+		payloads, err := captionOps(transcriptionID, ri.st, ri.totalS, segments)
+		if err != nil {
+			return err
+		}
+		err = w.appendAndComplete(ctx, job, transcriptionID, timelineID, ri.headSeq, payloads, len(segments))
+		if !errors.Is(err, errSeqConflict) {
+			return err
+		}
+		if attempt >= 5 {
+			return fmt.Errorf("timeline head kept moving during caption append")
+		}
+		// Concurrent editor (or a sibling transcription) advanced the doc:
+		// REBUILD from fresh state, not just a fresh head — a caption
+		// track created meanwhile must be reused, never duplicated.
+		ri, err = w.loadRenderInputs(ctx, timelineID)
 		if err != nil {
 			return err
 		}
 	}
-	if len(payloads) > 0 {
-		if err := w.appendTimelineOps(ctx, timelineID, ri.headSeq, payloads); err != nil {
-			return err
-		}
-	}
+}
 
+// appendAndComplete commits caption ops (when any), the transcriptions row,
+// and the job's completion atomically. errSeqConflict = caller rebuilds.
+func (w *Worker) appendAndComplete(ctx context.Context, job *queue.MediaJob, transcriptionID, timelineID string, baseSeq int64, payloads [][]byte, segmentCount int) error {
 	tx, err := w.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if len(payloads) > 0 {
+		// Mirrors store.AppendTimelineOps' CAS contract (conditional
+		// head_seq bump keeps seqs gapless with one effective writer).
+		var docID string
+		err = tx.QueryRow(ctx, `
+			UPDATE timelines SET head_seq = head_seq + $3, updated_at = now()
+			WHERE id = $1 AND head_seq = $2
+			RETURNING doc_id`,
+			timelineID, baseSeq, len(payloads)).Scan(&docID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errSeqConflict
+		}
+		if err != nil {
+			return err
+		}
+		rows := make([][]any, len(payloads))
+		for i, p := range payloads {
+			rows[i] = []any{docID, baseSeq + int64(i) + 1, "transcribe", p}
+		}
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"doc_ops"},
+			[]string{"doc_id", "seq", "actor_id", "op"}, pgx.CopyFromRows(rows)); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE transcriptions SET state = 'complete', error = '', segment_count = $2, updated_at = now()
-		WHERE id = $1`, transcriptionID, len(segments)); err != nil {
+		WHERE id = $1`, transcriptionID, segmentCount); err != nil {
 		return err
 	}
 	if err := queue.CompleteMediaJob(ctx, tx, job.ID, w.Name); err != nil {
@@ -250,10 +291,22 @@ func runWhisper(ctx context.Context, bin, wavPath, outBase string) ([]whisperSeg
 	return segments, nil
 }
 
+var errSeqConflict = errors.New("timeline head moved")
+
+// maxCaptionTextBytes keeps a pathological engine segment under the API
+// layer's own op-size cap — ops the worker authors must never be ones the
+// API would refuse.
+const maxCaptionTextBytes = 2000
+
 // captionOps builds the append payloads: a caption track when the doc has
 // none, then one text clip per segment. Times land r2-rounded like every
-// UI-authored op.
-func captionOps(st *timeline.State, totalS float64, segments []whisperSegment) ([][]byte, error) {
+// UI-authored op. EVERY id is deterministic in (transcription id, index):
+// an at-least-once redelivery re-appends byte-identical ops, which both
+// reducers dedup by op_id — never a doubled caption.
+func captionOps(transcriptionID string, st *timeline.State, totalS float64, segments []whisperSegment) ([][]byte, error) {
+	if len(segments) == 0 {
+		return nil, nil
+	}
 	r2 := func(v float64) float64 { return math.Round(v*100) / 100 }
 	trackID := ""
 	for _, tr := range st.Tracks {
@@ -264,13 +317,13 @@ func captionOps(st *timeline.State, totalS float64, segments []whisperSegment) (
 	}
 	var ops []*timeline.Op
 	if trackID == "" {
-		trackID = ids.New("trk")
+		trackID = "trk_" + transcriptionID
 		ops = append(ops, &timeline.Op{
-			OpID: ids.New("op"), Type: "add_track",
+			OpID: "op_" + transcriptionID + "_track", Type: "add_track",
 			Track: &timeline.TrackDef{ID: trackID, Kind: "caption", Name: "C1"},
 		})
 	}
-	for _, seg := range segments {
+	for i, seg := range segments {
 		start := r2(math.Max(0, seg.FromS))
 		if start >= totalS {
 			continue // engine hallucinating past the mix end
@@ -279,14 +332,18 @@ func captionOps(st *timeline.State, totalS float64, segments []whisperSegment) (
 		if dur < timeline.MinClipS {
 			continue
 		}
-		name := seg.Text
+		text := seg.Text
+		if len(text) > maxCaptionTextBytes {
+			text = strings.ToValidUTF8(text[:maxCaptionTextBytes], "")
+		}
+		name := text
 		if len(name) > 24 {
 			name = strings.ToValidUTF8(name[:24], "") + "…"
 		}
 		ops = append(ops, &timeline.Op{
-			OpID: ids.New("op"), Type: "add_clip", TrackID: trackID,
+			OpID: fmt.Sprintf("op_%s_%d", transcriptionID, i), Type: "add_clip", TrackID: trackID,
 			Clip: &timeline.ClipDef{
-				ID: ids.New("cl"), Name: name, Text: seg.Text,
+				ID: fmt.Sprintf("cl_%s_%d", transcriptionID, i), Name: name, Text: text,
 				Start: start, Duration: dur,
 			},
 		})
@@ -300,55 +357,4 @@ func captionOps(st *timeline.State, totalS float64, segments []whisperSegment) (
 		payloads = append(payloads, p)
 	}
 	return payloads, nil
-}
-
-// appendTimelineOps replicates store.AppendTimelineOps' CAS contract (see
-// backend/internal/store/timeline.go — conditional head_seq bump keeps seqs
-// gapless with one effective writer) with a re-read retry: a concurrent
-// editor autosaving mid-transcription must not fail the job.
-func (w *Worker) appendTimelineOps(ctx context.Context, timelineID string, baseSeq int64, payloads [][]byte) error {
-	for attempt := 0; ; attempt++ {
-		err := w.tryAppendOps(ctx, timelineID, baseSeq, payloads)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, errSeqConflict) || attempt >= 5 {
-			return err
-		}
-		if qerr := w.Pool.QueryRow(ctx,
-			`SELECT head_seq FROM timelines WHERE id = $1`, timelineID).Scan(&baseSeq); qerr != nil {
-			return qerr
-		}
-	}
-}
-
-var errSeqConflict = errors.New("timeline head moved")
-
-func (w *Worker) tryAppendOps(ctx context.Context, timelineID string, baseSeq int64, payloads [][]byte) error {
-	tx, err := w.Pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var docID string
-	err = tx.QueryRow(ctx, `
-		UPDATE timelines SET head_seq = head_seq + $3, updated_at = now()
-		WHERE id = $1 AND head_seq = $2
-		RETURNING doc_id`,
-		timelineID, baseSeq, len(payloads)).Scan(&docID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errSeqConflict
-	}
-	if err != nil {
-		return err
-	}
-	rows := make([][]any, len(payloads))
-	for i, p := range payloads {
-		rows[i] = []any{docID, baseSeq + int64(i) + 1, "transcribe", p}
-	}
-	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"doc_ops"},
-		[]string{"doc_id", "seq", "actor_id", "op"}, pgx.CopyFromRows(rows)); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
 }

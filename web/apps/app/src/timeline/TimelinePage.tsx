@@ -588,8 +588,21 @@ export function TimelinePage(props: {
           timelineId={props.timelineId}
           onComplete={() => {
             // Server-authored ops are only in the DB: flush local edits,
-            // then rebuild the session over the fresh log.
-            void session?.sync.flush(true).then(() => setReloadTick((t) => t + 1));
+            // then rebuild the session over the fresh log. flush() RESOLVES
+            // even when the send failed (its contract) — reloading with
+            // pending ops would silently discard the edits the status line
+            // promised were kept, so retry until the flush actually lands.
+            const s = session;
+            if (!s) return;
+            const tryReload = (attempt: number) => {
+              void s.sync.flush(true).then(() => {
+                if (s.sync.pendingCount === 0) setReloadTick((t) => t + 1);
+                else if (attempt < 5) setTimeout(() => tryReload(attempt + 1), 4000);
+                // else: give up — the save-failed status is already showing,
+                // and captions appear on the next successful load.
+              });
+            };
+            tryReload(0);
           }}
         />
         <ExportControl timelineId={props.timelineId} />

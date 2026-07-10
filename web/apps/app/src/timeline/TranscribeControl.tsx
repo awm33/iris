@@ -26,6 +26,12 @@ export function TranscribeControl(props: { timelineId: string; onComplete: () =>
 
   const prevState = useRef<string | undefined>(undefined);
   useEffect(() => {
+    // A surviving instance switching timelines must not carry "running"
+    // over — timeline B's already-complete latest would fire a spurious
+    // reload.
+    prevState.current = undefined;
+  }, [props.timelineId]);
+  useEffect(() => {
     if (prevState.current && prevState.current !== "complete" && latest?.state === "complete") {
       props.onComplete();
     }
