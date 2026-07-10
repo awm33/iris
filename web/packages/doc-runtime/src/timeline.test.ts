@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipAt, reduceTimeline, TimelineDoc, type TimelineOp, timelineDuration, bladeOps, rippleOps, snapTime } from "./timeline";
+import { clipAt, duckWindows, reduceTimeline, TimelineDoc, type TimelineOp, timelineDuration, bladeOps, rippleOps, snapTime } from "./timeline";
 
 const track = (id: string, kind: "video" | "audio" = "video"): TimelineOp => ({
   op_id: `t_${id}`, type: "add_track", track: { id, kind },
@@ -331,4 +331,35 @@ describe("bladeOps on graded clips", () => {
       { exposure: 1, contrast: 0.9, temp: -0.2 },
     ]);
   });
+});
+
+// duckWindows parity table — MIRRORED in backend/internal/timeline/
+// schedule_test.go (TestDuckWindows): same cases, same expectations.
+describe("duckWindows parity table", () => {
+  const sp = (id: string, start: number, duration: number, speech: boolean): TimelineOp => ({
+    op_id: `a_${id}`, type: "add_clip", track_id: "a1",
+    clip: { id, name: id, version_id: `v_${id}`, start, duration, speech },
+  });
+  const base: TimelineOp[] = [
+    { op_id: "t1", type: "add_track", track: { id: "a1", kind: "audio" } },
+    { op_id: "t2", type: "add_track", track: { id: "c1", kind: "caption" } },
+  ];
+  const cases: [string, TimelineOp[], number, { start: number; end: number }[]][] = [
+    ["empty state", base, 10, []],
+    ["overlapping spans merge", [...base, sp("a", 1, 3, true), sp("b", 2, 4, true)], 10, [{ start: 1, end: 6 }]],
+    ["touching within epsilon merges", [...base, sp("a", 1, 2, true), sp("b", 3, 2, true)], 10, [{ start: 1, end: 5 }]],
+    ["gap beyond epsilon stays split", [...base, sp("a", 1, 2, true), sp("b", 3.5, 1, true)], 10, [{ start: 1, end: 3 }, { start: 3.5, end: 4.5 }]],
+    ["identical starts take the longer end", [...base, sp("a", 2, 1, true), sp("b", 2, 3, true)], 10, [{ start: 2, end: 5 }]],
+    ["straddling totalS clamps", [...base, sp("a", 8, 5, true)], 10, [{ start: 8, end: 10 }]],
+    ["at exactly totalS drops", [...base, sp("a", 10, 2, true)], 10, []],
+    ["non-speech ignored", [...base, sp("a", 1, 2, false)], 10, []],
+    ["caption-track speech counts (parity posture)", [...base,
+      { op_id: "cc", type: "add_clip", track_id: "c1", clip: { id: "cap", name: "cap", text: "x", start: 4, duration: 1, speech: true } },
+    ], 10, [{ start: 4, end: 5 }]],
+  ];
+  for (const [name, ops, total, want] of cases) {
+    it(name, () => {
+      expect(duckWindows(reduceTimeline(ops), total)).toEqual(want);
+    });
+  }
 });

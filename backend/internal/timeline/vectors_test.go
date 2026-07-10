@@ -14,15 +14,16 @@ import (
 // don't touch the vector.
 
 type vecClip struct {
-	ID        string  `json:"id"`
-	Start     float64 `json:"start"`
-	Duration  float64 `json:"duration"`
-	InPoint   float64 `json:"in_point"`
-	VersionID string  `json:"version_id"`
-	ShotID    string  `json:"shot_id"`
+	ID         string      `json:"id"`
+	Start      float64     `json:"start"`
+	Duration   float64     `json:"duration"`
+	InPoint    float64     `json:"in_point"`
+	VersionID  string      `json:"version_id"`
+	ShotID     string      `json:"shot_id"`
 	Text       string      `json:"text"`
 	Color      *Color      `json:"color"`
 	Transition *Transition `json:"transition"`
+	Speech     bool        `json:"speech"`
 }
 
 type vecTrack struct {
@@ -88,7 +89,7 @@ func normalize(st *State) []vecTrack {
 			vt.Clips = append(vt.Clips, vecClip{
 				ID: c.ID, Start: c.Start, Duration: c.Duration,
 				InPoint: c.InPoint, VersionID: c.VersionID, ShotID: c.ShotID,
-				Text: c.Text, Color: c.Color, Transition: c.Transition,
+				Text: c.Text, Color: c.Color, Transition: c.Transition, Speech: c.Speech,
 			})
 		}
 		out = append(out, vt)

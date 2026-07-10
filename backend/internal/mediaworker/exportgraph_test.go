@@ -55,7 +55,7 @@ func TestBuildExportArgs(t *testing.T) {
 	}
 
 	args, err := buildExportArgs(pieces, entries, versionByClip, sources,
-		exportPresets["draft"], 24, 6, nil, "/t/out.mp4")
+		exportPresets["draft"], 24, 6, nil, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestBuildExportArgsFrameGridQuantization(t *testing.T) {
 	args, err := buildExportArgs(pieces, nil,
 		map[string]string{"a": "v1", "b": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
-		exportPresets["draft"], 24, 3.8, nil, "/t/out.mp4")
+		exportPresets["draft"], 24, 3.8, nil, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestBuildExportArgsClampsSeekToSourceEOF(t *testing.T) {
 		[]timeline.Piece{{Start: 0, Duration: 2, Clip: c}}, nil,
 		map[string]string{"a": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 5}},
-		exportPresets["draft"], 24, 2, nil, "/t/out.mp4")
+		exportPresets["draft"], 24, 2, nil, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestBuildExportArgsSkipsZeroFramePieces(t *testing.T) {
 	args, err := buildExportArgs(pieces, nil,
 		map[string]string{"a": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
-		exportPresets["draft"], 24, 4, nil, "/t/out.mp4")
+		exportPresets["draft"], 24, 4, nil, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestBuildExportArgsSilenceTrack(t *testing.T) {
 		[]timeline.Piece{{Start: 0, Duration: 2, Clip: clip}},
 		nil, map[string]string{"c": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
-		exportPresets["master"], 24, 2, nil, "/t/out.mp4")
+		exportPresets["master"], 24, 2, nil, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestBuildExportArgsCaptionBurnIn(t *testing.T) {
 		[]timeline.Piece{{Start: 0, Duration: 4, Clip: clip}},
 		nil, map[string]string{"c": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
-		exportPresets["draft"], 24, 4, caps, "/t/out.mp4")
+		exportPresets["draft"], 24, 4, caps, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestBuildExportArgsCaptionBurnIn(t *testing.T) {
 		nil, map[string]string{"c": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
 		exportPresets["draft"], 24, 2,
-		[]captionOverlay{{Path: "/tmp/evil':x/cap.png", Start: 0, End: 1}}, "/t/out.mp4"); err == nil {
+		[]captionOverlay{{Path: "/tmp/evil':x/cap.png", Start: 0, End: 1}}, nil, "/t/out.mp4"); err == nil {
 		t.Error("unsafe caption path accepted into filter graph")
 	}
 }
@@ -257,7 +257,7 @@ func TestBuildTranscribeArgs(t *testing.T) {
 		[]timeline.AudioEntry{{Clip: clip, Kind: "video", Start: 1, Dur: 3}},
 		map[string]string{"c": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", HasAudio: true, DurationS: 30}},
-		4, "/t/mix.wav")
+		&timeline.State{}, 4, "/t/mix.wav")
 	if audible != 1 {
 		t.Fatalf("audible = %d, want 1", audible)
 	}
@@ -272,7 +272,7 @@ func TestBuildTranscribeArgs(t *testing.T) {
 		}
 	}
 	// Silent timeline: no engine run.
-	_, audible = buildTranscribeArgs(nil, nil, nil, 4, "/t/mix.wav")
+	_, audible = buildTranscribeArgs(nil, nil, nil, &timeline.State{}, 4, "/t/mix.wav")
 	if audible != 0 {
 		t.Errorf("audible = %d, want 0", audible)
 	}
@@ -297,7 +297,7 @@ func TestBuildExportArgsCombinedInputOrdering(t *testing.T) {
 			"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30},
 			"v2": {Path: "/t/m.mp3", ContentType: "audio/mpeg", HasAudio: true, DurationS: 60},
 		},
-		exportPresets["draft"], 24, 4, captions, "/t/out.mp4")
+		exportPresets["draft"], 24, 4, captions, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestBuildExportArgsColorGrade(t *testing.T) {
 		},
 		nil, map[string]string{"g": "v1", "n": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
-		exportPresets["draft"], 24, 2, nil, "/t/out.mp4")
+		exportPresets["draft"], 24, 2, nil, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestBuildExportArgsColorCoolAndStill(t *testing.T) {
 			"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30},
 			"v2": {Path: "/t/b.png", ContentType: "image/png"},
 		},
-		exportPresets["draft"], 24, 2, nil, "/t/out.mp4")
+		exportPresets["draft"], 24, 2, nil, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestBuildExportArgsDissolve(t *testing.T) {
 			"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30},
 			"v2": {Path: "/t/b.mp4", ContentType: "video/mp4", HasAudio: true, DurationS: 30},
 		},
-		exportPresets["draft"], 24, 7, nil, "/t/out.mp4")
+		exportPresets["draft"], 24, 7, nil, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,5 +420,64 @@ func TestBuildExportArgsDissolve(t *testing.T) {
 		if !ok {
 			t.Errorf("missing %q\ngraph: %s", want, graph)
 		}
+	}
+}
+
+// Ducking: a NON-speech entry overlapping speech windows gets the
+// deterministic volume curve (entry-local times, ramps, max across
+// windows); speech entries stay untouched; disjoint windows emit nothing.
+func TestBuildAudioSectionDucking(t *testing.T) {
+	music := &timeline.Clip{ID: "m", Name: "m", VersionID: "vm"}
+	vo := &timeline.Clip{ID: "v", Name: "v", VersionID: "vv", Speech: true}
+	entries := []timeline.AudioEntry{
+		{Clip: music, Kind: "audio", Start: 1, Dur: 8},
+		{Clip: vo, Kind: "audio", Start: 2, Dur: 2},
+	}
+	srcFor := func(c *timeline.Clip) *exportSource {
+		return map[string]*exportSource{
+			"m": {Path: "/t/m.mp3", ContentType: "audio/mpeg", HasAudio: true},
+			"v": {Path: "/t/v.mp3", ContentType: "audio/mpeg", HasAudio: true},
+		}[c.ID]
+	}
+	ducks := []timeline.DuckWindow{{Start: 2, End: 4}, {Start: 6, End: 7}}
+	_, filters, audible := buildAudioSection(entries, srcFor, 24, 9, 0, ducks)
+	if audible != 2 {
+		t.Fatalf("audible = %d", audible)
+	}
+	joined := strings.Join(filters, ";")
+	// music entry starts at 1 → windows local at 1..3 and 5..6; both terms
+	// present, maxed, level factor 0.75.
+	for _, want := range []string{
+		"volume=volume='1-0.750000*(max(clip(min((t-(1.000000))/0.150000\\,((3.150000)-t)/0.150000)\\,0\\,1)\\,clip(min((t-(5.000000))/0.150000\\,((6.150000)-t)/0.150000)\\,0\\,1)))':eval=frame",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing duck curve %q\nfilters: %s", want, joined)
+		}
+	}
+	if strings.Count(joined, ",volume=volume=") != 1 {
+		t.Errorf("speech entry must stay at unity (want exactly 1 volume filter): %s", joined)
+	}
+	// No windows → no volume filter at all.
+	_, filters2, _ := buildAudioSection(entries, srcFor, 24, 9, 0, nil)
+	if strings.Contains(strings.Join(filters2, ";"), ",volume=volume=") {
+		t.Errorf("no windows must emit no volume filters")
+	}
+}
+
+// Negative entry-local window start — the COMMON case (music bed already
+// playing when speech begins): the constant must print parenthesized, and
+// clamping/overlap math must hold.
+func TestBuildAudioSectionDuckingNegativeOffset(t *testing.T) {
+	music := &timeline.Clip{ID: "m", Name: "m", VersionID: "vm"}
+	entries := []timeline.AudioEntry{{Clip: music, Kind: "audio", Start: 6, Dur: 4}}
+	srcFor := func(*timeline.Clip) *exportSource {
+		return &exportSource{Path: "/t/m.mp3", ContentType: "audio/mpeg", HasAudio: true}
+	}
+	_, filters, _ := buildAudioSection(entries, srcFor, 24, 10, 0,
+		[]timeline.DuckWindow{{Start: 5, End: 8}})
+	joined := strings.Join(filters, ";")
+	want := "volume=volume='1-0.750000*(clip(min((t-(-1.000000))/0.150000\\,((2.150000)-t)/0.150000)\\,0\\,1))':eval=frame"
+	if !strings.Contains(joined, want) {
+		t.Errorf("negative-offset duck curve wrong\nwant %q\nin   %s", want, joined)
 	}
 }

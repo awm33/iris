@@ -95,10 +95,10 @@ func TestFlattenDissolveWindows(t *testing.T) {
 	}
 	wants := []want{
 		{0, 4, "a", "", 0},
-		{4, 1, "b", "a", 4},  // dissolve a→b, FromSeekS = a.InPoint(0)+4
-		{5, 2, "b", "", 0},   // rest of b
-		{7, 1, "", "", 0},    // gap
-		{8, 2, "c", "", 0},   // c plays fully…
+		{4, 1, "b", "a", 4},   // dissolve a→b, FromSeekS = a.InPoint(0)+4
+		{5, 2, "b", "", 0},    // rest of b
+		{7, 1, "", "", 0},     // gap
+		{8, 2, "c", "", 0},    // c plays fully…
 		{10, 0.5, "", "c", 3}, // …then fades to black; FromSeekS = c.InPoint(1) + dur(2) = 3
 		{10.5, 1.5, "", "", 0},
 		{12, 2, "d", "", 0},
@@ -159,3 +159,62 @@ func TestFlattenDissolveSameTrackOnly(t *testing.T) {
 		}
 	}
 }
+
+// DuckWindows parity table — MIRRORED in doc-runtime's timeline.test.ts
+// ("duckWindows parity table"): same cases, same expectations, both ends.
+// A change failing one side is preview/export duck divergence.
+func TestDuckWindows(t *testing.T) {
+	sp := func(id string, start, dur float64, speech bool) *Op {
+		return &Op{OpID: "a_" + id, Type: "add_clip", TrackID: "a1",
+			Clip: &ClipDef{ID: id, Name: id, VersionID: "v_" + id, Start: start, Duration: dur, Speech: &speech}}
+	}
+	base := []*Op{
+		{OpID: "t1", Type: "add_track", Track: &TrackDef{ID: "a1", Kind: "audio"}},
+		{OpID: "t2", Type: "add_track", Track: &TrackDef{ID: "c1", Kind: "caption"}},
+	}
+	cases := []struct {
+		name  string
+		ops   []*Op
+		total float64
+		want  []DuckWindow
+	}{
+		{"empty state", base, 10, nil},
+		{"overlapping spans merge", append(append([]*Op{}, base...),
+			sp("a", 1, 3, true), sp("b", 2, 4, true)), 10,
+			[]DuckWindow{{1, 6}}},
+		{"touching within epsilon merges", append(append([]*Op{}, base...),
+			sp("a", 1, 2, true), sp("b", 3, 2, true)), 10,
+			[]DuckWindow{{1, 5}}},
+		{"gap beyond epsilon stays split", append(append([]*Op{}, base...),
+			sp("a", 1, 2, true), sp("b", 3.5, 1, true)), 10,
+			[]DuckWindow{{1, 3}, {3.5, 4.5}}},
+		{"identical starts take the longer end", append(append([]*Op{}, base...),
+			sp("a", 2, 1, true), sp("b", 2, 3, true)), 10,
+			[]DuckWindow{{2, 5}}},
+		{"straddling totalS clamps", append(append([]*Op{}, base...),
+			sp("a", 8, 5, true)), 10,
+			[]DuckWindow{{8, 10}}},
+		{"at exactly totalS drops", append(append([]*Op{}, base...),
+			sp("a", 10, 2, true)), 10, nil},
+		{"non-speech ignored", append(append([]*Op{}, base...),
+			sp("a", 1, 2, false)), 10, nil},
+		{"caption-track speech counts (parity posture)", append(append([]*Op{}, base...),
+			&Op{OpID: "cc", Type: "add_clip", TrackID: "c1",
+				Clip: &ClipDef{ID: "cap", Name: "cap", Text: "x", Start: 4, Duration: 1, Speech: boolPtr(true)}}), 10,
+			[]DuckWindow{{4, 5}}},
+	}
+	for _, tc := range cases {
+		got := DuckWindows(Reduce(tc.ops), tc.total)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s[%d]: got %v want %v", tc.name, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

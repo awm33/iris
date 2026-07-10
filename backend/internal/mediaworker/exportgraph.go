@@ -44,6 +44,7 @@ func buildExportArgs(
 	fps int,
 	totalS float64,
 	captions []captionOverlay,
+	ducks []timeline.DuckWindow,
 	outPath string,
 ) ([]string, error) {
 	if fps <= 0 {
@@ -185,7 +186,7 @@ func buildExportArgs(
 		cur = out
 	}
 
-	aInputs, aFilters, _ := buildAudioSection(entries, srcFor, fps, totalQ, nInput)
+	aInputs, aFilters, _ := buildAudioSection(entries, srcFor, fps, totalQ, nInput, ducks)
 	inputs = append(inputs, aInputs...)
 	filters = append(filters, aFilters...)
 
@@ -214,6 +215,7 @@ func buildAudioSection(
 	fps int,
 	totalQ float64,
 	nInput int,
+	ducks []timeline.DuckWindow,
 ) (inputs []string, filters []string, audible int) {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
 	frameAt := func(t float64) int { return int(math.Round(t * float64(fps))) }
@@ -225,12 +227,16 @@ func buildAudioSection(
 		}
 		label := fmt.Sprintf("a%d", len(aLabels))
 		delayMs := int(math.Round(float64(frameAt(e.Start)) / float64(fps) * 1000))
+		duck := ""
+		if !e.Clip.Speech {
+			duck = duckVolume(e, ducks, f)
+		}
 		inputs = append(inputs,
 			"-ss", f(e.Clip.InPoint), "-t", f(e.Dur), "-i", src.Path)
 		filters = append(filters, fmt.Sprintf(
 			"[%d:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"+
-				"apad=pad_dur=%s,atrim=end=%s,asetpts=PTS-STARTPTS,adelay=%d:all=1[%s]",
-			nInput, f(e.Dur), f(e.Dur), delayMs, label))
+				"apad=pad_dur=%s,atrim=end=%s,asetpts=PTS-STARTPTS%s,adelay=%d:all=1[%s]",
+			nInput, f(e.Dur), f(e.Dur), duck, delayMs, label))
 		nInput++
 		aLabels = append(aLabels, "["+label+"]")
 	}
@@ -247,6 +253,38 @@ func buildAudioSection(
 			strings.Join(aLabels, ""), len(aLabels), f(totalQ), f(totalQ)))
 	}
 	return inputs, filters, len(aLabels)
+}
+
+// duckVolume renders the deterministic duck curve for one NON-speech entry
+// as a volume filter link (leading comma; empty when no window overlaps).
+// Placed after asetpts, so t is ENTRY-LOCAL: window times shift by −Start.
+// The curve is the shared contract (timeline.DuckWindows / duckWindows in
+// doc-runtime): g(t) = 1 − (1−DuckLevel)·coverage, coverage = max over
+// windows of the DuckRampS-edged trapezoid — numeric-only expression.
+func duckVolume(e timeline.AudioEntry, ducks []timeline.DuckWindow, f func(float64) string) string {
+	cov := ""
+	for _, w := range ducks {
+		s0 := w.Start - e.Start
+		e0 := w.End - e.Start
+		if e0+timeline.DuckRampS <= 0 || s0-timeline.DuckRampS >= e.Dur {
+			continue // no overlap with this entry's span (incl. ramps)
+		}
+		// Constants parenthesized: a negative s0 (window starting before
+		// the entry — the COMMON case for a music bed) would otherwise
+		// print "t--1.0", which ffmpeg happens to parse as t+1 but is
+		// load-bearing grammar luck (review PR38-F1, verified live).
+		term := fmt.Sprintf("clip(min((t-(%s))/%s\\,((%s)-t)/%s)\\,0\\,1)",
+			f(s0), f(timeline.DuckRampS), f(e0+timeline.DuckRampS), f(timeline.DuckRampS))
+		if cov == "" {
+			cov = term
+		} else {
+			cov = fmt.Sprintf("max(%s\\,%s)", cov, term)
+		}
+	}
+	if cov == "" {
+		return ""
+	}
+	return fmt.Sprintf(",volume=volume='1-%s*(%s)':eval=frame", f(1-timeline.DuckLevel), cov)
 }
 
 // filterSafePath admits a path into filter_complex only when it contains no

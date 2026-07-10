@@ -5,6 +5,7 @@ import {
   bladeOps,
   type ClipColor,
   clipAt,
+  duckWindows,
   rippleOps,
   MIN_CLIP_S,
   newOpId as oid,
@@ -384,7 +385,7 @@ export function TimelinePage(props: {
       const take = c.shotId ? takeByShot.get(c.shotId) : undefined;
       // Image takes render as stills (overlay), never as decode segments.
       const sourceId = c.versionId ?? (take?.contentType.startsWith("video/") ? take.versionId : undefined);
-      return sourceId ? [{ sourceId, clipId: c.id, startS: c.start, durationS: c.duration, inPointS: c.inPoint }] : [];
+      return sourceId ? [{ sourceId, clipId: c.id, startS: c.start, durationS: c.duration, inPointS: c.inPoint, speech: c.speech }] : [];
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoClips, takeByShot]);
@@ -414,11 +415,19 @@ export function TimelinePage(props: {
       .filter((t) => t.kind === "audio")
       .flatMap((t) => t.clips)
       .flatMap((c) =>
-        c.versionId ? [{ sourceId: c.versionId, startS: c.start, durationS: c.duration, inPointS: c.inPoint }] : [],
+        c.versionId ? [{ sourceId: c.versionId, startS: c.start, durationS: c.duration, inPointS: c.inPoint, speech: c.speech }] : [],
       );
     return [...segments, ...audioClips];
   }, [segments, docState]);
+  const ducks = useMemo(
+    () => (docState ? duckWindows(docState, timelineDuration(docState)) : []),
+    [docState],
+  );
   const mixerRef = useRef<AudioMixer | null>(null);
+  const ducksRef = useRef(ducks);
+  useEffect(() => {
+    ducksRef.current = ducks;
+  });
   const audioSegmentsRef = useRef(audioSegments);
   useEffect(() => {
     audioSegmentsRef.current = audioSegments;
@@ -431,7 +440,7 @@ export function TimelinePage(props: {
       // Scheduled once per play from the playhead; mid-play edits reschedule
       // on the next play (the video side re-reads state live — recorded
       // asymmetry until the mixer follows doc changes).
-      mixerRef.current.play(audioSegmentsRef.current, timeRef.current);
+      mixerRef.current.play(audioSegmentsRef.current, timeRef.current, ducksRef.current);
     } else {
       mixerRef.current?.stop();
     }
@@ -447,6 +456,15 @@ export function TimelinePage(props: {
   const selectedVideoClip = useMemo(() => {
     for (const t of docState?.tracks ?? []) {
       if (t.kind !== "video") continue;
+      const c = t.clips.find((c) => c.id === selected);
+      if (c) return c;
+    }
+    return undefined;
+  }, [docState, selected]);
+  // Any audible clip (video or audio track) — the 🗣 speech flag's domain.
+  const selectedAudibleClip = useMemo(() => {
+    for (const t of docState?.tracks ?? []) {
+      if (t.kind === "caption") continue;
       const c = t.clips.find((c) => c.id === selected);
       if (c) return c;
     }
@@ -719,6 +737,27 @@ export function TimelinePage(props: {
         >
           ⧓
         </button>
+        <button
+          className={`btn secondary${selectedAudibleClip?.speech ? " tool-active" : ""}`}
+          disabled={!selectedAudibleClip}
+          title={
+            selectedAudibleClip
+              ? selectedAudibleClip.speech
+                ? "Unmark speech — other audio stops ducking under this clip"
+                : "Mark as speech — other audio ducks (−12dB, 0.15s ramps) while it plays"
+              : "Select an audio or video clip to mark as speech"
+          }
+          onClick={() => {
+            const c = selectedAudibleClip!;
+            doc.apply(
+              c.speech
+                ? { op_id: oid(), type: "set_clip_speech", clip_id: c.id }
+                : { op_id: oid(), type: "set_clip_speech", clip_id: c.id, speech: true },
+            );
+          }}
+        >
+          🗣
+        </button>
         {selectedVideoClip?.transition && (
           <select
             title="Dissolve duration"
@@ -938,7 +977,9 @@ export function TimelinePage(props: {
                     />
                   ) : (
                     <span className="truncate">
-                      {track.kind === "caption" ? `💬 ${c.text ?? ""}` : c.shotId ? `🎬 ${c.name}` : c.name}
+                      {track.kind === "caption"
+                        ? `💬 ${c.text ?? ""}`
+                        : `${c.speech ? "🗣 " : ""}${c.shotId ? `🎬 ${c.name}` : c.name}`}
                     </span>
                   )}
                   <button

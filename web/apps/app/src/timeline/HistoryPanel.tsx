@@ -35,6 +35,8 @@ function label(op: TimelineOp): string {
           ? `Dissolve ${op.transition.duration.toFixed(2)}s`
           : "Dissolve"
         : "Remove dissolve";
+    case "set_clip_speech":
+      return op.speech ? "Mark as speech" : "Unmark speech";
     case "undo":
       return "Undo";
   }

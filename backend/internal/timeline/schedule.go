@@ -231,3 +231,44 @@ func AudioEntries(st *State, totalS float64) []AudioEntry {
 	}
 	return out
 }
+
+// Ducking (M7): deterministic gain automation — see duckWindows in
+// doc-runtime for the shared contract (both ends compute from the SAME
+// merged windows; g(t) = 1 − (1−DuckLevel)·coverage with DuckRampS linear
+// attack/release).
+const (
+	DuckLevel = 0.25
+	DuckRampS = 0.15
+)
+
+type DuckWindow struct {
+	Start, End float64
+}
+
+// DuckWindows mirrors duckWindows in timeline.ts exactly: merged union of
+// speech-clip spans clamped to [0, totalS). Every speech-flagged clip
+// counts — resolution/audio presence is a render concern; determinism
+// across both ends is the contract.
+func DuckWindows(st *State, totalS float64) []DuckWindow {
+	var spans []DuckWindow
+	for _, tr := range st.Tracks {
+		for _, c := range tr.Clips {
+			if !c.Speech || c.Start >= totalS {
+				continue
+			}
+			spans = append(spans, DuckWindow{Start: math.Max(0, c.Start), End: math.Min(totalS, c.Start+c.Duration)})
+		}
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].Start < spans[j].Start })
+	var merged []DuckWindow
+	for _, sp := range spans {
+		if n := len(merged); n > 0 && sp.Start <= merged[n-1].End+1e-6 {
+			if sp.End > merged[n-1].End {
+				merged[n-1].End = sp.End
+			}
+		} else {
+			merged = append(merged, sp)
+		}
+	}
+	return merged
+}

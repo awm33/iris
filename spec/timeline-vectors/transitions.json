@@ -144,7 +144,8 @@
             "transition": {
               "kind": "dissolve",
               "duration": 0.1
-            }
+            },
+            "speech": false
           },
           {
             "id": "y",
@@ -158,7 +159,8 @@
             "transition": {
               "kind": "dissolve",
               "duration": 0.5
-            }
+            },
+            "speech": false
           },
           {
             "id": "w",
@@ -172,7 +174,8 @@
             "transition": {
               "kind": "dissolve",
               "duration": 2
-            }
+            },
+            "speech": false
           },
           {
             "id": "j",
@@ -186,7 +189,8 @@
             "transition": {
               "kind": "dissolve",
               "duration": 0.5
-            }
+            },
+            "speech": false
           },
           {
             "id": "z",
@@ -200,7 +204,8 @@
             "transition": {
               "kind": "dissolve",
               "duration": 0.5
-            }
+            },
+            "speech": false
           }
         ]
       }

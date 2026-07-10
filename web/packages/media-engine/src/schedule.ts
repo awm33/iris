@@ -15,6 +15,8 @@ export interface Segment {
   durationS: number;
   /** Source in-point, seconds. */
   inPointS: number;
+  /** Speech segment (ducking): exempt from duck-gain automation. */
+  speech?: boolean;
 }
 
 /** The segment covering timeline time t (first match wins — the app

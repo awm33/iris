@@ -30,6 +30,7 @@ type Op struct {
 	Text       *string        `json:"text,omitempty"`
 	Color      *ColorDef      `json:"color,omitempty"`
 	Transition *TransitionDef `json:"transition,omitempty"`
+	Speech     *bool          `json:"speech,omitempty"`
 	Target     string         `json:"target,omitempty"`
 }
 
@@ -138,6 +139,7 @@ type ClipDef struct {
 	Text       string         `json:"text,omitempty"`
 	Color      *ColorDef      `json:"color,omitempty"`
 	Transition *TransitionDef `json:"transition,omitempty"`
+	Speech     *bool          `json:"speech,omitempty"`
 	Start      float64        `json:"start"`
 	Duration   float64        `json:"duration"`
 	InPoint    *float64       `json:"in_point,omitempty"`
@@ -151,6 +153,7 @@ type Clip struct {
 	Text       string
 	Color      *Color      // nil = neutral
 	Transition *Transition // nil = hard cut
+	Speech     bool
 	Start      float64
 	Duration   float64
 	InPoint    float64
@@ -322,6 +325,7 @@ func Reduce(ops []*Op) *State {
 				Text:       op.Clip.Text,
 				Color:      col,
 				Transition: trn,
+				Speech:     op.Clip.Speech != nil && *op.Clip.Speech,
 				Start:      max(0, op.Clip.Start),
 				Duration:   max(MinClipS, op.Clip.Duration),
 				InPoint:    max(0, inPoint),
@@ -405,6 +409,12 @@ func Reduce(ops []*Op) *State {
 				t := ClampTransition(op.Transition)
 				clip.Transition = &t
 			}
+		case "set_clip_speech":
+			_, clip := findClip(op.ClipID)
+			if clip == nil {
+				break
+			}
+			clip.Speech = op.Speech != nil && *op.Speech
 		}
 	}
 	return st
