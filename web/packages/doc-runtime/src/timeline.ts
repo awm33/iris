@@ -6,6 +6,8 @@ import { type CanvasOp, newOpId } from "./ops";
 // only the op types differ. Times are SECONDS (fps lives on the timeline
 // row for display/snapping).
 
+export type TrackKind = "video" | "audio" | "caption";
+
 export interface ClipInit {
   id: string;
   name: string;
@@ -14,13 +16,15 @@ export interface ClipInit {
   /** Shot clip: a placeholder bound to a story shot — the selected take
    * resolves to pixels at render/preview time (never stored here). */
   shot_id?: string;
+  /** Caption clip: the text shown for the clip's span (caption tracks). */
+  text?: string;
   start: number; // timeline position, seconds
   duration: number; // seconds on the timeline
   in_point?: number; // source in, seconds (default 0)
 }
 
 export type TimelineOp =
-  | { op_id: string; type: "add_track"; track: { id: string; kind: "video" | "audio"; name?: string }; index?: number }
+  | { op_id: string; type: "add_track"; track: { id: string; kind: TrackKind; name?: string }; index?: number }
   | { op_id: string; type: "remove_track"; track_id: string }
   | { op_id: string; type: "add_clip"; track_id: string; clip: ClipInit }
   | { op_id: string; type: "remove_clip"; clip_id: string }
@@ -32,6 +36,7 @@ export type TimelineOp =
       track_id?: string; // cross-track move
     }
   | { op_id: string; type: "trim_clip"; clip_id: string; start?: number; duration?: number; in_point?: number }
+  | { op_id: string; type: "set_clip_text"; clip_id: string; text: string }
   | { op_id: string; type: "undo"; target: string };
 
 export interface ClipState {
@@ -39,6 +44,7 @@ export interface ClipState {
   name: string;
   versionId?: string;
   shotId?: string;
+  text?: string;
   start: number;
   duration: number;
   inPoint: number;
@@ -46,7 +52,7 @@ export interface ClipState {
 
 export interface TrackState {
   id: string;
-  kind: "video" | "audio";
+  kind: TrackKind;
   name: string;
   clips: ClipState[]; // kept sorted by start
 }
@@ -77,7 +83,7 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
         const t: TrackState = {
           id: op.track.id,
           kind: op.track.kind,
-          name: op.track.name ?? (op.track.kind === "video" ? "V" : "A"),
+          name: op.track.name ?? (op.track.kind === "video" ? "V" : op.track.kind === "caption" ? "C" : "A"),
           clips: [],
         };
         const i = op.index === undefined ? tracks.length : Math.max(0, Math.min(op.index, tracks.length));
@@ -97,6 +103,7 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
           name: op.clip.name,
           versionId: op.clip.version_id,
           shotId: op.clip.shot_id,
+          text: op.clip.text,
           start: Math.max(0, op.clip.start),
           duration: Math.max(MIN_CLIP_S, op.clip.duration),
           inPoint: Math.max(0, op.clip.in_point ?? 0),
@@ -136,6 +143,11 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
         if (op.duration !== undefined) clip.duration = Math.max(MIN_CLIP_S, op.duration);
         if (op.in_point !== undefined) clip.inPoint = Math.max(0, op.in_point);
         sort(hit[0]);
+        break;
+      }
+      case "set_clip_text": {
+        const hit = findClip(op.clip_id);
+        if (hit) hit[1].text = op.text;
         break;
       }
     }
@@ -254,7 +266,7 @@ export function snapTime(
 }
 
 /** Topmost video clip covering time t (track order = priority). */
-export function clipAt(state: TimelineState, t: number, kind: "video" | "audio" = "video"): ClipState | undefined {
+export function clipAt(state: TimelineState, t: number, kind: TrackKind = "video"): ClipState | undefined {
   for (const track of state.tracks) {
     if (track.kind !== kind) continue;
     const c = track.clips.find((c) => t >= c.start && t < c.start + c.duration);

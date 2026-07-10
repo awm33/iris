@@ -11,6 +11,7 @@ export { OpSync, type OpSyncTransport, type SyncStatus, isConflict } from "./syn
 export {
   TimelineDoc,
   type TimelineOp,
+  type TrackKind,
   type TimelineState,
   type TrackState,
   type ClipState,

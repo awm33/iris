@@ -3,6 +3,7 @@ package mediaworker
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -28,6 +29,12 @@ import (
 // tpad has nothing to clone: ffmpeg exits 0 with the piece silently missing
 // (review PR34-H2). The seek is clamped to one frame before the probed
 // source duration so at least one frame always decodes.
+// captionOverlay is one Go-rendered caption image with its enable window.
+type captionOverlay struct {
+	Path       string
+	Start, End float64
+}
+
 func buildExportArgs(
 	pieces []timeline.Piece,
 	entries []timeline.AudioEntry,
@@ -36,6 +43,7 @@ func buildExportArgs(
 	p exportPreset,
 	fps int,
 	totalS float64,
+	captions []captionOverlay,
 	outPath string,
 ) ([]string, error) {
 	if fps <= 0 {
@@ -110,19 +118,69 @@ func buildExportArgs(
 	if len(vLabels) == 0 {
 		return nil, fmt.Errorf("no video pieces to render")
 	}
-	filters = append(filters, fmt.Sprintf("%sconcat=n=%d:v=1:a=0[vout]",
-		strings.Join(vLabels, ""), len(vLabels)))
+	// Captions burn in AFTER concat, as Go-rendered PNGs composited with
+	// `overlay` + numeric enable windows (see captionimg.go for why not
+	// subtitles/drawtext). User text never enters the filter graph.
+	concatOut := "[vout]"
+	if len(captions) > 0 {
+		concatOut = "[vcat]"
+	}
+	filters = append(filters, fmt.Sprintf("%sconcat=n=%d:v=1:a=0%s",
+		strings.Join(vLabels, ""), len(vLabels), concatOut))
+	cur := "[vcat]"
+	for i, c := range captions {
+		if _, err := filterSafePath(c.Path); err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, "-i", c.Path)
+		out := fmt.Sprintf("[vcap%d]", i)
+		if i == len(captions)-1 {
+			out = "[vout]"
+		}
+		filters = append(filters, fmt.Sprintf(
+			"%s[%d:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-%d:enable='between(t,%s,%s)'%s",
+			cur, nInput, p.H/20, f(c.Start), f(c.End), out))
+		nInput++
+		cur = out
+	}
 
-	// Audio entries → [a0..aK] → amix, delays on the same frame grid as the
-	// video cuts. Silence-only timelines still get a track: players expect
-	// one, and the mix keeps A/V duration equal. An audio in-point past EOF
-	// needs no clamp: zero decoded samples + apad = silence, which IS the
-	// preview's behavior for an out-of-range audio offset.
+	aInputs, aFilters, _ := buildAudioSection(entries, srcFor, fps, totalQ, nInput)
+	inputs = append(inputs, aInputs...)
+	filters = append(filters, aFilters...)
+
+	args := append([]string{"-hide_banner", "-nostdin", "-v", "error"}, inputs...)
+	args = append(args,
+		"-filter_complex", strings.Join(filters, ";"),
+		"-map", "[vout]", "-map", "[aout]",
+		"-c:v", "libx264", "-preset", p.X264, "-crf", p.CRF,
+		"-c:a", "aac", "-b:a", p.AudioKbs,
+		"-movflags", "+faststart",
+		"-y", outPath)
+	return args, nil
+}
+
+// buildAudioSection emits the mixer-parity audio graph ending at [aout]:
+// one input per audible entry, per-entry pad/trim/delay on the video frame
+// grid, then amix (unnormalized — WebAudio sums) padded/cut to exactly
+// totalQ. Silence-only timelines still get a track: players expect one, and
+// the mix keeps A/V duration equal. An audio in-point past EOF needs no
+// clamp: zero decoded samples + apad = silence, which IS the preview's
+// behavior for an out-of-range audio offset. Shared by export and
+// transcribe so "what sounds" can never diverge between them.
+func buildAudioSection(
+	entries []timeline.AudioEntry,
+	srcFor func(*timeline.Clip) *exportSource,
+	fps int,
+	totalQ float64,
+	nInput int,
+) (inputs []string, filters []string, audible int) {
+	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
+	frameAt := func(t float64) int { return int(math.Round(t * float64(fps))) }
 	var aLabels []string
 	for _, e := range entries {
 		src := srcFor(e.Clip)
 		if src == nil || !src.HasAudio {
-			continue // stills, silent sources — the mixer's null-cached skip
+			continue // stills, captions, silent sources — the mixer's null-cached skip
 		}
 		label := fmt.Sprintf("a%d", len(aLabels))
 		delayMs := int(math.Round(float64(frameAt(e.Start)) / float64(fps) * 1000))
@@ -147,14 +205,49 @@ func buildExportArgs(
 			"%samix=inputs=%d:duration=longest:normalize=0,apad=whole_dur=%s,atrim=end=%s[aout]",
 			strings.Join(aLabels, ""), len(aLabels), f(totalQ), f(totalQ)))
 	}
+	return inputs, filters, len(aLabels)
+}
 
-	args := append([]string{"-hide_banner", "-nostdin", "-v", "error"}, inputs...)
-	args = append(args,
-		"-filter_complex", strings.Join(filters, ";"),
-		"-map", "[vout]", "-map", "[aout]",
-		"-c:v", "libx264", "-preset", p.X264, "-crf", p.CRF,
-		"-c:a", "aac", "-b:a", p.AudioKbs,
-		"-movflags", "+faststart",
-		"-y", outPath)
-	return args, nil
+// filterSafePath admits a path into filter_complex only when it contains no
+// filter metacharacters — worker temp paths never do; anything else is a
+// bug, not an escaping exercise.
+func filterSafePath(p string) (string, error) {
+	if strings.ContainsAny(p, `':,;[]\`) {
+		return "", fmt.Errorf("path %q unsafe for filter graph", p)
+	}
+	return p, nil
+}
+
+// captionClips collects every caption-track clip with text, chronological
+// across tracks — the shared source for the SRT sidecar and the burn-in.
+func captionClips(st *timeline.State) []*timeline.Clip {
+	var caps []*timeline.Clip
+	for _, tr := range st.Tracks {
+		if tr.Kind != "caption" {
+			continue
+		}
+		for _, c := range tr.Clips {
+			if strings.TrimSpace(c.Text) != "" {
+				caps = append(caps, c)
+			}
+		}
+	}
+	sort.SliceStable(caps, func(i, j int) bool { return caps[i].Start < caps[j].Start })
+	return caps
+}
+
+// buildSRT renders the caption clips as SubRip. Empty string when no
+// caption text exists.
+func buildSRT(st *timeline.State) string {
+	var b strings.Builder
+	for i, c := range captionClips(st) {
+		fmt.Fprintf(&b, "%d\n%s --> %s\n%s\n\n",
+			i+1, srtTime(c.Start), srtTime(c.Start+c.Duration), strings.TrimSpace(c.Text))
+	}
+	return b.String()
+}
+
+func srtTime(t float64) string {
+	ms := int(math.Round(t * 1000))
+	return fmt.Sprintf("%02d:%02d:%02d,%03d", ms/3600000, ms/60000%60, ms/1000%60, ms%1000)
 }

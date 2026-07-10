@@ -26,6 +26,7 @@ function normalize(st: TimelineState) {
       in_point: c.inPoint,
       version_id: c.versionId ?? "",
       shot_id: c.shotId ?? "",
+      text: c.text ?? "",
     })),
   }));
 }

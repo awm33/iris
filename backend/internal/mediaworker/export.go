@@ -142,56 +142,58 @@ func (w *Worker) failExport(job *queue.MediaJob, exportID string, jobErr error) 
 	return jobErr
 }
 
-func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID, timelineID, presetName string, preset exportPreset) error {
-	// 1. Timeline + ops → reduced state.
-	var docID, tlName string
-	var fps int32
+// renderInputs is the shared front half of every render-shaped job (export,
+// transcribe): the reduced doc plus clip→version resolution.
+type renderInputs struct {
+	docID, tlName string
+	fps           int32
+	headSeq       int64 // CAS base for jobs that append ops back
+	st            *timeline.State
+	totalS        float64
+	versionByClip map[string]string // clip id → version id
+	unresolved    []string          // shot clips with no selected take (caller decides severity)
+}
+
+func (w *Worker) loadRenderInputs(ctx context.Context, timelineID string) (*renderInputs, error) {
+	ri := &renderInputs{versionByClip: map[string]string{}}
 	err := w.Pool.QueryRow(ctx, `
-		SELECT doc_id, name, fps FROM timelines WHERE id = $1`, timelineID).
-		Scan(&docID, &tlName, &fps)
+		SELECT doc_id, name, fps, head_seq FROM timelines WHERE id = $1`, timelineID).
+		Scan(&ri.docID, &ri.tlName, &ri.fps, &ri.headSeq)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return permanent(fmt.Errorf("timeline %s does not exist", timelineID))
+		return nil, permanent(fmt.Errorf("timeline %s does not exist", timelineID))
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	rows, err := w.Pool.Query(ctx, `SELECT op FROM doc_ops WHERE doc_id = $1 ORDER BY seq`, docID)
+	rows, err := w.Pool.Query(ctx, `SELECT op FROM doc_ops WHERE doc_id = $1 ORDER BY seq`, ri.docID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var payloads [][]byte
 	for rows.Next() {
 		var p []byte
 		if err := rows.Scan(&p); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		payloads = append(payloads, p)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	ops, err := timeline.ParseOps(payloads)
 	if err != nil {
-		return permanent(fmt.Errorf("op log unreadable: %w", err))
+		return nil, permanent(fmt.Errorf("op log unreadable: %w", err))
 	}
-	st := timeline.Reduce(ops)
-	totalS := timeline.Duration(st)
-	if totalS <= 0 {
-		return permanent(errors.New("timeline is empty — nothing to export"))
-	}
+	ri.st = timeline.Reduce(ops)
+	ri.totalS = timeline.Duration(ri.st)
 
-	// 2. Resolve every clip to a version. Unpicked shots fail loudly and
-	// all at once: export is the final render, silent black is worse than
-	// a message naming what's missing.
-	versionByClip := map[string]string{} // clip id → version id ("" = unresolvable)
-	var unresolved []string
-	for _, tr := range st.Tracks {
+	for _, tr := range ri.st.Tracks {
 		for _, c := range tr.Clips {
 			switch {
 			case c.VersionID != "":
-				versionByClip[c.ID] = c.VersionID
+				ri.versionByClip[c.ID] = c.VersionID
 			case c.ShotID != "":
 				var vid string
 				err := w.Pool.QueryRow(ctx, `
@@ -199,47 +201,86 @@ func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID
 					FROM shots sh JOIN takes t ON t.id = sh.selected_take_id
 					WHERE sh.id = $1`, c.ShotID).Scan(&vid)
 				if errors.Is(err, pgx.ErrNoRows) || (err == nil && vid == "") {
-					unresolved = append(unresolved, fmt.Sprintf("clip %q (shot %s) has no selected take", c.Name, c.ShotID))
+					ri.unresolved = append(ri.unresolved, fmt.Sprintf("clip %q (shot %s) has no selected take", c.Name, c.ShotID))
 					continue
 				}
 				if err != nil {
-					return err
+					return nil, err
 				}
-				versionByClip[c.ID] = vid
+				ri.versionByClip[c.ID] = vid
 			}
 		}
 	}
-	if len(unresolved) > 0 {
-		return permanent(fmt.Errorf("cannot export: %s", strings.Join(unresolved, "; ")))
-	}
+	return ri, nil
+}
 
-	// 3. Download each unique source once (originals — quality decisions
-	// live in the preset, not in proxy choice).
-	tmpDir, err := os.MkdirTemp("", "iris-export-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	sources := map[string]*exportSource{} // version id → source
+// downloadSources fetches each unique resolved version once (originals —
+// quality decisions live in the preset, not in proxy choice).
+func (w *Worker) downloadSources(ctx context.Context, tmpDir string, versionByClip map[string]string) (map[string]*exportSource, error) {
+	sources := map[string]*exportSource{}
 	for _, vid := range versionByClip {
 		if _, done := sources[vid]; done {
 			continue
 		}
 		src, err := w.fetchExportSource(ctx, tmpDir, vid)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		sources[vid] = src
 	}
+	return sources, nil
+}
 
-	// 4. Flatten + audio plan.
+func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID, timelineID, presetName string, preset exportPreset) error {
+	ri, err := w.loadRenderInputs(ctx, timelineID)
+	if err != nil {
+		return err
+	}
+	if ri.totalS <= 0 {
+		return permanent(errors.New("timeline is empty — nothing to export"))
+	}
+	// Unpicked shots fail loudly and all at once: export is the final
+	// render, silent black is worse than a message naming what's missing.
+	if len(ri.unresolved) > 0 {
+		return permanent(fmt.Errorf("cannot export: %s", strings.Join(ri.unresolved, "; ")))
+	}
+	docID, tlName, fps, st, totalS, versionByClip :=
+		ri.docID, ri.tlName, ri.fps, ri.st, ri.totalS, ri.versionByClip
+	_ = docID
+
+	tmpDir, err := os.MkdirTemp("", "iris-export-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	sources, err := w.downloadSources(ctx, tmpDir, versionByClip)
+	if err != nil {
+		return err
+	}
+
 	pieces := timeline.Flatten(st, totalS)
 	entries := timeline.AudioEntries(st, totalS)
 
+	// Captions burn in from the SAME reduced state the video renders from
+	// (Go-rendered PNGs — captionimg.go); the SRT lands beside the artifact
+	// as a derived blob.
+	srt := buildSRT(st)
+	var captions []captionOverlay
+	for i, c := range captionClips(st) {
+		img, err := renderCaptionPNG(c.Text, preset.W)
+		if err != nil {
+			return permanent(fmt.Errorf("caption %q: %w", c.Text, err))
+		}
+		path := fmt.Sprintf("%s/cap%d.png", tmpDir, i)
+		if err := os.WriteFile(path, img, 0o644); err != nil {
+			return err
+		}
+		captions = append(captions, captionOverlay{Path: path, Start: c.Start, End: c.Start + c.Duration})
+	}
+
 	// 5. Compose + run ffmpeg.
 	outPath := tmpDir + "/out.mp4"
-	args, err := buildExportArgs(pieces, entries, versionByClip, sources, preset, int(fps), totalS, outPath)
+	args, err := buildExportArgs(pieces, entries, versionByClip, sources, preset, int(fps), totalS, captions, outPath)
 	if err != nil {
 		return err
 	}
@@ -281,13 +322,21 @@ func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID
 		return fmt.Errorf("store export blob: %w", err)
 	}
 
+	assetID, versionID := ids.New("ast"), ids.New("astv")
+	srtKey := ""
+	if srt != "" {
+		srtKey = "derived/" + versionID + "/captions.srt"
+		if err := w.Blob.PutObject(ctx, srtKey, "text/plain; charset=utf-8",
+			strings.NewReader(srt), int64(len(srt))); err != nil {
+			return fmt.Errorf("store srt sidecar: %w", err)
+		}
+	}
+
 	tx, err := w.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-
-	assetID, versionID := ids.New("ast"), ids.New("astv")
 	name := fmt.Sprintf("Export · %s · %s", tlName, presetName)
 	var projectID string
 	if err := tx.QueryRow(ctx, `SELECT project_id FROM timelines WHERE id = $1`, timelineID).Scan(&projectID); err != nil {
@@ -304,6 +353,13 @@ func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID
 		VALUES ($1, $2, $3, 'video/mp4', $4)`,
 		versionID, assetID, sha, size); err != nil {
 		return err
+	}
+	if srtKey != "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE asset_versions SET meta = meta || jsonb_build_object('srt_key', $2::text)
+			WHERE id = $1`, versionID, srtKey); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE assets SET head_version_id = $2 WHERE id = $1`, assetID, versionID); err != nil {

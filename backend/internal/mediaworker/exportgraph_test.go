@@ -55,7 +55,7 @@ func TestBuildExportArgs(t *testing.T) {
 	}
 
 	args, err := buildExportArgs(pieces, entries, versionByClip, sources,
-		exportPresets["draft"], 24, 6, "/t/out.mp4")
+		exportPresets["draft"], 24, 6, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestBuildExportArgsFrameGridQuantization(t *testing.T) {
 	args, err := buildExportArgs(pieces, nil,
 		map[string]string{"a": "v1", "b": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
-		exportPresets["draft"], 24, 3.8, "/t/out.mp4")
+		exportPresets["draft"], 24, 3.8, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestBuildExportArgsClampsSeekToSourceEOF(t *testing.T) {
 		[]timeline.Piece{{Start: 0, Duration: 2, Clip: c}}, nil,
 		map[string]string{"a": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 5}},
-		exportPresets["draft"], 24, 2, "/t/out.mp4")
+		exportPresets["draft"], 24, 2, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestBuildExportArgsSkipsZeroFramePieces(t *testing.T) {
 	args, err := buildExportArgs(pieces, nil,
 		map[string]string{"a": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
-		exportPresets["draft"], 24, 4, "/t/out.mp4")
+		exportPresets["draft"], 24, 4, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,11 +170,110 @@ func TestBuildExportArgsSilenceTrack(t *testing.T) {
 		[]timeline.Piece{{Start: 0, Duration: 2, Clip: clip}},
 		nil, map[string]string{"c": "v1"},
 		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
-		exportPresets["master"], 24, 2, "/t/out.mp4")
+		exportPresets["master"], 24, 2, nil, "/t/out.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if graph := graphOf(t, args); !strings.Contains(graph, "anullsrc=channel_layout=stereo:sample_rate=48000,atrim=end=2.000000[aout]") {
 		t.Errorf("no-audio timeline must still get a silence track: %s", graph)
+	}
+}
+
+func TestBuildExportArgsCaptionBurnIn(t *testing.T) {
+	clip := &timeline.Clip{ID: "c", Name: "x", VersionID: "v1"}
+	caps := []captionOverlay{
+		{Path: "/tmp/x/cap0.png", Start: 0, End: 2.5},
+		{Path: "/tmp/x/cap1.png", Start: 2.5, End: 4},
+	}
+	args, err := buildExportArgs(
+		[]timeline.Piece{{Start: 0, Duration: 4, Clip: clip}},
+		nil, map[string]string{"c": "v1"},
+		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
+		exportPresets["draft"], 24, 4, caps, "/t/out.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := graphOf(t, args)
+	// Video is input 0; caption PNGs are inputs 1 and 2, chained after
+	// concat, last link labeled [vout].
+	for _, want := range []string{
+		"concat=n=1:v=1:a=0[vcat]",
+		"[vcat][1:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-36:enable='between(t,0.000000,2.500000)'[vcap0]",
+		"[vcap0][2:v]overlay=(main_w-overlay_w)/2:main_h-overlay_h-36:enable='between(t,2.500000,4.000000)'[vout]",
+	} {
+		if !strings.Contains(graph, want) {
+			t.Errorf("graph missing %q\ngraph: %s", want, graph)
+		}
+	}
+	if got := inputPaths(args); strings.Join(got, ",") != "/t/a.mp4,/tmp/x/cap0.png,/tmp/x/cap1.png" {
+		t.Errorf("input order wrong: %v", got)
+	}
+	// A path with filter metacharacters is a bug upstream, never escaped through.
+	if _, err := buildExportArgs(
+		[]timeline.Piece{{Start: 0, Duration: 2, Clip: clip}},
+		nil, map[string]string{"c": "v1"},
+		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
+		exportPresets["draft"], 24, 2,
+		[]captionOverlay{{Path: "/tmp/evil':x/cap.png", Start: 0, End: 1}}, "/t/out.mp4"); err == nil {
+		t.Error("unsafe caption path accepted into filter graph")
+	}
+}
+
+func TestRenderCaptionPNG(t *testing.T) {
+	img, err := renderCaptionPNG("Hello from the mixing desk — a longer caption that should wrap to more than one line at 1280", 1280)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(img) == 0 || string(img[1:4]) != "PNG" {
+		t.Fatalf("not a png (%d bytes)", len(img))
+	}
+	if _, err := renderCaptionPNG("   ", 1280); err == nil {
+		t.Error("blank caption must error (callers filter blanks)")
+	}
+}
+
+func TestBuildSRT(t *testing.T) {
+	st := &timeline.State{Tracks: []*timeline.Track{
+		{ID: "v1", Kind: "video", Clips: []*timeline.Clip{{ID: "x", Text: "ignored — not a caption track"}}},
+		{ID: "c1", Kind: "caption", Clips: []*timeline.Clip{
+			{ID: "b", Text: "second", Start: 2.5, Duration: 2},
+			{ID: "a", Text: " first ", Start: 0, Duration: 2.5},
+			{ID: "e", Text: "   ", Start: 5, Duration: 1}, // blank text drops
+		}},
+	}}
+	got := buildSRT(st)
+	want := "1\n00:00:00,000 --> 00:00:02,500\nfirst\n\n2\n00:00:02,500 --> 00:00:04,500\nsecond\n\n"
+	if got != want {
+		t.Errorf("srt mismatch\ngot:  %q\nwant: %q", got, want)
+	}
+	if buildSRT(&timeline.State{}) != "" {
+		t.Error("captionless timeline must produce empty srt")
+	}
+}
+
+func TestBuildTranscribeArgs(t *testing.T) {
+	clip := &timeline.Clip{ID: "c", Name: "x", VersionID: "v1", InPoint: 0.5}
+	args, audible := buildTranscribeArgs(
+		[]timeline.AudioEntry{{Clip: clip, Kind: "video", Start: 1, Dur: 3}},
+		map[string]string{"c": "v1"},
+		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", HasAudio: true, DurationS: 30}},
+		4, "/t/mix.wav")
+	if audible != 1 {
+		t.Fatalf("audible = %d, want 1", audible)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"-ss 0.500000 -t 3.000000 -i /t/a.mp4",
+		"adelay=1000:all=1",
+		"-map [aout] -ar 16000 -ac 1 -c:a pcm_s16le -y /t/mix.wav",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q\nargs: %s", want, joined)
+		}
+	}
+	// Silent timeline: no engine run.
+	_, audible = buildTranscribeArgs(nil, nil, nil, 4, "/t/mix.wav")
+	if audible != 0 {
+		t.Errorf("audible = %d, want 0", audible)
 	}
 }

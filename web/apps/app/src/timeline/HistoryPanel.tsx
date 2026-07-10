@@ -23,6 +23,8 @@ function label(op: TimelineOp): string {
       return `Move clip → ${op.start.toFixed(2)}s`;
     case "trim_clip":
       return "Trim clip";
+    case "set_clip_text":
+      return `Edit caption “${op.text.length > 24 ? op.text.slice(0, 24) + "…" : op.text}”`;
     case "undo":
       return "Undo";
   }

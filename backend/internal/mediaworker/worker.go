@@ -122,9 +122,9 @@ func (w *Worker) execute(ctx context.Context, job *queue.MediaJob) {
 	}()
 
 	timeout := probeTimeout
-	// prep and export both run multiple full-decode ffmpeg passes; both
-	// must stay under queue.MediaLease.
-	if job.Kind == "prep" || job.Kind == "export" {
+	// prep, export and transcribe all run multiple full-decode ffmpeg
+	// passes; all must stay under queue.MediaLease.
+	if job.Kind == "prep" || job.Kind == "export" || job.Kind == "transcribe" {
 		timeout = prepTimeout
 	}
 	jctx, cancel := context.WithTimeout(ctx, timeout)
@@ -138,6 +138,8 @@ func (w *Worker) execute(ctx context.Context, job *queue.MediaJob) {
 		err = w.runPrep(jctx, job)
 	case "export":
 		err = w.runExport(jctx, job)
+	case "transcribe":
+		err = w.runTranscribe(jctx, job)
 	default:
 		err = permanent(fmt.Errorf("unknown media job kind %q", job.Kind))
 	}

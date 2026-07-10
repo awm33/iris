@@ -32,7 +32,26 @@ service TimelineService {
   // through the normal asset signing path).
   rpc StartExport(StartExportRequest) returns (StartExportResponse);
   rpc ListExports(ListExportsRequest) returns (ListExportsResponse);
+  // Transcribe (M7): render the timeline's mixed audio server-side, run the
+  // configured speech-to-text engine, and APPEND the result to the doc as
+  // caption-track ops — this RPC only tracks lifecycle.
+  rpc StartTranscription(StartTranscriptionRequest) returns (StartTranscriptionResponse);
+  rpc ListTranscriptions(ListTranscriptionsRequest) returns (ListTranscriptionsResponse);
 }
+
+message Transcription {
+  string id = 1;
+  string timeline_id = 2;
+  string state = 3; // queued | running | complete | failed
+  string error = 4;
+  int32 segment_count = 5; // captions appended (set when complete)
+  Timestamps timestamps = 15;
+}
+
+message StartTranscriptionRequest { string timeline_id = 1; }
+message StartTranscriptionResponse { Transcription transcription = 1; }
+message ListTranscriptionsRequest { string timeline_id = 1; }
+message ListTranscriptionsResponse { repeated Transcription transcriptions = 1; }
 
 message Export {
   string id = 1;

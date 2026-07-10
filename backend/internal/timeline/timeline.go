@@ -26,12 +26,13 @@ type Op struct {
 	Start    *float64  `json:"start,omitempty"`
 	Duration *float64  `json:"duration,omitempty"`
 	InPoint  *float64  `json:"in_point,omitempty"`
+	Text     *string   `json:"text,omitempty"`
 	Target   string    `json:"target,omitempty"`
 }
 
 type TrackDef struct {
 	ID   string `json:"id"`
-	Kind string `json:"kind"` // video | audio
+	Kind string `json:"kind"` // video | audio | caption
 	Name string `json:"name,omitempty"`
 }
 
@@ -40,6 +41,7 @@ type ClipDef struct {
 	Name      string   `json:"name"`
 	VersionID string   `json:"version_id,omitempty"`
 	ShotID    string   `json:"shot_id,omitempty"`
+	Text      string   `json:"text,omitempty"`
 	Start     float64  `json:"start"`
 	Duration  float64  `json:"duration"`
 	InPoint   *float64 `json:"in_point,omitempty"`
@@ -50,6 +52,7 @@ type Clip struct {
 	Name      string
 	VersionID string
 	ShotID    string
+	Text      string
 	Start     float64
 	Duration  float64
 	InPoint   float64
@@ -159,9 +162,12 @@ func Reduce(ops []*Op) *State {
 			}
 			name := op.Track.Name
 			if name == "" {
-				if op.Track.Kind == "video" {
+				switch op.Track.Kind {
+				case "video":
 					name = "V"
-				} else {
+				case "caption":
+					name = "C"
+				default:
 					name = "A"
 				}
 			}
@@ -198,6 +204,7 @@ func Reduce(ops []*Op) *State {
 				Name:      op.Clip.Name,
 				VersionID: op.Clip.VersionID,
 				ShotID:    op.Clip.ShotID,
+				Text:      op.Clip.Text,
 				Start:     max(0, op.Clip.Start),
 				Duration:  max(MinClipS, op.Clip.Duration),
 				InPoint:   max(0, inPoint),
@@ -252,6 +259,15 @@ func Reduce(ops []*Op) *State {
 				clip.InPoint = max(0, *op.InPoint)
 			}
 			sortClips(t)
+		case "set_clip_text":
+			_, clip := findClip(op.ClipID)
+			if clip == nil {
+				break
+			}
+			clip.Text = ""
+			if op.Text != nil {
+				clip.Text = *op.Text
+			}
 		}
 	}
 	return st

@@ -162,6 +162,47 @@ func (s *TimelineServer) ListExports(ctx context.Context, req *connect.Request[i
 	return connect.NewResponse(resp), nil
 }
 
+func (s *TimelineServer) StartTranscription(ctx context.Context, req *connect.Request[irisv1.StartTranscriptionRequest]) (*connect.Response[irisv1.StartTranscriptionResponse], error) {
+	if req.Msg.TimelineId == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("timeline_id is required"))
+	}
+	tl, err := s.Store.GetTimeline(ctx, req.Msg.TimelineId)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	t := &store.Transcription{
+		WorkspaceID: tl.WorkspaceID,
+		ProjectID:   tl.ProjectID,
+		TimelineID:  tl.ID,
+	}
+	if err := s.Store.CreateTranscription(ctx, t); err != nil {
+		return nil, connectErr(err)
+	}
+	return connect.NewResponse(&irisv1.StartTranscriptionResponse{Transcription: transcriptionPB(t)}), nil
+}
+
+func (s *TimelineServer) ListTranscriptions(ctx context.Context, req *connect.Request[irisv1.ListTranscriptionsRequest]) (*connect.Response[irisv1.ListTranscriptionsResponse], error) {
+	if req.Msg.TimelineId == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("timeline_id is required"))
+	}
+	ts, err := s.Store.ListTranscriptions(ctx, req.Msg.TimelineId)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	resp := &irisv1.ListTranscriptionsResponse{}
+	for _, t := range ts {
+		resp.Transcriptions = append(resp.Transcriptions, transcriptionPB(t))
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func transcriptionPB(t *store.Transcription) *irisv1.Transcription {
+	return &irisv1.Transcription{
+		Id: t.ID, TimelineId: t.TimelineID, State: t.State, Error: t.Error,
+		SegmentCount: t.SegmentCount, Timestamps: ts(t.CreatedAt, t.UpdatedAt),
+	}
+}
+
 func exportPB(e *store.Export) *irisv1.Export {
 	return &irisv1.Export{
 		Id: e.ID, TimelineId: e.TimelineID, Preset: e.Preset, State: e.State,

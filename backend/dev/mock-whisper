@@ -1,0 +1,40 @@
+#!/bin/sh
+# Dev transcriber: whisper.cpp-CLI-compatible surface (-f wav -oj -of base)
+# emitting DETERMINISTIC placeholder segments — one per 2.5s of audio.
+# Point IRIS_WHISPER_BIN here until real local ASR is provisioned (a
+# before-dogfood item); swap in whisper-cli (wrapped to pass its -m model
+# flag) with no code change.
+set -eu
+
+wav=""
+outbase=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f)  wav="$2"; shift 2 ;;
+    -of) outbase="$2"; shift 2 ;;
+    -oj) shift ;;
+    *)   shift ;;
+  esac
+done
+[ -n "$wav" ] && [ -n "$outbase" ] || { echo "usage: mock-whisper -f in.wav -oj -of outbase" >&2; exit 2; }
+
+dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$wav")
+
+python3 - "$dur" "$outbase" <<'EOF'
+import json, math, sys
+dur = float(sys.argv[1])
+segs = []
+t = 0.0
+i = 1
+while t < dur:
+    end = min(t + 2.5, dur)
+    if end - t >= 0.2:
+        segs.append({
+            "offsets": {"from": int(t * 1000), "to": int(end * 1000)},
+            "text": f" [mock caption {i}]",
+        })
+        i += 1
+    t = end
+with open(sys.argv[2] + ".json", "w") as f:
+    json.dump({"transcription": segs}, f)
+EOF
