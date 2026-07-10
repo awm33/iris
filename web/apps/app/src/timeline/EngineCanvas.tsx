@@ -50,6 +50,9 @@ export function EngineCanvas(props: {
   grades?: Map<string, { exposure: number; contrast: number; temp: number }>;
   /** Dissolve windows, same identity discipline as grades. */
   blends?: BlendWindow[];
+  /** Timeline fps — blend alphas quantize to the frame grid so a mid-frame
+   * playhead computes the SAME mix the export's per-frame xfade does. */
+  fps?: number;
   /** Resolve a segment source to a fetchable (signed) URL. */
   srcFor: (sourceId: string) => Promise<string>;
   onError?: (message: string) => void;
@@ -215,7 +218,9 @@ export function EngineCanvas(props: {
     }
     const gradeOf = (clipId?: string) => (clipId ? grades?.get(clipId) : undefined);
     if (blend && rawFrom && rawFrom.width > 0) {
-      const p = Math.min(1, Math.max(0, (time - blend.start) / blend.duration));
+      const { fps } = propsRef.current;
+      const tq = fps ? Math.floor(time * fps + 1e-6) / fps : time;
+      const p = Math.min(1, Math.max(0, (tq - blend.start) / blend.duration));
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       if (seg && raw && raw.width > 0) {

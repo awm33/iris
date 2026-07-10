@@ -195,6 +195,12 @@ func buildExportArgs(
 		"-filter_complex", strings.Join(filters, ";"),
 		"-map", "[vout]", "-map", "[aout]",
 		"-c:v", "libx264", "-preset", p.X264, "-crf", p.CRF,
+		// Explicit BT.709: untagged output makes every downstream player
+		// (and Chrome vs ffmpeg in the golden check) GUESS the YUV matrix
+		// — 601-vs-709 disagreement is a visible hue shift on saturated
+		// content. Sources of any matrix are normalized by the filter
+		// graph's RGB roundtrips; the container should say what it holds.
+		"-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
 		"-c:a", "aac", "-b:a", p.AudioKbs,
 		"-movflags", "+faststart",
 		"-y", outPath)

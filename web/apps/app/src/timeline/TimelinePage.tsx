@@ -165,6 +165,27 @@ export function TimelinePage(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.timelineId, reloadTick]);
 
+  // Golden-frame hooks (dev only): tools/golden drives the preview
+  // headlessly — seek the playhead and capture the engine canvas. Never
+  // shipped: guarded by import.meta.env.DEV and deleted on unmount.
+  useEffect(() => {
+    if (!import.meta.env.DEV || !session) return;
+    const w = window as unknown as { __irisGolden?: unknown };
+    w.__irisGolden = {
+      seek: (t: number) => {
+        stopPlay();
+        seek(t);
+      },
+      capture: () => {
+        const c = document.querySelector<HTMLCanvasElement>(".tl-engine-canvas");
+        return c && c.width > 0 ? c.toDataURL("image/png") : null;
+      },
+    };
+    return () => {
+      delete w.__irisGolden;
+    };
+  }, [session]);
+
   useEffect(() => {
     if (!session) return;
     const unsub = session.doc.subscribe(() => tick((t) => t + 1));
@@ -400,11 +421,19 @@ export function TimelinePage(props: {
       staleTime: 5 * 60_000,
       retry: false, // parity with PreviewPane on the shared key — fail fast into the engine's error surface
       queryFn: async () => {
-        try {
-          return (await assetClient.signDownload({ versionId, variant: "proxy" })).url;
-        } catch {
-          return (await assetClient.signDownload({ versionId })).url;
+        // Golden runs read ORIGINALS: the parity check isolates the render
+        // pipeline (compositor/grades/blends/color), and the proxy's extra
+        // encode generation is prep's separate quality concern.
+        const goldenOriginals =
+          import.meta.env.DEV && (window as unknown as { __irisGoldenOriginals?: boolean }).__irisGoldenOriginals;
+        if (!goldenOriginals) {
+          try {
+            return (await assetClient.signDownload({ versionId, variant: "proxy" })).url;
+          } catch {
+            /* fall through to original */
+          }
         }
+        return (await assetClient.signDownload({ versionId })).url;
       },
     });
   // Audible spans: video segments carry their sources' embedded audio;
@@ -874,7 +903,7 @@ export function TimelinePage(props: {
       )}
       {engineOn ? (
         <div className="tl-preview">
-          <EngineCanvas segments={segments} time={time} playing={playing} grades={grades} blends={blends} srcFor={srcFor} onError={setEngineError} />
+          <EngineCanvas segments={segments} time={time} playing={playing} grades={grades} blends={blends} fps={tl.fps} srcFor={srcFor} onError={setEngineError} />
           {engineError && <div className="tl-preview-note">{engineError}</div>}
           {active?.shotId && takeByShot.get(active.shotId)?.contentType.startsWith("image/") && (
             <StillOverlay versionId={takeByShot.get(active.shotId)!.versionId} />

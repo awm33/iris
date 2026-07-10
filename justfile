@@ -49,3 +49,8 @@ worker:
 
 web:
     cd web && pnpm dev
+
+# Golden-frame parity: preview vs export, per-channel budget (needs the
+# full dev stack + `npx playwright install chromium` once).
+golden:
+    cd tools/golden && npm install --silent && node golden.mjs
