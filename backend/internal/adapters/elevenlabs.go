@@ -58,6 +58,17 @@ var elevenLabsManifest = json.RawMessage(`{
   },
   "references": {},
   "conditioning": {},
+  "params_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "voice_id": {
+        "type": "string",
+        "enum": ["iris-narrator", "mara"],
+        "description": "ElevenLabs voice — character voice refs bind here (W4)"
+      }
+    }
+  },
   "features": {"prompt": true, "seed": false},
   "pricing": {"unit": "usd_per_job", "estimates": {"draft": 0.05, "master": 0.15}},
   "limits": {"concurrency": 4, "max_queue": 64}
@@ -80,12 +91,21 @@ func (e *elevenlabs) GetManifest(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (e *elevenlabs) CreateJob(ctx context.Context, req *inference.CreateJobRequest) (*inference.JobStatus, error) {
+	voice := defaultVoice
+	if len(req.Params) > 0 {
+		var p struct {
+			VoiceID string `json:"voice_id"`
+		}
+		if json.Unmarshal(req.Params, &p) == nil && p.VoiceID != "" {
+			voice = p.VoiceID
+		}
+	}
 	body, _ := json.Marshal(map[string]any{
 		"text":     req.Prompt,
 		"model_id": "eleven_multilingual_v2",
 	})
 	post, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		e.baseURL+"/v1/text-to-speech/"+defaultVoice, bytes.NewReader(body))
+		e.baseURL+"/v1/text-to-speech/"+voice, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +135,10 @@ func (e *elevenlabs) CreateJob(ctx context.Context, req *inference.CreateJobRequ
 		return nil, &inference.ValidationError{Msg: fmt.Sprintf("elevenlabs rejected the request: %s", strings.TrimSpace(string(b)))}
 	case res.StatusCode == http.StatusTooManyRequests:
 		return nil, &inference.JobError{Code: "overloaded", Retryable: true, Message: "elevenlabs rate limited"}
+	case res.StatusCode == http.StatusNotFound:
+		// Unknown voice id: retrying can't fix it — park with the cause.
+		return nil, &inference.JobError{Code: "invalid_input", Retryable: false,
+			Message: fmt.Sprintf("elevenlabs voice %q not found", voice)}
 	case res.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("elevenlabs tts: %d", res.StatusCode)
 	}

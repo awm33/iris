@@ -118,6 +118,27 @@ func TestElevenLabsPutFailureIsTaxonomyTransient(t *testing.T) {
 	}
 }
 
+func TestElevenLabsVoiceParamRoutesAndUnknownParks(t *testing.T) {
+	el, sink, _ := elevenStack(t, "k")
+	// mara is a mock-known voice: the param must reach the URL path.
+	st, err := el.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "att-7", Task: "tts", Prompt: "hi", Params: []byte(`{"voice_id":"mara"}`),
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: sink.URL + "/up"}}},
+	})
+	if err != nil || st.State != "complete" {
+		t.Fatalf("known voice must generate: %v %+v", err, st)
+	}
+	// Unknown voices 404 remotely → non-retryable invalid_input park.
+	_, err = el.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "att-8", Task: "tts", Prompt: "hi", Params: []byte(`{"voice_id":"nobody"}`),
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: sink.URL + "/up"}}},
+	})
+	jerr, ok := err.(*inference.JobError)
+	if !ok || jerr.Retryable || jerr.Code != "invalid_input" {
+		t.Fatalf("unknown voice must park invalid_input, got %v", err)
+	}
+}
+
 func TestElevenLabsOversizeErrors(t *testing.T) {
 	old := maxArtifactBytes
 	maxArtifactBytes = 64

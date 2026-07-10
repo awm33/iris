@@ -28,6 +28,12 @@ func (s *Server) Handler() http.Handler {
 		})
 	}))
 	mux.HandleFunc("POST /v1/text-to-speech/{voice}", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("voice") {
+		case "iris-narrator", "mara":
+		default:
+			http.Error(w, `{"detail":{"status":"voice_not_found"}}`, http.StatusNotFound)
+			return
+		}
 		if r.Header.Get("X-Mock-Overload") != "" {
 			http.Error(w, `{"detail":{"status":"too_many_concurrent_requests"}}`, http.StatusTooManyRequests)
 			return

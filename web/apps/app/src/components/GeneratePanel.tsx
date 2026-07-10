@@ -13,13 +13,19 @@ type Manifest = {
   tasks: string[];
   profiles: Record<string, { max_width: number; max_height: number }>;
   duration?: { min_s: number; max_s: number };
-  references?: { image?: { max: number; roles: string[] } };
+  references?: {
+    image?: { max: number; roles: string[] };
+    audio?: { max: number; roles: string[] };
+  };
+  params_schema?: {
+    properties?: Record<string, { type?: string; enum?: string[]; description?: string }>;
+  };
   conditioning?: { first_frame?: boolean };
   features?: { seed?: boolean; prompt?: boolean };
   pricing?: { unit: string; estimates?: Record<string, number> };
 };
 
-type RefChip = { assetId: string; name: string; role: string };
+type RefChip = { assetId: string; name: string; role: string; kind?: "image" | "audio" };
 
 // Prefill for the regenerate-from-this loop (UX doc §3.5: every take exposes
 // its recipe as a launchpad). Parsed from a take's recipe JSON.
@@ -121,6 +127,10 @@ export function GeneratePanel(props: {
   const [seed, setSeed] = useState<string>(props.prefill?.seed !== undefined ? String(props.prefill.seed) : "");
   const [refs, setRefs] = useState<RefChip[]>(props.prefill?.refs ?? []);
   const [showRefPicker, setShowRefPicker] = useState(false);
+  const [showAudioPicker, setShowAudioPicker] = useState(false);
+  // params_schema-driven fields (enum strings only, v1): voice selection
+  // for TTS endpoints is the first consumer.
+  const [params, setParams] = useState<Record<string, string>>({});
   // Continuity carry (W3): the nearest EARLIER shot in the scene with a
   // selected take supplies its last frame as first_frame conditioning.
   const [carry, setCarry] = useState(true);
@@ -173,6 +183,10 @@ export function GeneratePanel(props: {
   const profileSpec = activeProfile ? manifest?.profiles[activeProfile] : undefined;
   const isVideo = manifest?.modality === "video";
   const refDecl = manifest?.references?.image;
+  const audioDecl = manifest?.references?.audio;
+  const enumParams = Object.entries(manifest?.params_schema?.properties ?? {}).filter(
+    ([, spec]) => Array.isArray(spec.enum) && spec.enum.length > 0,
+  );
   const estimate = activeProfile ? manifest?.pricing?.estimates?.[activeProfile] : undefined;
 
   // Duration clamped to the manifest's declared range; an empty number input
@@ -188,8 +202,16 @@ export function GeneratePanel(props: {
   // Prefilled refs sanitized against the RESOLVED manifest — hidden inputs
   // must never submit (an error about an invisible field is a dead end).
   const effectiveRefs = refDecl
-    ? refs.filter((r) => refDecl.roles.includes(r.role)).slice(0, refDecl.max)
+    ? refs.filter((r) => (r.kind ?? "image") === "image" && refDecl.roles.includes(r.role)).slice(0, refDecl.max)
     : [];
+  const audioRefs = refs.filter((r) => r.kind === "audio");
+  const effectiveAudioRefs = audioDecl
+    ? audioRefs.filter((r) => audioDecl.roles.includes(r.role)).slice(0, audioDecl.max)
+    : [];
+  const paramsJson = (() => {
+    const set = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== ""));
+    return Object.keys(set).length > 0 ? JSON.stringify(set) : "";
+  })();
   // Offered only when it can actually submit: video endpoint that declares
   // first_frame conditioning, with an upstream take to carry from.
   const carryActive =
@@ -219,11 +241,12 @@ export function GeneratePanel(props: {
                   fps: isVideo ? 24 : 0,
                 }
               : undefined,
-          references: effectiveRefs.map((r) => ({
-            kind: "image",
+          references: [...effectiveRefs, ...effectiveAudioRefs].map((r) => ({
+            kind: r.kind ?? "image",
             role: r.role,
             asset: { assetId: r.assetId, versionId: "" },
           })),
+          paramsJson,
           // A VIDEO version as first_frame means "its last frame" (the prep
           // artifact) — the orchestrator resolves the derived key.
           conditioning: carryActive
@@ -297,6 +320,9 @@ export function GeneratePanel(props: {
             setEndpointId(e.target.value);
             setRefs([]);
             setShowRefPicker(false);
+            setShowAudioPicker(false);
+            setParams({}); // params_schema is per-model
+
           }}
         >
           {healthy.map((ep) => (
@@ -326,10 +352,31 @@ export function GeneratePanel(props: {
         />
       </label>
 
+      {enumParams.length > 0 && (
+        <div className="field-row">
+          {enumParams.map(([name, spec]) => (
+            <label key={name} className="field" title={spec.description}>
+              {name.replace(/_/g, " ")}
+              <select
+                value={params[name] ?? ""}
+                onChange={(e) => setParams({ ...params, [name]: e.target.value })}
+              >
+                <option value="">(default)</option>
+                {spec.enum!.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+      )}
+
       {refDecl && (
         <div className="field">
           <span>
-            References ({refs.length}/{refDecl.max})
+            References ({effectiveRefs.length}/{refDecl.max})
           </span>
           <div className="chips">
             {refs.map((r, i) => (
@@ -353,6 +400,38 @@ export function GeneratePanel(props: {
                 setShowRefPicker(false);
               }}
               onClose={() => setShowRefPicker(false)}
+            />
+          )}
+        </div>
+      )}
+
+      {audioDecl && (
+        <div className="field">
+          <span>
+            Audio ({audioRefs.length}/{audioDecl.max}) — {audioDecl.roles.join("/")}
+          </span>
+          <div className="chips">
+            {audioRefs.map((r) => (
+              <span key={r.assetId} className="chip" title={r.role}>
+                🎵 {r.name}
+                <button onClick={() => setRefs(refs.filter((x) => x !== r))}>×</button>
+              </span>
+            ))}
+            {audioRefs.length < audioDecl.max && (
+              <button className="btn secondary chip-add" onClick={() => setShowAudioPicker(true)}>
+                + Add audio
+              </button>
+            )}
+          </div>
+          {showAudioPicker && (
+            <AudioRefPicker
+              projectId={props.projectId}
+              role={audioDecl.roles[0]}
+              onPick={(chip) => {
+                setRefs([...refs, chip]);
+                setShowAudioPicker(false);
+              }}
+              onClose={() => setShowAudioPicker(false)}
             />
           )}
         </div>
@@ -454,6 +533,42 @@ function modalityOf(ep: ModelEndpoint): string {
   } catch {
     return "?";
   }
+}
+
+/** Audio reference picker — library audio (TTS output, uploads) for
+ * lip-sync/audio-conditioned generation. */
+function AudioRefPicker(props: {
+  projectId: string;
+  role: string;
+  onPick: (c: RefChip) => void;
+  onClose: () => void;
+}) {
+  const assets = useQuery({
+    queryKey: ["assets", props.projectId, "audio-ref-picker"],
+    queryFn: () => assetClient.listAssets({ projectId: props.projectId, kind: AssetKind.AUDIO }),
+  });
+  return (
+    <div className="ref-picker">
+      <span className="field">Library audio</span>
+      {(assets.data?.assets.length ?? 0) === 0 && (
+        <div className="empty">No audio in the library yet — generate a voice line first.</div>
+      )}
+      <div className="ref-picker-list">
+        {assets.data?.assets.map((a) => (
+          <button
+            key={a.id}
+            className="btn secondary"
+            onClick={() => props.onPick({ assetId: a.id, name: a.name, role: props.role, kind: "audio" })}
+          >
+            🎵 <span className="truncate">{a.name}</span>
+          </button>
+        ))}
+      </div>
+      <button className="btn secondary" onClick={props.onClose}>
+        Cancel
+      </button>
+    </div>
+  );
 }
 
 function RefPicker(props: {
