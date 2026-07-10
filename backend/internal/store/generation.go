@@ -1,12 +1,12 @@
 package store
 
 import (
-	"errors"
-	"github.com/jackc/pgx/v5"
 	"context"
 	"encoding/json"
+	"errors"
 	"math/rand/v2"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/awm33/iris/backend/internal/ids"
@@ -38,8 +38,8 @@ type GenRequest struct {
 	References     []GenRef         `json:"references,omitempty"`
 	Conditioning   *GenConditioning `json:"conditioning,omitempty"`
 	// Resolve first_frame at dispatch from the dependency's landed artifact.
-	CarryFromDependsOn bool `json:"carry_from_depends_on,omitempty"`
-	Params         json.RawMessage  `json:"params,omitempty"`
+	CarryFromDependsOn bool            `json:"carry_from_depends_on,omitempty"`
+	Params             json.RawMessage `json:"params,omitempty"`
 }
 
 type GenRef struct {
@@ -318,6 +318,9 @@ func (s *Store) PutGenCache(ctx context.Context, requestHash, sha256, contentTyp
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO generation_cache (request_hash, sha256, size_bytes, content_type)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (request_hash) DO NOTHING`, requestHash, sha256, sizeBytes, contentType)
+		ON CONFLICT (request_hash) DO UPDATE
+		SET sha256 = EXCLUDED.sha256, size_bytes = EXCLUDED.size_bytes,
+		    content_type = EXCLUDED.content_type, created_at = now()`,
+		requestHash, sha256, sizeBytes, contentType)
 	return err
 }

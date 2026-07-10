@@ -12,3 +12,6 @@ CREATE TABLE generation_cache (
     content_type text NOT NULL,
     created_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- +goose Down
+DROP TABLE generation_cache;

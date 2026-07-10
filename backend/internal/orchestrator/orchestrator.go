@@ -6,9 +6,9 @@
 package orchestrator
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -218,6 +218,13 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 		return &inference.ValidationError{Msg: "corrupt job request: " + err.Error()}
 	}
 
+	if o.CacheEnabled && req.Seed != 0 {
+		// Pin floating refs before signing: one resolution point for both
+		// the generation inputs and the cache key (see pinFloatingRefs).
+		if perr := o.pinFloatingRefs(ctx, &req); perr != nil {
+			slog.Warn("ref pinning failed; dispatching uncached", "job", job.ID, "err", perr)
+		}
+	}
 	infReq, artifactKey, err := o.buildInferenceRequest(ctx, job, ep, &req)
 	if err != nil {
 		return err
@@ -238,15 +245,20 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 	// Generation cache (dev/test): identical RESOLVED requests reuse the
 	// landed artifact — repeated test runs stay off the bill. Keyed after
 	// carry resolution so chains cache correctly; never keyed on presigned
-	// URLs (they differ every dispatch).
+	// URLs (they differ every dispatch). Seed 0 reaches dispatch only on
+	// seedless endpoints (fan-out materializes seeds everywhere else) —
+	// caching there would collapse fan-out variety into clones of the
+	// first landing, so non-deterministic requests are never cached.
 	var cacheKey string
-	if o.CacheEnabled {
-		if key, kerr := o.genCacheKey(ctx, ep, job, &req); kerr == nil {
+	if o.CacheEnabled && req.Seed != 0 {
+		if key, kerr := genCacheHash(ep, job, &req); kerr == nil {
 			cacheKey = key
 			if hit, herr := o.Store.GetGenCache(ctx, key); herr == nil && hit != nil &&
 				o.Blob.ContentExists(ctx, hit.SHA256) {
 				slog.Info("generation cache hit — landing cached artifact", "job", job.ID)
 				return o.landVersion(ctx, job, ep, &req, hit.SHA256, hit.SizeBytes, 0)
+			} else if herr != nil {
+				slog.Warn("generation cache lookup failed; dispatching uncached", "job", job.ID, "err", herr)
 			}
 		} else {
 			slog.Warn("generation cache key failed; dispatching uncached", "job", job.ID, "err", kerr)
@@ -433,27 +445,50 @@ func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef, wan
 	return url, nil
 }
 
-// genCacheKey hashes the SEMANTIC identity of a resolved request: model
-// identity (manifest id@version, not the env-specific endpoint id), task,
-// profile, prompt, seed, output, params, and reference/conditioning inputs
-// as VERSION ids (floating refs resolved to the current head — presigned
-// URLs never participate; they change per dispatch). Fan-out sub-jobs with
-// resolved seeds key separately; endpoints without seed support cache one
-// artifact for identical params — the documented test-helper behavior.
-func (o *Orchestrator) genCacheKey(ctx context.Context, ep *registry.Endpoint, job *queue.GenerationJob, req *store.GenRequest) (string, error) {
-	resolve := func(r *store.GenRef) (string, error) {
-		if r == nil {
-			return "", nil
-		}
-		if r.VersionID != "" {
-			return r.VersionID, nil
+// pinFloatingRefs resolves head-floating references (and conditioning refs)
+// to concrete version ids IN the request, BEFORE URL signing — one
+// resolution point, so the cache key and the actual generation inputs can
+// never disagree (a concurrent head move between two resolutions would
+// otherwise poison the key). In-memory only unless the carry write-back
+// re-marshals the request. Cache mode only — behavior elsewhere unchanged.
+func (o *Orchestrator) pinFloatingRefs(ctx context.Context, req *store.GenRequest) error {
+	pin := func(r *store.GenRef) error {
+		if r == nil || r.VersionID != "" {
+			return nil
 		}
 		a, _, err := o.Store.GetAsset(ctx, r.AssetID)
 		if err != nil {
-			return "", err
+			return err
 		}
-		return a.HeadVersionID, nil
+		r.VersionID = a.HeadVersionID
+		return nil
 	}
+	for i := range req.References {
+		if err := pin(&req.References[i]); err != nil {
+			return err
+		}
+	}
+	if c := req.Conditioning; c != nil {
+		for _, r := range []*store.GenRef{c.FirstFrame, c.SourceImage, c.Mask} {
+			if err := pin(r); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// TODO(workspace-scoping): the cache is global — key + table need a
+// workspace dimension before multi-tenancy (same pass as resolveRefURL's
+// marker; cross-tenant content reuse is otherwise automatic).
+// genCacheHash hashes the SEMANTIC identity of a fully-RESOLVED request:
+// model identity (manifest id@version, not the env-specific endpoint id),
+// task, profile, prompt, seed, output, params, and reference/conditioning
+// VERSION ids (pinFloatingRefs ran first; presigned URLs never participate
+// — they change per dispatch). Pure over the request: no queries, no
+// re-resolution race. Fan-out sub-jobs key separately via resolved seeds;
+// seedless (seed 0) requests are never cached at all.
+func genCacheHash(ep *registry.Endpoint, job *queue.GenerationJob, req *store.GenRequest) (string, error) {
 	type refID struct {
 		Kind, Role, Version string
 		Weight              float64
@@ -482,22 +517,20 @@ func (o *Orchestrator) genCacheKey(ctx context.Context, ep *registry.Endpoint, j
 		Params:   req.Params,
 	}
 	for i := range req.References {
-		v, err := resolve(&req.References[i])
-		if err != nil {
-			return "", err
-		}
-		key.Refs = append(key.Refs, refID{Kind: req.References[i].Kind, Role: req.References[i].Role, Version: v, Weight: req.References[i].Weight})
+		key.Refs = append(key.Refs, refID{
+			Kind: req.References[i].Kind, Role: req.References[i].Role,
+			Version: req.References[i].VersionID, Weight: req.References[i].Weight,
+		})
 	}
 	if c := req.Conditioning; c != nil {
-		var err error
-		if key.FirstFrame, err = resolve(c.FirstFrame); err != nil {
-			return "", err
+		if c.FirstFrame != nil {
+			key.FirstFrame = c.FirstFrame.VersionID
 		}
-		if key.SourceImg, err = resolve(c.SourceImage); err != nil {
-			return "", err
+		if c.SourceImage != nil {
+			key.SourceImg = c.SourceImage.VersionID
 		}
-		if key.Mask, err = resolve(c.Mask); err != nil {
-			return "", err
+		if c.Mask != nil {
+			key.Mask = c.Mask.VersionID
 		}
 	}
 	b, err := json.Marshal(key)
