@@ -95,10 +95,10 @@ func TestFlattenDissolveWindows(t *testing.T) {
 	}
 	wants := []want{
 		{0, 4, "a", "", 0},
-		{4, 1, "b", "a", 4},  // dissolve a→b, FromSeekS = a.InPoint(0)+4
-		{5, 2, "b", "", 0},   // rest of b
-		{7, 1, "", "", 0},    // gap
-		{8, 2, "c", "", 0},   // c plays fully…
+		{4, 1, "b", "a", 4},   // dissolve a→b, FromSeekS = a.InPoint(0)+4
+		{5, 2, "b", "", 0},    // rest of b
+		{7, 1, "", "", 0},     // gap
+		{8, 2, "c", "", 0},    // c plays fully…
 		{10, 0.5, "", "c", 3}, // …then fades to black; FromSeekS = c.InPoint(1) + dur(2) = 3
 		{10.5, 1.5, "", "", 0},
 		{12, 2, "d", "", 0},

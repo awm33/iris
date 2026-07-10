@@ -39,6 +39,8 @@ export interface ClipInit {
   color?: ClipColor;
   /** OUT-transition into the next same-track clip (absent = hard cut). */
   transition?: ClipTransition;
+  /** Speech clip (M7 ducking): non-speech audio ducks while it plays. */
+  speech?: boolean;
   start: number; // timeline position, seconds
   duration: number; // seconds on the timeline
   in_point?: number; // source in, seconds (default 0)
@@ -60,6 +62,7 @@ export type TimelineOp =
   | { op_id: string; type: "set_clip_text"; clip_id: string; text: string }
   | { op_id: string; type: "set_clip_color"; clip_id: string; color?: ClipColor }
   | { op_id: string; type: "set_clip_transition"; clip_id: string; transition?: ClipTransition }
+  | { op_id: string; type: "set_clip_speech"; clip_id: string; speech?: boolean }
   | { op_id: string; type: "undo"; target: string };
 
 export interface ClipState {
@@ -70,6 +73,7 @@ export interface ClipState {
   text?: string;
   color?: ClipColor;
   transition?: ClipTransition;
+  speech?: boolean;
   start: number;
   duration: number;
   inPoint: number;
@@ -153,6 +157,10 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
           // state across clients (review PR37-M4).
           color: op.clip.color != null ? clampColor(op.clip.color) : undefined,
           transition: op.clip.transition != null ? clampTransition(op.clip.transition) : undefined,
+          // === true, both ends: only JSON true sets; false/absent/junk
+          // clear (Go: *bool nil-or-false — scalar junk hits the recorded
+          // ParseOps strictness gap, same as start/text).
+          speech: op.clip.speech === true || undefined,
           start: Math.max(0, op.clip.start),
           duration: Math.max(MIN_CLIP_S, op.clip.duration),
           inPoint: Math.max(0, op.clip.in_point ?? 0),
@@ -209,9 +217,48 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
         if (hit) hit[1].transition = op.transition != null ? clampTransition(op.transition) : undefined;
         break;
       }
+      case "set_clip_speech": {
+        const hit = findClip(op.clip_id);
+        if (hit) hit[1].speech = op.speech === true || undefined;
+        break;
+      }
     }
   }
   return { tracks };
+}
+
+/** Ducking (M7): deterministic gain automation, identical math on both
+ * ends (the export builds volume expressions, the mixer builds WebAudio
+ * ramps — from the SAME windows). Non-speech audio follows
+ * g(t) = 1 − (1−DUCK_LEVEL)·coverage(t), where coverage is the merged
+ * speech-span trapezoid with DUCK_RAMP_S linear attack/release. */
+export const DUCK_LEVEL = 0.25;
+export const DUCK_RAMP_S = 0.15;
+
+export interface DuckWindow {
+  start: number;
+  end: number;
+}
+
+/** Merged union of speech-clip spans, clamped to [0, totalS). Every
+ * speech-flagged clip counts — resolution/audio-stream presence is a
+ * render concern; determinism across both ends is the contract here. */
+export function duckWindows(state: TimelineState, totalS: number): DuckWindow[] {
+  const spans: DuckWindow[] = [];
+  for (const t of state.tracks) {
+    for (const c of t.clips) {
+      if (!c.speech || c.start >= totalS) continue;
+      spans.push({ start: Math.max(0, c.start), end: Math.min(totalS, c.start + c.duration) });
+    }
+  }
+  spans.sort((a, b) => a.start - b.start);
+  const merged: DuckWindow[] = [];
+  for (const sp of spans) {
+    const last = merged[merged.length - 1];
+    if (last && sp.start <= last.end + 1e-6) last.end = Math.max(last.end, sp.end);
+    else merged.push({ ...sp });
+  }
+  return merged;
 }
 
 /** Timeline length = end of the last clip. */
@@ -264,6 +311,7 @@ export function bladeOps(
           // The OUT edge moved to the right half — it inherits the
           // transition; the left half's new out is the cut (cleared below).
           transition: clip.transition,
+          speech: clip.speech,
           start: rt,
           // Placeholders have no source: content anchoring is meaningless,
           // and a nonzero in_point would skew their left-trim clamp.

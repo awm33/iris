@@ -6,6 +6,7 @@ import type { Segment } from "./schedule";
 
 export interface AudioPlanEntry {
   sourceId: string;
+  speech?: boolean;
   /** Seconds after the play anchor this entry starts. */
   whenS: number;
   /** Source-local start offset, seconds. */
@@ -25,6 +26,7 @@ export function audioSchedule(segments: Segment[], fromS: number): AudioPlanEntr
     const startsAhead = seg.startS >= fromS;
     const entry: AudioPlanEntry = {
       sourceId: seg.sourceId,
+      speech: seg.speech,
       whenS: startsAhead ? seg.startS - fromS : 0,
       offsetS: seg.inPointS + (startsAhead ? 0 : fromS - seg.startS),
       durationS: end - Math.max(seg.startS, fromS),

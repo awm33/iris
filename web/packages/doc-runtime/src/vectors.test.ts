@@ -29,6 +29,7 @@ function normalize(st: TimelineState) {
       text: c.text ?? "",
       color: c.color ? { exposure: c.color.exposure, contrast: c.color.contrast, temp: c.color.temp } : null,
       transition: c.transition ? { kind: c.transition.kind, duration: c.transition.duration } : null,
+      speech: c.speech === true,
     })),
   }));
 }

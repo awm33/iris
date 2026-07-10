@@ -74,7 +74,8 @@
             "shot_id": "",
             "text": "hello world",
             "color": null,
-            "transition": null
+            "transition": null,
+            "speech": false
           },
           {
             "id": "cap2",
@@ -85,7 +86,8 @@
             "shot_id": "",
             "text": "second line",
             "color": null,
-            "transition": null
+            "transition": null,
+            "speech": false
           }
         ]
       }

@@ -280,7 +280,8 @@ func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID
 
 	// 5. Compose + run ffmpeg.
 	outPath := tmpDir + "/out.mp4"
-	args, err := buildExportArgs(pieces, entries, versionByClip, sources, preset, int(fps), totalS, captions, outPath)
+	ducks := timeline.DuckWindows(st, totalS)
+	args, err := buildExportArgs(pieces, entries, versionByClip, sources, preset, int(fps), totalS, captions, ducks, outPath)
 	if err != nil {
 		return err
 	}

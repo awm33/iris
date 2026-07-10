@@ -78,8 +78,13 @@ export class AudioMixer {
   /** Schedule every audible segment from fromS. Buffers that resolve after
    * their start time begin immediately with the offset advanced by the
    * lateness; a stale play (token moved on) schedules nothing. Sources
-   * with no decodable audio are silent, not errors. */
-  play(segments: Segment[], fromS: number): void {
+   * with no decodable audio are silent, not errors.
+   *
+   * ducks: merged speech windows (doc-runtime's duckWindows) — every
+   * NON-speech segment's gain follows the deterministic curve the export
+   * renders (g = 1 − 0.75·coverage, 0.15s linear ramps), scheduled as
+   * WebAudio automation at play time. */
+  play(segments: Segment[], fromS: number, ducks: { start: number; end: number }[] = []): void {
     this.stop();
     const token = ++this.playToken;
     const ctx = this.ensureCtx();
@@ -99,7 +104,14 @@ export class AudioMixer {
           if (token !== this.playToken || buf === null) return;
           const node = ctx.createBufferSource();
           node.buffer = buf;
-          node.connect(this.master!);
+          let dest: AudioNode = this.master!;
+          if (!e.speech && ducks.length > 0) {
+            const g = ctx.createGain();
+            g.connect(this.master!);
+            this.automateDuck(g.gain, ducks, fromS, anchor, ctx);
+            dest = g;
+          }
+          node.connect(dest);
           node.onended = () => {
             node.disconnect();
             this.active = this.active.filter((n) => n !== node);
@@ -118,6 +130,44 @@ export class AudioMixer {
         .catch(() => {
           /* no/undecodable audio track → silent */
         });
+    }
+  }
+
+  /** Duck-curve automation: piecewise-linear, knees at each window's four
+   * ramp points plus the crossings of overlapping adjacent ramps — the
+   * exact max()-of-trapezoids curve the export's volume expression
+   * evaluates per frame. Points in the past collapse into the initial
+   * setValueAtTime; ramps schedule only forward. */
+  private automateDuck(
+    gain: AudioParam,
+    ducks: { start: number; end: number }[],
+    fromS: number,
+    anchor: number,
+    ctx: AudioContext,
+  ): void {
+    const R = 0.15;
+    const L = 0.25;
+    const cov = (t: number) => {
+      let c = 0;
+      for (const w of ducks) {
+        c = Math.max(c, Math.max(0, Math.min(1, Math.min((t - w.start) / R, (w.end + R - t) / R))));
+      }
+      return c;
+    };
+    const g = (t: number) => 1 - (1 - L) * cov(t);
+    const knees: number[] = [];
+    for (let i = 0; i < ducks.length; i++) {
+      const w = ducks[i];
+      knees.push(w.start, w.start + R, w.end, w.end + R);
+      const next = ducks[i + 1];
+      if (next && next.start - w.end < 2 * R) {
+        knees.push((w.end + R + next.start) / 2); // release×attack crossing
+      }
+    }
+    const future = [...new Set(knees)].filter((t) => t > fromS).sort((a, b) => a - b);
+    gain.setValueAtTime(g(fromS), Math.max(ctx.currentTime, anchor));
+    for (const t of future) {
+      gain.linearRampToValueAtTime(g(t), anchor + (t - fromS));
     }
   }
 

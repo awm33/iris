@@ -1,0 +1,24 @@
+{
+  "name": "speech flags: true sets, false/absent/junk-false clears, blade-independent, undo",
+  "ops": [
+    { "op_id": "t1", "type": "add_track", "track": { "id": "a1", "kind": "audio" } },
+    { "op_id": "c1", "type": "add_clip", "track_id": "a1", "clip": { "id": "vo", "name": "vo", "version_id": "vv_vo", "start": 0, "duration": 2, "speech": true } },
+    { "op_id": "c2", "type": "add_clip", "track_id": "a1", "clip": { "id": "mus", "name": "mus", "version_id": "vv_m", "start": 0, "duration": 8 } },
+    { "op_id": "s1", "type": "set_clip_speech", "clip_id": "mus", "speech": true },
+    { "op_id": "s2", "type": "set_clip_speech", "clip_id": "mus", "speech": false },
+    { "op_id": "s3", "type": "set_clip_speech", "clip_id": "vo" },
+    { "op_id": "u1", "type": "undo", "target": "s3" },
+    { "op_id": "s4", "type": "set_clip_speech", "clip_id": "ghost", "speech": true }
+  ],
+  "expected": {
+    "tracks": [
+      {
+        "id": "a1", "kind": "audio", "name": "A",
+        "clips": [
+          { "id": "vo", "start": 0, "duration": 2, "in_point": 0, "version_id": "vv_vo", "shot_id": "", "text": "", "color": null, "transition": null, "speech": true },
+          { "id": "mus", "start": 0, "duration": 8, "in_point": 0, "version_id": "vv_m", "shot_id": "", "text": "", "color": null, "transition": null, "speech": false }
+        ]
+      }
+    ]
+  }
+}

@@ -75,7 +75,8 @@
             "shot_id": "",
             "text": "",
             "color": null,
-            "transition": null
+            "transition": null,
+            "speech": false
           }
         ]
       }

@@ -132,7 +132,9 @@ func (w *Worker) transcribe(ctx context.Context, job *queue.MediaJob, transcript
 
 	entries := timeline.AudioEntries(ri.st, ri.totalS)
 	wavPath := tmpDir + "/mix.wav"
-	args, audible := buildTranscribeArgs(entries, ri.versionByClip, sources, ri.totalS, wavPath)
+	// The transcription hears the SAME mix the export renders — ducked
+	// music under speech also helps the engine hear the speech.
+	args, audible := buildTranscribeArgs(entries, ri.versionByClip, sources, ri.st, ri.totalS, wavPath)
 	var segments []whisperSegment
 	if audible > 0 {
 		cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -228,6 +230,7 @@ func buildTranscribeArgs(
 	entries []timeline.AudioEntry,
 	versionByClip map[string]string,
 	sources map[string]*exportSource,
+	st *timeline.State,
 	totalS float64,
 	outWav string,
 ) ([]string, int) {
@@ -240,7 +243,7 @@ func buildTranscribeArgs(
 	}
 	const fps = 24 // delay grid only; ±half a frame vs export is inaudible
 	totalQ := float64(int(math.Round(totalS*fps))) / fps
-	inputs, filters, audible := buildAudioSection(entries, srcFor, fps, totalQ, 0)
+	inputs, filters, audible := buildAudioSection(entries, srcFor, fps, totalQ, 0, timeline.DuckWindows(st, totalS))
 	args := append([]string{"-hide_banner", "-nostdin", "-v", "error"}, inputs...)
 	args = append(args,
 		"-filter_complex", strings.Join(filters, ";"),
