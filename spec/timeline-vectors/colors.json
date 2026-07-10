@@ -1,23 +1,209 @@
 {
-  "name": "color grades: initial clamp + absent-field neutral, set + clamp, clear, undo of a clear",
+  "name": "color grades: clamps both ends, absent + null fields neutral, clear via absent AND explicit null, missing clip no-op, undo of a clear",
   "ops": [
-    { "op_id": "t1", "type": "add_track", "track": { "id": "v1", "kind": "video" } },
-    { "op_id": "a0", "type": "add_clip", "track_id": "v1", "clip": { "id": "z", "name": "z", "version_id": "vv_z", "start": 4, "duration": 1, "color": { "exposure": 9, "temp": -0.5 } } },
-    { "op_id": "a1", "type": "add_clip", "track_id": "v1", "clip": { "id": "x", "name": "x", "version_id": "vv_x", "start": 0, "duration": 2 } },
-    { "op_id": "a2", "type": "add_clip", "track_id": "v1", "clip": { "id": "y", "name": "y", "version_id": "vv_y", "start": 2, "duration": 2 } },
-    { "op_id": "c1", "type": "set_clip_color", "clip_id": "y", "color": { "exposure": 0.5, "contrast": 1.2, "temp": 2 } },
-    { "op_id": "c2", "type": "set_clip_color", "clip_id": "x", "color": { "exposure": -1, "contrast": 0.8, "temp": 0.3 } },
-    { "op_id": "c3", "type": "set_clip_color", "clip_id": "x" },
-    { "op_id": "u1", "type": "undo", "target": "c3" }
+    {
+      "op_id": "t1",
+      "type": "add_track",
+      "track": {
+        "id": "v1",
+        "kind": "video"
+      }
+    },
+    {
+      "op_id": "a0",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "z",
+        "name": "z",
+        "version_id": "vv_z",
+        "start": 4,
+        "duration": 1,
+        "color": {
+          "exposure": 9,
+          "temp": -0.5
+        }
+      }
+    },
+    {
+      "op_id": "a1",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "x",
+        "name": "x",
+        "version_id": "vv_x",
+        "start": 0,
+        "duration": 2
+      }
+    },
+    {
+      "op_id": "a2",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "y",
+        "name": "y",
+        "version_id": "vv_y",
+        "start": 2,
+        "duration": 2
+      }
+    },
+    {
+      "op_id": "c1",
+      "type": "set_clip_color",
+      "clip_id": "y",
+      "color": {
+        "exposure": 0.5,
+        "contrast": 1.2,
+        "temp": 2
+      }
+    },
+    {
+      "op_id": "c2",
+      "type": "set_clip_color",
+      "clip_id": "x",
+      "color": {
+        "exposure": -1,
+        "contrast": 0.8,
+        "temp": 0.3
+      }
+    },
+    {
+      "op_id": "c3",
+      "type": "set_clip_color",
+      "clip_id": "x"
+    },
+    {
+      "op_id": "u1",
+      "type": "undo",
+      "target": "c3"
+    },
+    {
+      "op_id": "a3",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "w",
+        "name": "w",
+        "version_id": "vv_w",
+        "start": 5,
+        "duration": 1,
+        "color": {
+          "exposure": -9,
+          "contrast": -1,
+          "temp": null
+        }
+      }
+    },
+    {
+      "op_id": "a4",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "q",
+        "name": "q",
+        "version_id": "vv_q",
+        "start": 6,
+        "duration": 1
+      }
+    },
+    {
+      "op_id": "c4",
+      "type": "set_clip_color",
+      "clip_id": "q",
+      "color": {
+        "exposure": 1
+      }
+    },
+    {
+      "op_id": "c5",
+      "type": "set_clip_color",
+      "clip_id": "q",
+      "color": null
+    },
+    {
+      "op_id": "c6",
+      "type": "set_clip_color",
+      "clip_id": "ghost",
+      "color": {
+        "exposure": 1
+      }
+    }
   ],
   "expected": {
     "tracks": [
       {
-        "id": "v1", "kind": "video", "name": "V",
+        "id": "v1",
+        "kind": "video",
+        "name": "V",
         "clips": [
-          { "id": "x", "start": 0, "duration": 2, "in_point": 0, "version_id": "vv_x", "shot_id": "", "text": "", "color": { "exposure": -1, "contrast": 0.8, "temp": 0.3 } },
-          { "id": "y", "start": 2, "duration": 2, "in_point": 0, "version_id": "vv_y", "shot_id": "", "text": "", "color": { "exposure": 0.5, "contrast": 1.2, "temp": 1 } },
-          { "id": "z", "start": 4, "duration": 1, "in_point": 0, "version_id": "vv_z", "shot_id": "", "text": "", "color": { "exposure": 3, "contrast": 1, "temp": -0.5 } }
+          {
+            "id": "x",
+            "start": 0,
+            "duration": 2,
+            "in_point": 0,
+            "version_id": "vv_x",
+            "shot_id": "",
+            "text": "",
+            "color": {
+              "exposure": -1,
+              "contrast": 0.8,
+              "temp": 0.3
+            }
+          },
+          {
+            "id": "y",
+            "start": 2,
+            "duration": 2,
+            "in_point": 0,
+            "version_id": "vv_y",
+            "shot_id": "",
+            "text": "",
+            "color": {
+              "exposure": 0.5,
+              "contrast": 1.2,
+              "temp": 1
+            }
+          },
+          {
+            "id": "z",
+            "start": 4,
+            "duration": 1,
+            "in_point": 0,
+            "version_id": "vv_z",
+            "shot_id": "",
+            "text": "",
+            "color": {
+              "exposure": 3,
+              "contrast": 1,
+              "temp": -0.5
+            }
+          },
+          {
+            "id": "w",
+            "start": 5,
+            "duration": 1,
+            "in_point": 0,
+            "version_id": "vv_w",
+            "shot_id": "",
+            "text": "",
+            "color": {
+              "exposure": -3,
+              "contrast": 0,
+              "temp": 0
+            }
+          },
+          {
+            "id": "q",
+            "start": 6,
+            "duration": 1,
+            "in_point": 0,
+            "version_id": "vv_q",
+            "shot_id": "",
+            "text": "",
+            "color": null
+          }
         ]
       }
     ]

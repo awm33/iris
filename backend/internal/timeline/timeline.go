@@ -41,6 +41,32 @@ type ColorDef struct {
 	Temp     *float64 `json:"temp,omitempty"`     // -1 (cool) .. 1 (warm)
 }
 
+// UnmarshalJSON is deliberately TOLERANT: the TS reducer treats any
+// malformed color (non-object, wrong-typed or null fields) as
+// fields-absent-therefore-neutral, and a strict decode here would fail the
+// WHOLE log in ParseOps — bricking export and transcribe over one garbage
+// op any client can append. Parity demands the same leniency.
+func (c *ColorDef) UnmarshalJSON(b []byte) error {
+	*c = ColorDef{}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(b, &m) != nil {
+		return nil // non-object → every field absent (TS: clampColor(junk) → neutral)
+	}
+	get := func(key string) *float64 {
+		raw, ok := m[key]
+		if !ok {
+			return nil
+		}
+		var v *float64 // pointer target: JSON null must stay absent, not become 0
+		if json.Unmarshal(raw, &v) != nil {
+			return nil
+		}
+		return v
+	}
+	c.Exposure, c.Contrast, c.Temp = get("exposure"), get("contrast"), get("temp")
+	return nil
+}
+
 // Color is the reduced (clamped, defaulted) grade. Neutral = {0, 1, 0}.
 type Color struct {
 	Exposure, Contrast, Temp float64
@@ -111,6 +137,13 @@ const MinClipS = 0.04
 // op_ids keep the FIRST occurrence — the doc constructors dedup the log the
 // same way before reducing, and a duplicate that survives here can change
 // the outcome (e.g. a dup move re-applying after its original was rejected).
+//
+// KNOWN STRICTNESS GAP: wrong-typed SCALAR fields ("start":"x", "text":5)
+// hard-fail the whole log here where the TS reducer shrugs — one garbage op
+// any client appends bricks export/transcribe for that timeline. ColorDef
+// closes this for the color object (tolerant UnmarshalJSON); the scalar
+// class needs either append-time payload validation at the API or the same
+// leniency per field. Tracked with the security-hardening backlog.
 func ParseOps(payloads [][]byte) ([]*Op, error) {
 	ops := make([]*Op, 0, len(payloads))
 	seen := make(map[string]bool, len(payloads))

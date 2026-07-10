@@ -313,3 +313,22 @@ describe("bladeOps on caption clips", () => {
     expect(st2.tracks[0].clips.map((c) => c.text)).toEqual(["hello world", "hello world"]);
   });
 });
+
+describe("bladeOps on graded clips", () => {
+  it("carries color to the right half", () => {
+    const ops: TimelineOp[] = [
+      { op_id: "t1", type: "add_track", track: { id: "v1", kind: "video" } },
+      {
+        op_id: "a1", type: "add_clip", track_id: "v1",
+        clip: { id: "g", name: "g", version_id: "vv", start: 0, duration: 4, color: { exposure: 1, contrast: 0.9, temp: -0.2 } },
+      },
+    ];
+    const st = reduceTimeline(ops);
+    const cut = bladeOps(st, "g", 2, "g-r");
+    const st2 = reduceTimeline([...ops, ...cut!]);
+    expect(st2.tracks[0].clips.map((c) => c.color)).toEqual([
+      { exposure: 1, contrast: 0.9, temp: -0.2 },
+      { exposure: 1, contrast: 0.9, temp: -0.2 },
+    ]);
+  });
+});

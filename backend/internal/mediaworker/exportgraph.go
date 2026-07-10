@@ -271,8 +271,15 @@ func srtTime(t float64) string {
 // comma — empty for neutral). The math is the PREVIEW's, per channel in
 // sRGB: clamp after exposure, clamp after contrast, then attenuation-only
 // temperature gains — canvas `brightness() contrast()` + a multiply-blend
-// rect compute exactly this (see the PR 36 plan entry; the golden-frame
-// slice diffs the two ends).
+// rect compute this to within ~1-2 LSB (lutrgb truncates where canvas
+// rounds — the trailing +0.5 makes lutrgb round-half-up; the multiply
+// fill quantizes its gain to 1/255; the golden-frame slice must budget
+// a small tolerance). format=gbrp is LOAD-BEARING: the expressions
+// assume 8-bit (0..255, pivot 127.5), but lutrgb negotiates 9..16-bit
+// GBRP for deep sources — a 10-bit original (phone HDR) would crush to
+// val≤255/1023 (review PR36-H1, reproduced). 8-bit is also exactly what
+// the preview canvas computes, so it is the parity-true depth. The +0.5
+// cannot overflow: clip ≤255, gain ≤1, max 255.5 → 255.
 func colorFilter(c *timeline.Color) string {
 	if c == nil || (c.Exposure == 0 && c.Contrast == 1 && c.Temp == 0) {
 		return ""
@@ -288,8 +295,8 @@ func colorFilter(c *timeline.Color) string {
 		gG = 1 + 0.1*c.Temp
 	}
 	expr := func(gain float64) string {
-		return fmt.Sprintf("clip((clip(val*%s\\,0\\,255)-127.5)*%s+127.5\\,0\\,255)*%s",
+		return fmt.Sprintf("clip((clip(val*%s\\,0\\,255)-127.5)*%s+127.5\\,0\\,255)*%s+0.5",
 			f(e), f(c.Contrast), f(gain))
 	}
-	return fmt.Sprintf(",lutrgb=r='%s':g='%s':b='%s'", expr(rG), expr(gG), expr(bG))
+	return fmt.Sprintf(",format=gbrp,lutrgb=r='%s':g='%s':b='%s'", expr(rG), expr(gG), expr(bG))
 }

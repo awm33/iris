@@ -465,10 +465,11 @@ export function TimelinePage(props: {
   }, [docState, colorEdit]);
   useEffect(() => {
     // Selection moved or the clip vanished: a panel editing a stale clip
-    // would commit grades into something the user isn't looking at.
-    if (colorEdit && colorEdit.clipId !== selected) setColorEdit(null);
+    // would commit grades into something the user isn't looking at (and a
+    // gone clip left the 🎨 button lit while disabled).
+    if (colorEdit && (colorEdit.clipId !== selected || !selectedVideoClip)) setColorEdit(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected]);
+  }, [selected, selectedVideoClip]);
 
   if (loadError) return <div className="status error">Couldn’t open timeline: {loadError}</div>;
   if (!session) return <div className="empty">Opening timeline…</div>;
@@ -477,6 +478,14 @@ export function TimelinePage(props: {
   const dur = Math.max(timelineDuration(state), 30);
   const active = clipAt(state, time, "video");
   const activeCaption = clipAt(state, time, "caption");
+  const commitColorDraft = () => {
+    const cur = colorEditRef.current;
+    if (!cur) return;
+    const committed = selectedVideoClip?.color ?? { exposure: 0, contrast: 1, temp: 0 };
+    const d = cur.draft;
+    if (d.exposure === committed.exposure && d.contrast === committed.contrast && d.temp === committed.temp) return;
+    doc.apply({ op_id: oid(), type: "set_clip_color", clip_id: cur.clipId, color: d });
+  };
 
   // Capture keeps drags alive off-element but can throw for already-
   // released pointers — never let it kill the gesture (state first).
@@ -662,6 +671,10 @@ export function TimelinePage(props: {
       </div>
 
       {showHistory && <HistoryPanel doc={doc} onClose={() => setShowHistory(false)} />}
+      {/* commitColorDraft: one undoable op per gesture end (release, key,
+          blur), skipped when the draft equals the committed grade —
+          tab-through must not spam history. Reads the ref: input events
+          batch and a render-closure draft would be stale. */}
       {colorEdit && selectedVideoClip && (
         <div className="color-panel">
           <div className="panel-header">
@@ -699,16 +712,15 @@ export function TimelinePage(props: {
                   const v = Number(e.target.value);
                   setColorEdit((cur) => (cur ? { clipId: cur.clipId, draft: { ...cur.draft, [key]: v } } : cur));
                 }}
-                onPointerUp={() => {
-                  // Commit on release: one undoable op per gesture, not per tick.
-                  const cur = colorEditRef.current;
-                  if (cur) doc.apply({ op_id: oid(), type: "set_clip_color", clip_id: cur.clipId, color: cur.draft });
-                }}
+                onPointerUp={commitColorDraft}
                 onKeyUp={(e) => {
-                  const cur = colorEditRef.current;
-                  if (e.key.startsWith("Arrow") && cur)
-                    doc.apply({ op_id: oid(), type: "set_clip_color", clip_id: cur.clipId, color: cur.draft });
+                  // Every key that moves a range input, not just arrows —
+                  // Home/End/Page* previewing a grade that never commits
+                  // would silently drop what the user just saw.
+                  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(e.key))
+                    commitColorDraft();
                 }}
+                onBlur={commitColorDraft}
               />
               <span className="meta">{colorEdit.draft[key].toFixed(2)}</span>
             </label>
