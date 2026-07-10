@@ -38,6 +38,8 @@ func For(kind, baseURL, authRef string) (Client, error) {
 		return nil, fmt.Errorf("endpoint auth: %w", err)
 	}
 	switch kind {
+	case "bfl":
+		return newBFL(baseURL, token), nil
 	case "seedance":
 		return newSeedance(baseURL, token), nil
 	case "elevenlabs":
@@ -55,7 +57,7 @@ func For(kind, baseURL, authRef string) (Client, error) {
 // blob URLs — the external advertisement (host.docker.internal) exists for
 // containerized endpoints and doesn't resolve from the host.
 func InProcess(kind string) bool {
-	return kind == "seedance" || kind == "elevenlabs"
+	return kind == "seedance" || kind == "elevenlabs" || kind == "bfl"
 }
 
 // isPostSendTimeout: the request left the socket and the wait timed out —
