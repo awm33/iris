@@ -14,6 +14,8 @@ export {
   type TrackKind,
   type ClipColor,
   clampColor,
+  type ClipTransition,
+  clampTransition,
   type TimelineState,
   type TrackState,
   type ClipState,

@@ -381,3 +381,44 @@ func TestBuildExportArgsColorCoolAndStill(t *testing.T) {
 		t.Errorf("still must stay ungraded (want exactly 1 lutrgb): %s", graph)
 	}
 }
+
+// A dissolve window emits two normalized inputs into xfade; the outgoing
+// side seeks its OUT point (FromSeekS), and input indices stay aligned
+// across the extra consumption.
+func TestBuildExportArgsDissolve(t *testing.T) {
+	out := &timeline.Clip{ID: "a", Name: "a", VersionID: "v1", InPoint: 1}
+	in := &timeline.Clip{ID: "b", Name: "b", VersionID: "v2"}
+	pieces := []timeline.Piece{
+		{Start: 0, Duration: 4, Clip: out},
+		{Start: 4, Duration: 1, Clip: in, BlendFrom: out, FromSeekS: 5}, // 1 + 4
+		{Start: 5, Duration: 2, Clip: &timeline.Clip{ID: "b", Name: "b", VersionID: "v2", InPoint: 1, Start: 5, Duration: 2}},
+	}
+	entries := []timeline.AudioEntry{{Clip: in, Kind: "video", Start: 4, Dur: 3}}
+	args, err := buildExportArgs(pieces, entries,
+		map[string]string{"a": "v1", "b": "v2"},
+		map[string]*exportSource{
+			"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30},
+			"v2": {Path: "/t/b.mp4", ContentType: "video/mp4", HasAudio: true, DurationS: 30},
+		},
+		exportPresets["draft"], 24, 7, nil, "/t/out.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(inputPaths(args), ","); got != "/t/a.mp4,/t/a.mp4,/t/b.mp4,/t/b.mp4,/t/b.mp4" {
+		t.Fatalf("input order: %s", got)
+	}
+	graph := graphOf(t, args)
+	for _, want := range []string{
+		"-ss 5.000000 -t 1.000000 -i /t/a.mp4", // outgoing seeks its OUT point
+		"[1:v]",                                 // blend outgoing = input 1
+		"[2:v]",                                 // blend incoming = input 2
+		"[v1a][v1b]xfade=transition=fade:duration=1.000000:offset=0,trim=end_frame=24,setpts=PTS-STARTPTS[v1]",
+		"[v0][v1][v2]concat=n=3:v=1:a=0[vout]",
+		"[4:a]aresample", // audio input follows all visual inputs
+	} {
+		ok := strings.Contains(graph, want) || strings.Contains(strings.Join(args, " "), want)
+		if !ok {
+			t.Errorf("missing %q\ngraph: %s", want, graph)
+		}
+	}
+}

@@ -78,6 +78,44 @@ func buildExportArgs(
 		return sources[vid]
 	}
 
+	// emitVisual renders ONE content stream (video / still / black) cut to
+	// exactly `frames`, labeled `out`. ss is the source seek for video
+	// content — a blend's outgoing side seeks its OUT point instead of its
+	// in point (continuing past the cut; freeze when handles run out).
+	emitVisual := func(clip *timeline.Clip, ss float64, dur float64, frames int, out string) {
+		src := (*exportSource)(nil)
+		if clip != nil {
+			src = srcFor(clip)
+		}
+		switch {
+		case src != nil && strings.HasPrefix(src.ContentType, "video/"):
+			if src.DurationS > 0 {
+				ss = math.Min(ss, math.Max(0, src.DurationS-1.0/float64(fps)))
+			}
+			inputs = append(inputs, "-ss", f(ss), "-t", f(dur), "-i", src.Path)
+			filters = append(filters, fmt.Sprintf(
+				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
+				nInput, scaleFor(clip), f(dur), frames, out))
+			nInput++
+		case src != nil && strings.HasPrefix(src.ContentType, "image/"):
+			// Stills (image takes) hold the frame for the piece duration —
+			// the preview's overlay semantics. No grade in v1 (the preview
+			// overlay doesn't color either).
+			inputs = append(inputs, "-loop", "1", "-t", f(dur), "-i", src.Path)
+			filters = append(filters, fmt.Sprintf(
+				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
+				nInput, scaleFor(nil), f(dur), frames, out))
+			nInput++
+		default:
+			// Gap — or a clip whose source can't paint (audio on a video
+			// track can't happen via the UI; render black over failing).
+			// One frame of margin on d, trim cuts exact.
+			filters = append(filters, fmt.Sprintf(
+				"color=black:s=%dx%d:r=%d:d=%s,format=yuv420p,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
+				p.W, p.H, fps, f(float64(frames+1)/float64(fps)), frames, out))
+		}
+	}
+
 	// Video pieces → [v0..vN], in timeline order. Sub-half-frame slivers
 	// quantize to zero frames and are skipped entirely (a zero-frame trim
 	// would make concat fail on an empty stream).
@@ -91,36 +129,27 @@ func buildExportArgs(
 		}
 		dur := float64(frames) / float64(fps)
 		label := fmt.Sprintf("v%d", i)
-		src := (*exportSource)(nil)
-		if piece.Clip != nil {
-			src = srcFor(piece.Clip)
-		}
-		switch {
-		case src != nil && strings.HasPrefix(src.ContentType, "video/"):
-			ss := piece.Clip.InPoint
-			if src.DurationS > 0 {
-				ss = math.Min(ss, math.Max(0, src.DurationS-1.0/float64(fps)))
+		if piece.BlendFrom != nil {
+			// Dissolve window: outgoing (seeked to its out point) fades
+			// into the incoming content (or black). Both sides are already
+			// normalized to identical size/fps/format, and both are cut to
+			// `frames`, so xfade(offset=0, duration=window) emits exactly
+			// the window — the trailing trim is belt and braces.
+			emitVisual(piece.BlendFrom, piece.FromSeekS, dur, frames, label+"a")
+			var inSS float64
+			if piece.Clip != nil {
+				inSS = piece.Clip.InPoint
 			}
-			inputs = append(inputs, "-ss", f(ss), "-t", f(dur), "-i", src.Path)
+			emitVisual(piece.Clip, inSS, dur, frames, label+"b")
 			filters = append(filters, fmt.Sprintf(
-				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
-				nInput, scaleFor(piece.Clip), f(dur), frames, label))
-			nInput++
-		case src != nil && strings.HasPrefix(src.ContentType, "image/"):
-			// Stills (image takes) hold the frame for the piece duration —
-			// the preview's overlay semantics.
-			inputs = append(inputs, "-loop", "1", "-t", f(dur), "-i", src.Path)
-			filters = append(filters, fmt.Sprintf(
-				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
-				nInput, scaleFor(nil), f(dur), frames, label)) // stills: no grade in v1 — the preview overlay doesn't color either
-			nInput++
-		default:
-			// Gap — or a clip whose source can't paint (audio on a video
-			// track can't happen via the UI; render black over failing).
-			// One frame of margin on d, trim cuts exact.
-			filters = append(filters, fmt.Sprintf(
-				"color=black:s=%dx%d:r=%d:d=%s,format=yuv420p,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
-				p.W, p.H, fps, f(float64(frames+1)/float64(fps)), frames, label))
+				"[%sa][%sb]xfade=transition=fade:duration=%s:offset=0,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
+				label, label, f(dur), frames, label))
+		} else {
+			var ss float64
+			if piece.Clip != nil {
+				ss = piece.Clip.InPoint
+			}
+			emitVisual(piece.Clip, ss, dur, frames, label)
 		}
 		vLabels = append(vLabels, "["+label+"]")
 	}

@@ -17,6 +17,14 @@ export interface ClipColor {
   temp: number; // -1 (cool) .. 1 (warm), attenuation-only gains
 }
 
+/** OUT-transition of a clip (M7): the blend window is [clip end, end + D)
+ * — the outgoing clip continues past its out point (freeze past EOF) while
+ * the next same-track clip plays its head; timeline duration never changes. */
+export interface ClipTransition {
+  kind: "dissolve";
+  duration: number; // seconds, clamped [0.1, 2]
+}
+
 export interface ClipInit {
   id: string;
   name: string;
@@ -29,6 +37,8 @@ export interface ClipInit {
   text?: string;
   /** Color grade (video clips; absent = neutral). */
   color?: ClipColor;
+  /** OUT-transition into the next same-track clip (absent = hard cut). */
+  transition?: ClipTransition;
   start: number; // timeline position, seconds
   duration: number; // seconds on the timeline
   in_point?: number; // source in, seconds (default 0)
@@ -49,6 +59,7 @@ export type TimelineOp =
   | { op_id: string; type: "trim_clip"; clip_id: string; start?: number; duration?: number; in_point?: number }
   | { op_id: string; type: "set_clip_text"; clip_id: string; text: string }
   | { op_id: string; type: "set_clip_color"; clip_id: string; color?: ClipColor }
+  | { op_id: string; type: "set_clip_transition"; clip_id: string; transition?: ClipTransition }
   | { op_id: string; type: "undo"; target: string };
 
 export interface ClipState {
@@ -58,6 +69,7 @@ export interface ClipState {
   shotId?: string;
   text?: string;
   color?: ClipColor;
+  transition?: ClipTransition;
   start: number;
   duration: number;
   inPoint: number;
@@ -69,6 +81,14 @@ export function clampColor(c: ClipColor): ClipColor {
   const f = (v: number, neutral: number, lo: number, hi: number) =>
     Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : neutral;
   return { exposure: f(c.exposure, 0, -3, 3), contrast: f(c.contrast, 1, 0, 2), temp: f(c.temp, 0, -1, 1) };
+}
+
+/** Reducer clamp for transitions — MUST match the Go port exactly. Only
+ * dissolve exists in v1: any kind normalizes to it; duration clamps to
+ * [0.1, 2] with 0.5 as the absent/junk default. */
+export function clampTransition(t: ClipTransition): ClipTransition {
+  const d = Number.isFinite(t.duration) ? Math.min(2, Math.max(0.1, t.duration)) : 0.5;
+  return { kind: "dissolve", duration: d };
 }
 
 export interface TrackState {
@@ -127,7 +147,12 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
           versionId: op.clip.version_id,
           shotId: op.clip.shot_id,
           text: op.clip.text,
-          color: op.clip.color && clampColor(op.clip.color),
+          // != null, not truthiness: Go's tolerant decode treats ANY
+          // present non-null value (including 0/false/"") as set-with-
+          // defaults — a falsy-scalar fork here would diverge reduced
+          // state across clients (review PR37-M4).
+          color: op.clip.color != null ? clampColor(op.clip.color) : undefined,
+          transition: op.clip.transition != null ? clampTransition(op.clip.transition) : undefined,
           start: Math.max(0, op.clip.start),
           duration: Math.max(MIN_CLIP_S, op.clip.duration),
           inPoint: Math.max(0, op.clip.in_point ?? 0),
@@ -176,7 +201,12 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
       }
       case "set_clip_color": {
         const hit = findClip(op.clip_id);
-        if (hit) hit[1].color = op.color && clampColor(op.color);
+        if (hit) hit[1].color = op.color != null ? clampColor(op.color) : undefined;
+        break;
+      }
+      case "set_clip_transition": {
+        const hit = findClip(op.clip_id);
+        if (hit) hit[1].transition = op.transition != null ? clampTransition(op.transition) : undefined;
         break;
       }
     }
@@ -196,8 +226,9 @@ export function timelineDuration(state: TimelineState): number {
 /** Ops that split a clip at absolute time t: trim the original to the left
  * half, add the right half (in_point advanced so content stays put). Returns
  * null when t isn't strictly inside the clip or a side would collapse below
- * one frame. NOTE: a blade is two ops, so it takes two undos to fully revert
- * — op grouping is a future vocabulary change if that stings in practice. */
+ * one frame. NOTE: a blade is two ops — three when the clip carries an
+ * out-transition (the clear on the left half) — so a full revert takes as
+ * many undos; op grouping is a future vocabulary change if that stings. */
 export function bladeOps(
   state: TimelineState,
   clipId: string,
@@ -230,6 +261,9 @@ export function bladeOps(
           shot_id: clip.shotId,
           text: clip.text,
           color: clip.color,
+          // The OUT edge moved to the right half — it inherits the
+          // transition; the left half's new out is the cut (cleared below).
+          transition: clip.transition,
           start: rt,
           // Placeholders have no source: content anchoring is meaningless,
           // and a nonzero in_point would skew their left-trim clamp.
@@ -237,6 +271,9 @@ export function bladeOps(
           in_point: (hasSource ?? !!clip.versionId) ? clip.inPoint + left : 0,
         },
       },
+      ...(clip.transition
+        ? [{ op_id: newOpId(), type: "set_clip_transition", clip_id: clip.id } as TimelineOp]
+        : []),
     ];
   }
   return null;

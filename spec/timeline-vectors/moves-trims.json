@@ -95,7 +95,8 @@
             "version_id": "",
             "shot_id": "sh_1",
             "text": "",
-            "color": null
+            "color": null,
+            "transition": null
           }
         ]
       },
@@ -118,7 +119,8 @@
             "version_id": "vv_m",
             "shot_id": "",
             "text": "",
-            "color": null
+            "color": null,
+            "transition": null
           }
         ]
       }

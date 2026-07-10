@@ -1,6 +1,9 @@
 package timeline
 
-import "sort"
+import (
+	"math"
+	"sort"
+)
 
 // Export flattening. The client compositor picks the FIRST segment covering
 // t with segments in track-priority order (schedule.ts segmentAt) — the
@@ -14,10 +17,16 @@ import "sort"
 // mix. So audio is per-clip, not per-flattened-piece.
 
 // Piece is one span of the flattened video timeline. A nil Clip is a gap
-// (renders black + silence).
+// (renders black + silence). A non-nil BlendFrom makes it a DISSOLVE
+// window: BlendFrom (the outgoing clip, continuing past its out point —
+// source material when handles exist, freeze when they don't) fades out
+// over Clip's content (nil Clip = fade to black); BlendFrom's source time
+// at window time t is FromSeekS + (t - Start).
 type Piece struct {
 	Start, Duration float64
 	Clip            *Clip // nil = gap; Clip.InPoint already offset for mid-clip pieces
+	BlendFrom       *Clip
+	FromSeekS       float64
 }
 
 const boundaryEps = 1e-6
@@ -87,6 +96,112 @@ func Flatten(st *State, totalS float64) []Piece {
 			}
 		}
 		pieces = append(pieces, p)
+	}
+	return applyTransitions(st, pieces, totalS)
+}
+
+// applyTransitions carves dissolve windows out of the piece list. The
+// semantic is SAME-TRACK: a dissolve blends into the clip's own track's
+// adjacent successor, or fades to black into its own track's gap — never
+// into another track's content (the preview mirrors this; a cross-track
+// winner after the cut is a hard cut on both ends). It applies only where
+// both sides are actually visible: the outgoing clip's tail piece must end
+// at the clip's own end (not cut short by a higher track), and the window
+// clamps to the following piece — a shorter visible span shortens the
+// dissolve, and the timeline duration never changes. Chained overlaps
+// resolve first-wins (a piece already carrying a blend is skipped).
+func applyTransitions(st *State, pieces []Piece, totalS float64) []Piece {
+	// Same-track eligibility, from track structure (the piece list has
+	// none): from clip id → required incoming clip id ("" = gap fade).
+	// An overlapping same-track neighbor (neither adjacent nor a gap)
+	// gets no entry at all.
+	eligible := map[string]string{}
+	var transitioned []*Clip
+	for _, tr := range st.Tracks {
+		if tr.Kind != "video" {
+			continue
+		}
+		for i, c := range tr.Clips {
+			if c.Transition == nil {
+				continue
+			}
+			cut := c.Start + c.Duration
+			switch {
+			case i+1 < len(tr.Clips) && math.Abs(tr.Clips[i+1].Start-cut) < boundaryEps:
+				eligible[c.ID] = tr.Clips[i+1].ID
+			case i+1 >= len(tr.Clips) || tr.Clips[i+1].Start > cut+boundaryEps:
+				eligible[c.ID] = "" // own-track gap: fade to black
+			}
+			transitioned = append(transitioned, c)
+		}
+	}
+	for _, c := range transitioned {
+		to, ok := eligible[c.ID]
+		if !ok {
+			continue // overlapping neighbor — no coherent boundary
+		}
+		cut := c.Start + c.Duration
+		if cut >= totalS-boundaryEps {
+			continue // ends the timeline — no room to fade into
+		}
+		// The outgoing clip must be the visible winner right up to its end.
+		tail := -1
+		for i, p := range pieces {
+			if p.Clip != nil && p.BlendFrom == nil && p.Clip.ID == c.ID &&
+				math.Abs((p.Start+p.Duration)-cut) < boundaryEps {
+				tail = i
+				break
+			}
+		}
+		if tail == -1 || tail+1 >= len(pieces) {
+			continue
+		}
+		next := pieces[tail+1]
+		if next.BlendFrom != nil || math.Abs(next.Start-cut) > boundaryEps {
+			continue
+		}
+		// The piece that follows must BE the eligible same-track successor
+		// (or a gap when fading to black) — another track's clip winning
+		// there is a hard cut, exactly as the preview renders it.
+		if next.Clip == nil {
+			if to != "" {
+				continue
+			}
+		} else if next.Clip.ID != to {
+			continue
+		}
+		window := math.Min(c.Transition.Duration, next.Duration)
+		if window < boundaryEps {
+			continue
+		}
+		from := *c // the ORIGINAL clip: FromSeekS derives from its own extent
+		blend := Piece{
+			Start:     cut,
+			Duration:  window,
+			BlendFrom: &from,
+			FromSeekS: c.InPoint + c.Duration,
+		}
+		if next.Clip != nil {
+			in := *next.Clip
+			in.Start = cut
+			in.Duration = window
+			blend.Clip = &in
+		}
+		rest := next
+		rest.Start += window
+		rest.Duration -= window
+		if rest.Clip != nil {
+			rc := *rest.Clip
+			rc.InPoint += window
+			rc.Start += window
+			rc.Duration -= window
+			rest.Clip = &rc
+		}
+		if rest.Duration < boundaryEps {
+			pieces = append(pieces[:tail+1], append([]Piece{blend}, pieces[tail+2:]...)...)
+		} else {
+			pieces = append(pieces[:tail+1], append([]Piece{blend, rest}, pieces[tail+2:]...)...)
+		}
 	}
 	return pieces
 }

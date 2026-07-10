@@ -27,6 +27,14 @@ function label(op: TimelineOp): string {
       return `Edit caption “${op.text.length > 24 ? op.text.slice(0, 24) + "…" : op.text}”`;
     case "set_clip_color":
       return op.color ? "Grade clip" : "Clear grade";
+    case "set_clip_transition":
+      // duration can be absent on the wire (reducers default it) — the
+      // history must render any log another client wrote, never crash.
+      return op.transition
+        ? typeof op.transition.duration === "number"
+          ? `Dissolve ${op.transition.duration.toFixed(2)}s`
+          : "Dissolve"
+        : "Remove dissolve";
     case "undo":
       return "Undo";
   }

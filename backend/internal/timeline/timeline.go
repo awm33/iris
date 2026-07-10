@@ -17,19 +17,20 @@ import (
 // Op mirrors doc-runtime's TimelineOp envelope. Optional numeric fields are
 // pointers: trim_clip's absent start and start 0 are different edits.
 type Op struct {
-	OpID     string    `json:"op_id"`
-	Type     string    `json:"type"`
-	Track    *TrackDef `json:"track,omitempty"`
-	Index    *int      `json:"index,omitempty"`
-	TrackID  string    `json:"track_id,omitempty"`
-	Clip     *ClipDef  `json:"clip,omitempty"`
-	ClipID   string    `json:"clip_id,omitempty"`
-	Start    *float64  `json:"start,omitempty"`
-	Duration *float64  `json:"duration,omitempty"`
-	InPoint  *float64  `json:"in_point,omitempty"`
-	Text     *string   `json:"text,omitempty"`
-	Color    *ColorDef `json:"color,omitempty"`
-	Target   string    `json:"target,omitempty"`
+	OpID       string         `json:"op_id"`
+	Type       string         `json:"type"`
+	Track      *TrackDef      `json:"track,omitempty"`
+	Index      *int           `json:"index,omitempty"`
+	TrackID    string         `json:"track_id,omitempty"`
+	Clip       *ClipDef       `json:"clip,omitempty"`
+	ClipID     string         `json:"clip_id,omitempty"`
+	Start      *float64       `json:"start,omitempty"`
+	Duration   *float64       `json:"duration,omitempty"`
+	InPoint    *float64       `json:"in_point,omitempty"`
+	Text       *string        `json:"text,omitempty"`
+	Color      *ColorDef      `json:"color,omitempty"`
+	Transition *TransitionDef `json:"transition,omitempty"`
+	Target     string         `json:"target,omitempty"`
 }
 
 // ColorDef is the wire form of a color grade — pointer fields because an
@@ -87,6 +88,42 @@ func ClampColor(c *ColorDef) Color {
 	}
 }
 
+// TransitionDef is the wire form of an out-transition; same tolerant-decode
+// posture as ColorDef (junk → defaults, never a log-bricking parse error).
+type TransitionDef struct {
+	Duration *float64
+}
+
+func (t *TransitionDef) UnmarshalJSON(b []byte) error {
+	*t = TransitionDef{}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(b, &m) != nil {
+		return nil // non-object → defaults (TS: clampTransition(junk))
+	}
+	if raw, ok := m["duration"]; ok {
+		var v *float64
+		if json.Unmarshal(raw, &v) == nil {
+			t.Duration = v
+		}
+	}
+	return nil
+}
+
+// Transition is the reduced grade. Only dissolve exists in v1 — any wire
+// kind normalizes to it (ClampTransition mirrors clampTransition exactly).
+type Transition struct {
+	Kind     string
+	Duration float64
+}
+
+func ClampTransition(t *TransitionDef) Transition {
+	d := 0.5
+	if t.Duration != nil {
+		d = math.Min(2, math.Max(0.1, *t.Duration))
+	}
+	return Transition{Kind: "dissolve", Duration: d}
+}
+
 type TrackDef struct {
 	ID   string `json:"id"`
 	Kind string `json:"kind"` // video | audio | caption
@@ -94,27 +131,29 @@ type TrackDef struct {
 }
 
 type ClipDef struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	VersionID string    `json:"version_id,omitempty"`
-	ShotID    string    `json:"shot_id,omitempty"`
-	Text      string    `json:"text,omitempty"`
-	Color     *ColorDef `json:"color,omitempty"`
-	Start     float64   `json:"start"`
-	Duration  float64   `json:"duration"`
-	InPoint   *float64  `json:"in_point,omitempty"`
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	VersionID  string         `json:"version_id,omitempty"`
+	ShotID     string         `json:"shot_id,omitempty"`
+	Text       string         `json:"text,omitempty"`
+	Color      *ColorDef      `json:"color,omitempty"`
+	Transition *TransitionDef `json:"transition,omitempty"`
+	Start      float64        `json:"start"`
+	Duration   float64        `json:"duration"`
+	InPoint    *float64       `json:"in_point,omitempty"`
 }
 
 type Clip struct {
-	ID        string
-	Name      string
-	VersionID string
-	ShotID    string
-	Text      string
-	Color     *Color // nil = neutral
-	Start     float64
-	Duration  float64
-	InPoint   float64
+	ID         string
+	Name       string
+	VersionID  string
+	ShotID     string
+	Text       string
+	Color      *Color      // nil = neutral
+	Transition *Transition // nil = hard cut
+	Start      float64
+	Duration   float64
+	InPoint    float64
 }
 
 type Track struct {
@@ -270,16 +309,22 @@ func Reduce(ops []*Op) *State {
 				c := ClampColor(op.Clip.Color)
 				col = &c
 			}
+			var trn *Transition
+			if op.Clip.Transition != nil {
+				t := ClampTransition(op.Clip.Transition)
+				trn = &t
+			}
 			t.Clips = append(t.Clips, &Clip{
-				ID:        op.Clip.ID,
-				Name:      op.Clip.Name,
-				VersionID: op.Clip.VersionID,
-				ShotID:    op.Clip.ShotID,
-				Text:      op.Clip.Text,
-				Color:     col,
-				Start:     max(0, op.Clip.Start),
-				Duration:  max(MinClipS, op.Clip.Duration),
-				InPoint:   max(0, inPoint),
+				ID:         op.Clip.ID,
+				Name:       op.Clip.Name,
+				VersionID:  op.Clip.VersionID,
+				ShotID:     op.Clip.ShotID,
+				Text:       op.Clip.Text,
+				Color:      col,
+				Transition: trn,
+				Start:      max(0, op.Clip.Start),
+				Duration:   max(MinClipS, op.Clip.Duration),
+				InPoint:    max(0, inPoint),
 			})
 			sortClips(t)
 		case "remove_clip":
@@ -349,6 +394,16 @@ func Reduce(ops []*Op) *State {
 			if op.Color != nil {
 				c := ClampColor(op.Color)
 				clip.Color = &c
+			}
+		case "set_clip_transition":
+			_, clip := findClip(op.ClipID)
+			if clip == nil {
+				break
+			}
+			clip.Transition = nil
+			if op.Transition != nil {
+				t := ClampTransition(op.Transition)
+				clip.Transition = &t
 			}
 		}
 	}
