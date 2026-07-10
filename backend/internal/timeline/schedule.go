@@ -97,21 +97,48 @@ func Flatten(st *State, totalS float64) []Piece {
 		}
 		pieces = append(pieces, p)
 	}
-	return applyTransitions(clips, pieces, totalS)
+	return applyTransitions(st, pieces, totalS)
 }
 
-// applyTransitions carves dissolve windows out of the piece list. A
-// transition applies only where BOTH sides are actually visible: the
-// outgoing clip's tail piece must end at the clip's own end (not cut short
-// by a higher track), and the window is taken from whatever piece follows
-// (the incoming clip, or a gap = fade to black). The window clamps to that
-// piece — a shorter incoming piece shortens the dissolve, and the timeline
-// duration never changes. Chained overlaps resolve first-wins (a piece
-// already carrying a blend is skipped).
-func applyTransitions(clips []*Clip, pieces []Piece, totalS float64) []Piece {
-	for _, c := range clips {
-		if c.Transition == nil {
+// applyTransitions carves dissolve windows out of the piece list. The
+// semantic is SAME-TRACK: a dissolve blends into the clip's own track's
+// adjacent successor, or fades to black into its own track's gap — never
+// into another track's content (the preview mirrors this; a cross-track
+// winner after the cut is a hard cut on both ends). It applies only where
+// both sides are actually visible: the outgoing clip's tail piece must end
+// at the clip's own end (not cut short by a higher track), and the window
+// clamps to the following piece — a shorter visible span shortens the
+// dissolve, and the timeline duration never changes. Chained overlaps
+// resolve first-wins (a piece already carrying a blend is skipped).
+func applyTransitions(st *State, pieces []Piece, totalS float64) []Piece {
+	// Same-track eligibility, from track structure (the piece list has
+	// none): from clip id → required incoming clip id ("" = gap fade).
+	// An overlapping same-track neighbor (neither adjacent nor a gap)
+	// gets no entry at all.
+	eligible := map[string]string{}
+	var transitioned []*Clip
+	for _, tr := range st.Tracks {
+		if tr.Kind != "video" {
 			continue
+		}
+		for i, c := range tr.Clips {
+			if c.Transition == nil {
+				continue
+			}
+			cut := c.Start + c.Duration
+			switch {
+			case i+1 < len(tr.Clips) && math.Abs(tr.Clips[i+1].Start-cut) < boundaryEps:
+				eligible[c.ID] = tr.Clips[i+1].ID
+			case i+1 >= len(tr.Clips) || tr.Clips[i+1].Start > cut+boundaryEps:
+				eligible[c.ID] = "" // own-track gap: fade to black
+			}
+			transitioned = append(transitioned, c)
+		}
+	}
+	for _, c := range transitioned {
+		to, ok := eligible[c.ID]
+		if !ok {
+			continue // overlapping neighbor — no coherent boundary
 		}
 		cut := c.Start + c.Duration
 		if cut >= totalS-boundaryEps {
@@ -131,6 +158,16 @@ func applyTransitions(clips []*Clip, pieces []Piece, totalS float64) []Piece {
 		}
 		next := pieces[tail+1]
 		if next.BlendFrom != nil || math.Abs(next.Start-cut) > boundaryEps {
+			continue
+		}
+		// The piece that follows must BE the eligible same-track successor
+		// (or a gap when fading to black) — another track's clip winning
+		// there is a hard cut, exactly as the preview renders it.
+		if next.Clip == nil {
+			if to != "" {
+				continue
+			}
+		} else if next.Clip.ID != to {
 			continue
 		}
 		window := math.Min(c.Transition.Duration, next.Duration)

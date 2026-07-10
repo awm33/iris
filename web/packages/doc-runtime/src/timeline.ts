@@ -147,8 +147,12 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
           versionId: op.clip.version_id,
           shotId: op.clip.shot_id,
           text: op.clip.text,
-          color: op.clip.color && clampColor(op.clip.color),
-          transition: op.clip.transition && clampTransition(op.clip.transition),
+          // != null, not truthiness: Go's tolerant decode treats ANY
+          // present non-null value (including 0/false/"") as set-with-
+          // defaults — a falsy-scalar fork here would diverge reduced
+          // state across clients (review PR37-M4).
+          color: op.clip.color != null ? clampColor(op.clip.color) : undefined,
+          transition: op.clip.transition != null ? clampTransition(op.clip.transition) : undefined,
           start: Math.max(0, op.clip.start),
           duration: Math.max(MIN_CLIP_S, op.clip.duration),
           inPoint: Math.max(0, op.clip.in_point ?? 0),
@@ -197,12 +201,12 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
       }
       case "set_clip_color": {
         const hit = findClip(op.clip_id);
-        if (hit) hit[1].color = op.color && clampColor(op.color);
+        if (hit) hit[1].color = op.color != null ? clampColor(op.color) : undefined;
         break;
       }
       case "set_clip_transition": {
         const hit = findClip(op.clip_id);
-        if (hit) hit[1].transition = op.transition && clampTransition(op.transition);
+        if (hit) hit[1].transition = op.transition != null ? clampTransition(op.transition) : undefined;
         break;
       }
     }
@@ -222,8 +226,9 @@ export function timelineDuration(state: TimelineState): number {
 /** Ops that split a clip at absolute time t: trim the original to the left
  * half, add the right half (in_point advanced so content stays put). Returns
  * null when t isn't strictly inside the clip or a side would collapse below
- * one frame. NOTE: a blade is two ops, so it takes two undos to fully revert
- * — op grouping is a future vocabulary change if that stings in practice. */
+ * one frame. NOTE: a blade is two ops — three when the clip carries an
+ * out-transition (the clear on the left half) — so a full revert takes as
+ * many undos; op grouping is a future vocabulary change if that stings. */
 export function bladeOps(
   state: TimelineState,
   clipId: string,

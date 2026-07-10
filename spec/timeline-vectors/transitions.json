@@ -1,22 +1,207 @@
 {
-  "name": "transitions: clamp both ends, junk kind normalizes to dissolve, absent duration default, clear, undo of set",
+  "name": "transitions: clamps both ends, junk kind\u2192dissolve, absent/junk duration default, falsy-scalar sets defaults, clear, undo, missing clip",
   "ops": [
-    { "op_id": "t1", "type": "add_track", "track": { "id": "v1", "kind": "video" } },
-    { "op_id": "a1", "type": "add_clip", "track_id": "v1", "clip": { "id": "x", "name": "x", "version_id": "vv_x", "start": 0, "duration": 2, "transition": { "kind": "wipe", "duration": 9 } } },
-    { "op_id": "a2", "type": "add_clip", "track_id": "v1", "clip": { "id": "y", "name": "y", "version_id": "vv_y", "start": 2, "duration": 2 } },
-    { "op_id": "s1", "type": "set_clip_transition", "clip_id": "y", "transition": { "kind": "dissolve" } },
-    { "op_id": "s2", "type": "set_clip_transition", "clip_id": "x", "transition": { "kind": "dissolve", "duration": 0.01 } },
-    { "op_id": "s3", "type": "set_clip_transition", "clip_id": "x" },
-    { "op_id": "u1", "type": "undo", "target": "s3" },
-    { "op_id": "s4", "type": "set_clip_transition", "clip_id": "ghost", "transition": { "kind": "dissolve", "duration": 1 } }
+    {
+      "op_id": "t1",
+      "type": "add_track",
+      "track": {
+        "id": "v1",
+        "kind": "video"
+      }
+    },
+    {
+      "op_id": "a1",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "x",
+        "name": "x",
+        "version_id": "vv_x",
+        "start": 0,
+        "duration": 2,
+        "transition": {
+          "kind": "wipe",
+          "duration": 9
+        }
+      }
+    },
+    {
+      "op_id": "a2",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "y",
+        "name": "y",
+        "version_id": "vv_y",
+        "start": 2,
+        "duration": 2
+      }
+    },
+    {
+      "op_id": "s1",
+      "type": "set_clip_transition",
+      "clip_id": "y",
+      "transition": {
+        "kind": "dissolve"
+      }
+    },
+    {
+      "op_id": "s2",
+      "type": "set_clip_transition",
+      "clip_id": "x",
+      "transition": {
+        "kind": "dissolve",
+        "duration": 0.01
+      }
+    },
+    {
+      "op_id": "s3",
+      "type": "set_clip_transition",
+      "clip_id": "x"
+    },
+    {
+      "op_id": "u1",
+      "type": "undo",
+      "target": "s3"
+    },
+    {
+      "op_id": "s4",
+      "type": "set_clip_transition",
+      "clip_id": "ghost",
+      "transition": {
+        "kind": "dissolve",
+        "duration": 1
+      }
+    },
+    {
+      "op_id": "a5",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "w",
+        "name": "w",
+        "version_id": "vv_w",
+        "start": 4,
+        "duration": 1,
+        "transition": {
+          "kind": "wipe",
+          "duration": 9
+        }
+      }
+    },
+    {
+      "op_id": "a6",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "j",
+        "name": "j",
+        "version_id": "vv_j",
+        "start": 5,
+        "duration": 1,
+        "transition": {
+          "kind": "dissolve",
+          "duration": "junk"
+        }
+      }
+    },
+    {
+      "op_id": "a7",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "z",
+        "name": "z",
+        "version_id": "vv_z",
+        "start": 6,
+        "duration": 1,
+        "transition": 0
+      }
+    },
+    {
+      "op_id": "s5",
+      "type": "set_clip_transition",
+      "clip_id": "z",
+      "transition": 0
+    }
   ],
   "expected": {
     "tracks": [
       {
-        "id": "v1", "kind": "video", "name": "V",
+        "id": "v1",
+        "kind": "video",
+        "name": "V",
         "clips": [
-          { "id": "x", "start": 0, "duration": 2, "in_point": 0, "version_id": "vv_x", "shot_id": "", "text": "", "color": null, "transition": { "kind": "dissolve", "duration": 0.1 } },
-          { "id": "y", "start": 2, "duration": 2, "in_point": 0, "version_id": "vv_y", "shot_id": "", "text": "", "color": null, "transition": { "kind": "dissolve", "duration": 0.5 } }
+          {
+            "id": "x",
+            "start": 0,
+            "duration": 2,
+            "in_point": 0,
+            "version_id": "vv_x",
+            "shot_id": "",
+            "text": "",
+            "color": null,
+            "transition": {
+              "kind": "dissolve",
+              "duration": 0.1
+            }
+          },
+          {
+            "id": "y",
+            "start": 2,
+            "duration": 2,
+            "in_point": 0,
+            "version_id": "vv_y",
+            "shot_id": "",
+            "text": "",
+            "color": null,
+            "transition": {
+              "kind": "dissolve",
+              "duration": 0.5
+            }
+          },
+          {
+            "id": "w",
+            "start": 4,
+            "duration": 1,
+            "in_point": 0,
+            "version_id": "vv_w",
+            "shot_id": "",
+            "text": "",
+            "color": null,
+            "transition": {
+              "kind": "dissolve",
+              "duration": 2
+            }
+          },
+          {
+            "id": "j",
+            "start": 5,
+            "duration": 1,
+            "in_point": 0,
+            "version_id": "vv_j",
+            "shot_id": "",
+            "text": "",
+            "color": null,
+            "transition": {
+              "kind": "dissolve",
+              "duration": 0.5
+            }
+          },
+          {
+            "id": "z",
+            "start": 6,
+            "duration": 1,
+            "in_point": 0,
+            "version_id": "vv_z",
+            "shot_id": "",
+            "text": "",
+            "color": null,
+            "transition": {
+              "kind": "dissolve",
+              "duration": 0.5
+            }
+          }
         ]
       }
     ]

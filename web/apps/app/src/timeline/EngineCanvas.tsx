@@ -137,7 +137,12 @@ export function EngineCanvas(props: {
     src: HTMLCanvasElement,
     grade: { exposure: number; contrast: number; temp: number } | undefined,
     alpha: number,
+    // Destination rect — dissolve layers of different native sizes must
+    // aspect-fit into ONE frame (the export letterboxes both sides to the
+    // preset dims; unscaled corner-drawing broke mixed-aspect dissolves).
+    rect?: { dx: number; dy: number; dw: number; dh: number },
   ) => {
+    const r = rect ?? { dx: 0, dy: 0, dw: src.width, dh: src.height };
     dst.save();
     dst.globalAlpha = alpha;
     if (grade && (grade.exposure !== 0 || grade.contrast !== 1)) {
@@ -165,12 +170,21 @@ export function EngineCanvas(props: {
       sctx.fillRect(0, 0, scratch.width, scratch.height);
       sctx.restore();
       dst.filter = "none";
-      dst.drawImage(scratch, 0, 0);
+      dst.drawImage(scratch, r.dx, r.dy, r.dw, r.dh);
     } else {
-      dst.drawImage(src, 0, 0);
+      dst.drawImage(src, r.dx, r.dy, r.dw, r.dh);
       dst.filter = "none";
     }
     dst.restore();
+  };
+
+  // Aspect-fit a source into the canvas frame, centered — the preview's
+  // analogue of the export's scale=decrease + pad.
+  const fitRect = (sw: number, sh: number, W: number, H: number) => {
+    const sc = Math.min(W / sw, H / sh);
+    const dw = sw * sc;
+    const dh = sh * sc;
+    return { dx: (W - dw) / 2, dy: (H - dh) / 2, dw, dh };
   };
 
   // composite renders raw layer(s) → visible with grades and any active
@@ -208,11 +222,11 @@ export function EngineCanvas(props: {
         // xfade's fade: out = A·(1−p) + B·p. Source-over gives exactly
         // that with A at alpha 1 then B at alpha p (opaque layers). A at
         // (1−p) then B at p would square the outgoing term.
-        gradeInto(ctx, rawFrom, gradeOf(blend.fromClipId), 1);
-        gradeInto(ctx, raw, gradeOf(seg.clipId), p);
+        gradeInto(ctx, rawFrom, gradeOf(blend.fromClipId), 1, fitRect(rawFrom.width, rawFrom.height, canvas.width, canvas.height));
+        gradeInto(ctx, raw, gradeOf(seg.clipId), p, fitRect(raw.width, raw.height, canvas.width, canvas.height));
       } else {
         // Fade into a gap: black base, outgoing at (1−p).
-        gradeInto(ctx, rawFrom, gradeOf(blend.fromClipId), 1 - p);
+        gradeInto(ctx, rawFrom, gradeOf(blend.fromClipId), 1 - p, fitRect(rawFrom.width, rawFrom.height, canvas.width, canvas.height));
       }
       return;
     }
@@ -324,7 +338,12 @@ export function EngineCanvas(props: {
         const fromTargetS = blend.fromSeekS + (props.time - blend.start);
         const fromTargetUs = Math.round(fromTargetS * 1e6);
         const fs = fromSessionRef.current;
-        if (!fs || fs.sourceId !== blend.fromSourceId || fromTargetUs < fs.lastPaintedUs - 250_000) {
+        if (
+          !fs ||
+          fs.sourceId !== blend.fromSourceId ||
+          fromTargetUs < fs.lastPaintedUs - 250_000 ||
+          (!fs.done && fromTargetUs > fs.lastPaintedUs + 1_000_000)
+        ) {
           startSessionIn(fromSessionRef, blend.fromSourceId, fromTargetS);
         }
         const ff = fromSessionRef.current?.queue.takeUpTo(fromTargetUs);

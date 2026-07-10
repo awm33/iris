@@ -129,6 +129,24 @@
       "color": {
         "exposure": 1
       }
+    },
+    {
+      "op_id": "a5",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "m",
+        "name": "m",
+        "version_id": "vv_m",
+        "start": 7,
+        "duration": 1
+      }
+    },
+    {
+      "op_id": "c7",
+      "type": "set_clip_color",
+      "clip_id": "m",
+      "color": 0
     }
   ],
   "expected": {
@@ -208,6 +226,21 @@
             "text": "",
             "color": null,
             "transition": null
+          },
+          {
+            "id": "m",
+            "start": 7,
+            "duration": 1,
+            "in_point": 0,
+            "version_id": "vv_m",
+            "shot_id": "",
+            "text": "",
+            "transition": null,
+            "color": {
+              "exposure": 0,
+              "contrast": 1,
+              "temp": 0
+            }
           }
         ]
       }

@@ -500,6 +500,23 @@ export function TimelinePage(props: {
         if (adjacent && after?.id === next.id) {
           toClipId = next.id;
           duration = Math.min(duration, next.duration);
+          // Clamp to the VISIBLE span like the export's piece does: a
+          // higher-track clip appearing mid-window ends the dissolve there
+          // (blending the outgoing layer over the covering clip's frames
+          // would show content the export never blends). Winners change
+          // only at clip edges, so probing each edge inside the window is
+          // exhaustive.
+          const edges = st.tracks
+            .filter((tr) => tr.kind === "video")
+            .flatMap((tr) => tr.clips.flatMap((cc) => [cc.start, cc.start + cc.duration]))
+            .filter((b) => b > cut + eps && b < cut + duration - eps)
+            .sort((a, b) => a - b);
+          for (const b of edges) {
+            if (clipAt(st, b + eps, "video")?.id !== next.id) {
+              duration = b - cut;
+              break;
+            }
+          }
         } else if (!after) {
           // Fade to black across the gap — clamp to the gap (the export's
           // window clamps to the gap piece).
@@ -715,7 +732,7 @@ export function TimelinePage(props: {
               })
             }
           >
-            {["0.25", "0.5", "1", "2"].map((d) => (
+            {[...new Set(["0.25", "0.5", "1", "2", String(selectedVideoClip.transition.duration)])].map((d) => (
               <option key={d} value={d}>
                 ⧓ {d}s
               </option>
