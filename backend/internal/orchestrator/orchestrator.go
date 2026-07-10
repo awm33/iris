@@ -346,7 +346,15 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	}
 
 	for _, ref := range req.References {
-		url, err := o.resolveRefURL(ctx, &ref, "")
+		// Kind-aligned content-type constraint: spec kinds ARE MIME prefixes
+		// (image/audio/video). A video asset smuggled as an audio ref would
+		// otherwise reach the vendor as a paid call with garbage input and a
+		// vendor-side deferred failure.
+		wantCT := ""
+		if ref.Kind != "" {
+			wantCT = ref.Kind + "/"
+		}
+		url, err := o.resolveRefURL(ctx, &ref, wantCT)
 		if err != nil {
 			return nil, "", err
 		}

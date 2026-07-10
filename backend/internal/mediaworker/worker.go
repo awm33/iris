@@ -38,13 +38,13 @@ const (
 	// One job per claim: sequential execution after a batch claim would let
 	// slow preps outlive the lease for batch tails (NOTIFY+poll make
 	// claim-per-job cheap).
-	claimBatch = 1
+	claimBatch   = 1
 	pollFallback = 15 * time.Second
 	probeTimeout = 2 * time.Minute
 	// Prep runs multiple full-decode ffmpeg passes; a 10-min 4K clip needs
 	// hundreds of CPU-seconds. Must stay under queue.MediaLease.
 	prepTimeout = 15 * time.Minute
-	reapEvery    = time.Minute
+	reapEvery   = time.Minute
 )
 
 // permanentError marks failures that can never succeed on retry (bad input,

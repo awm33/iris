@@ -15,8 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/awm33/iris/backend/internal/ids"
 	"github.com/awm33/iris/backend/internal/adapters"
+	"github.com/awm33/iris/backend/internal/ids"
 	"github.com/awm33/iris/backend/internal/inference"
 )
 

@@ -392,9 +392,9 @@ func shotPB(sh *store.ShotRow) *irisv1.Shot {
 		Id: sh.ID, SceneId: sh.SceneID, Position: sh.Position,
 		Description: sh.Description, DurationTargetS: sh.DurationTargetS,
 		ViewId: sh.ViewID, CastIds: sh.CastIDs, SelectedTakeId: sh.SelectedTakeID,
-		SelectedTakeVersionId: sh.SelectedTakeVersionID,
+		SelectedTakeVersionId:   sh.SelectedTakeVersionID,
 		SelectedTakeContentType: sh.SelectedTakeContentType,
-		ContinuityStale:       sh.ContinuityStale, Pinned: sh.Pinned, TakeCount: sh.TakeCount,
+		ContinuityStale:         sh.ContinuityStale, Pinned: sh.Pinned, TakeCount: sh.TakeCount,
 		Timestamps: ts(sh.CreatedAt, sh.UpdatedAt),
 	}
 }

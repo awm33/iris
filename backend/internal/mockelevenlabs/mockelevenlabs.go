@@ -13,6 +13,19 @@ import (
 //go:embed canned.mp3
 var cannedMP3 []byte
 
+// Voices the mock recognizes — the elevenlabs adapter's manifest enum must
+// stay a subset (a drift test in the adapter package enforces it).
+var Voices = []string{"iris-narrator", "mara"}
+
+func knownVoice(v string) bool {
+	for _, k := range Voices {
+		if k == v {
+			return true
+		}
+	}
+	return false
+}
+
 type Server struct{ key string }
 
 func New(key string) *Server { return &Server{key: key} }
@@ -28,9 +41,7 @@ func (s *Server) Handler() http.Handler {
 		})
 	}))
 	mux.HandleFunc("POST /v1/text-to-speech/{voice}", s.auth(func(w http.ResponseWriter, r *http.Request) {
-		switch r.PathValue("voice") {
-		case "iris-narrator", "mara":
-		default:
+		if !knownVoice(r.PathValue("voice")) {
 			http.Error(w, `{"detail":{"status":"voice_not_found"}}`, http.StatusNotFound)
 			return
 		}

@@ -37,6 +37,7 @@ export type GeneratePrefill = {
   seed?: bigint;
   durationS?: number;
   refs?: RefChip[];
+  params?: Record<string, string>;
 };
 
 // prefillFromRecipe maps a stored take recipe onto panel state. Unknown or
@@ -52,8 +53,15 @@ export function prefillFromRecipe(recipeJson: string): GeneratePrefill | undefin
         prompt?: string;
         output?: { duration_s?: number };
         references?: { kind?: string; role?: string; asset_id?: string }[];
+        params?: Record<string, unknown>;
       };
     };
+    // String params only (voice_id etc.) — replay fidelity: dropping them
+    // would silently regenerate with different semantics (default voice).
+    const params: Record<string, string> = {};
+    for (const [k, v] of Object.entries(r.request?.params ?? {})) {
+      if (typeof v === "string") params[k] = v;
+    }
     return {
       endpointId: r.endpoint_id,
       task: r.task,
@@ -61,9 +69,17 @@ export function prefillFromRecipe(recipeJson: string): GeneratePrefill | undefin
       prompt: r.request?.prompt,
       seed: seedFromRecipeJSON(recipeJson),
       durationS: r.request?.output?.duration_s,
+      // ALL ref kinds replay — filtering to image silently dropped a
+      // dialogue take's audio ref from the ♻ Regenerate loop.
       refs: (r.request?.references ?? [])
-        .filter((ref) => ref.kind === "image" && ref.asset_id)
-        .map((ref) => ({ assetId: ref.asset_id!, name: `${ref.role ?? "ref"}`, role: ref.role ?? "character" })),
+        .filter((ref) => ref.asset_id)
+        .map((ref) => ({
+          assetId: ref.asset_id!,
+          name: `${ref.role ?? "ref"}`,
+          role: ref.role ?? "character",
+          kind: ref.kind === "audio" ? ("audio" as const) : ("image" as const),
+        })),
+      params: Object.keys(params).length > 0 ? params : undefined,
     };
   } catch {
     return undefined;
@@ -130,7 +146,7 @@ export function GeneratePanel(props: {
   const [showAudioPicker, setShowAudioPicker] = useState(false);
   // params_schema-driven fields (enum strings only, v1): voice selection
   // for TTS endpoints is the first consumer.
-  const [params, setParams] = useState<Record<string, string>>({});
+  const [params, setParams] = useState<Record<string, string>>(props.prefill?.params ?? {});
   // Continuity carry (W3): the nearest EARLIER shot in the scene with a
   // selected take supplies its last frame as first_frame conditioning.
   const [carry, setCarry] = useState(true);
@@ -201,15 +217,17 @@ export function GeneratePanel(props: {
   const seedValid = !seedSupported || seedValue !== null;
   // Prefilled refs sanitized against the RESOLVED manifest — hidden inputs
   // must never submit (an error about an invisible field is a dead end).
-  const effectiveRefs = refDecl
-    ? refs.filter((r) => (r.kind ?? "image") === "image" && refDecl.roles.includes(r.role)).slice(0, refDecl.max)
-    : [];
+  const imageRefs = refs.filter((r) => (r.kind ?? "image") === "image");
+  const effectiveRefs = refDecl ? imageRefs.filter((r) => refDecl.roles.includes(r.role)).slice(0, refDecl.max) : [];
   const audioRefs = refs.filter((r) => r.kind === "audio");
   const effectiveAudioRefs = audioDecl
     ? audioRefs.filter((r) => audioDecl.roles.includes(r.role)).slice(0, audioDecl.max)
     : [];
+  // Same doctrine as refs: hidden inputs never submit — params keys are
+  // sanitized against the RESOLVED manifest's schema.
   const paramsJson = (() => {
-    const set = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== ""));
+    const declared = manifest?.params_schema?.properties ?? {};
+    const set = Object.fromEntries(Object.entries(params).filter(([k, v]) => v !== "" && k in declared));
     return Object.keys(set).length > 0 ? JSON.stringify(set) : "";
   })();
   // Offered only when it can actually submit: video endpoint that declares
@@ -287,8 +305,10 @@ export function GeneratePanel(props: {
   if (props.prefill?.task && activeTask !== props.prefill.task) {
     fallbackNotes.push(`Task "${props.prefill.task}" not supported here — using "${activeTask}".`);
   }
-  if (effectiveRefs.length !== refs.length) {
-    fallbackNotes.push(`${refs.length - effectiveRefs.length} reference(s) not supported by this model were dropped.`);
+  if (effectiveRefs.length + effectiveAudioRefs.length !== refs.length) {
+    fallbackNotes.push(
+      `${refs.length - effectiveRefs.length - effectiveAudioRefs.length} reference(s) not supported by this model were dropped.`,
+    );
   }
   if (!seedSupported && seed.trim() !== "") {
     fallbackNotes.push("This model does not support seeds — generating unseeded.");
@@ -376,16 +396,16 @@ export function GeneratePanel(props: {
       {refDecl && (
         <div className="field">
           <span>
-            References ({effectiveRefs.length}/{refDecl.max})
+            References ({imageRefs.length}/{refDecl.max})
           </span>
           <div className="chips">
-            {refs.map((r, i) => (
-              <span key={i} className="chip" title={r.role}>
+            {imageRefs.map((r) => (
+              <span key={`${r.assetId}:${r.role}`} className="chip" title={r.role}>
                 {r.name === r.role ? r.role : `${r.name} · ${r.role}`}
-                <button onClick={() => setRefs(refs.filter((_, j) => j !== i))}>×</button>
+                <button onClick={() => setRefs(refs.filter((x) => x !== r))}>×</button>
               </span>
             ))}
-            {refs.length < refDecl.max && (
+            {imageRefs.length < refDecl.max && (
               <button className="btn secondary chip-add" onClick={() => setShowRefPicker(true)}>
                 + Add reference
               </button>

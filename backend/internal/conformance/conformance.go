@@ -71,7 +71,7 @@ func Run(ctx context.Context, cfg Config) []Result {
 		{"manifest_valid", false, c.checkManifest},
 		{"job_lifecycle_and_artifact", false, c.checkLifecycle},
 		{"idempotent_create", false, c.checkIdempotency},
-		{"mask_semantics", false, c.checkMaskSemantics}, // self-skips when inpaint undeclared
+		{"mask_semantics", false, c.checkMaskSemantics},  // self-skips when inpaint undeclared
 		{"cancel", !cfg.FailureInjection, c.checkCancel}, // needs SLOW injection to be reliable
 		{"error_safety_blocked", !cfg.FailureInjection, c.checkSafetyBlocked},
 		{"error_transient_retryable", !cfg.FailureInjection, c.checkTransient},
