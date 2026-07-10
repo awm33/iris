@@ -70,6 +70,11 @@ func main() {
 			Kind:    "seedance",
 			AuthRef: "env:MOCK_SEEDANCE_KEY",
 		},
+		"ElevenLabs (dev mock)": {
+			BaseURL: getenv("IRIS_ELEVENLABS_URL", "http://127.0.0.1:8906"),
+			Kind:    "elevenlabs",
+			AuthRef: "env:MOCK_ELEVENLABS_KEY",
+		},
 	}); err != nil {
 		slog.Error("endpoint seed", "err", err)
 		os.Exit(1)

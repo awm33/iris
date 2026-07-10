@@ -336,6 +336,13 @@ func (s *seedance) call(ctx context.Context, method, path string, body, out any)
 	req.Header.Set("Content-Type", "application/json")
 	res, err := s.http.Do(req)
 	if err != nil {
+		// Same discipline as elevenlabs: post-send timeouts are taxonomy
+		// transients (a submitted task may be running — the unreachable
+		// fast-path would re-submit it per loop); dial failures stay raw.
+		if isPostSendTimeout(err) {
+			return &inference.JobError{Code: "transient", Retryable: true,
+				Message: fmt.Sprintf("seedance %s timed out after send: %v", path, err)}
+		}
 		return err
 	}
 	defer res.Body.Close()
