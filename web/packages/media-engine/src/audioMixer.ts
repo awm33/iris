@@ -21,6 +21,7 @@ export class AudioMixer {
   // play to rediscover that would be churn proportional to timeline size.
   private buffers = new Map<string, Promise<AudioBuffer | null>>();
   private active: AudioBufferSourceNode[] = [];
+  private duckGains: GainNode[] = [];
   private playToken = 0;
 
   constructor(
@@ -109,11 +110,18 @@ export class AudioMixer {
             const g = ctx.createGain();
             g.connect(this.master!);
             this.automateDuck(g.gain, ducks, fromS, anchor, ctx);
+            this.duckGains.push(g);
             dest = g;
           }
           node.connect(dest);
           node.onended = () => {
             node.disconnect();
+            // Deterministic teardown: an idle GainNode still costs a pull
+            // per render quantum until GC gets around to it.
+            if (dest !== this.master) {
+              dest.disconnect();
+              this.duckGains = this.duckGains.filter((n) => n !== dest);
+            }
             this.active = this.active.filter((n) => n !== node);
           };
           const startAt = anchor + e.whenS;
@@ -159,13 +167,26 @@ export class AudioMixer {
     for (let i = 0; i < ducks.length; i++) {
       const w = ducks[i];
       knees.push(w.start, w.start + R, w.end, w.end + R);
+      if (w.end - w.start < R) {
+        // Sub-ramp window: the trapezoid's apex falls BETWEEN the edge
+        // knees — without it the preview flat-lines below the export's
+        // per-frame peak.
+        knees.push((w.start + w.end + R) / 2);
+      }
       const next = ducks[i + 1];
       if (next && next.start - w.end < 2 * R) {
         knees.push((w.end + R + next.start) / 2); // release×attack crossing
       }
     }
-    const future = [...new Set(knees)].filter((t) => t > fromS).sort((a, b) => a - b);
-    gain.setValueAtTime(g(fromS), Math.max(ctx.currentTime, anchor));
+    // Late resolve (first-play decode can take seconds) and output latency
+    // both mean "now" is PAST fromS: anchor the initial value at the
+    // CURRENT timeline position and only ramp to knees still ahead —
+    // otherwise past-dated ramps complete instantly and the play-start
+    // value pins the gain wrong for the rest of the play (the content
+    // path's offset-advance branch, mirrored for automation).
+    const nowT = fromS + Math.max(0, ctx.currentTime - anchor);
+    const future = [...new Set(knees)].filter((t) => t > nowT).sort((a, b) => a - b);
+    gain.setValueAtTime(g(nowT), ctx.currentTime);
     for (const t of future) {
       gain.linearRampToValueAtTime(g(t), anchor + (t - fromS));
     }
@@ -182,6 +203,8 @@ export class AudioMixer {
       node.disconnect();
     }
     this.active = [];
+    for (const g of this.duckGains) g.disconnect();
+    this.duckGains = [];
   }
 
   /** RMS level 0..1 from the master bus — meters, and the proof in tests

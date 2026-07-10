@@ -448,7 +448,7 @@ func TestBuildAudioSectionDucking(t *testing.T) {
 	// music entry starts at 1 → windows local at 1..3 and 5..6; both terms
 	// present, maxed, level factor 0.75.
 	for _, want := range []string{
-		"volume=volume='1-0.750000*(max(clip(min((t-1.000000)/0.150000\\,(3.150000-t)/0.150000)\\,0\\,1)\\,clip(min((t-5.000000)/0.150000\\,(6.150000-t)/0.150000)\\,0\\,1)))':eval=frame",
+		"volume=volume='1-0.750000*(max(clip(min((t-(1.000000))/0.150000\\,((3.150000)-t)/0.150000)\\,0\\,1)\\,clip(min((t-(5.000000))/0.150000\\,((6.150000)-t)/0.150000)\\,0\\,1)))':eval=frame",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing duck curve %q\nfilters: %s", want, joined)
@@ -461,5 +461,23 @@ func TestBuildAudioSectionDucking(t *testing.T) {
 	_, filters2, _ := buildAudioSection(entries, srcFor, 24, 9, 0, nil)
 	if strings.Contains(strings.Join(filters2, ";"), ",volume=volume=") {
 		t.Errorf("no windows must emit no volume filters")
+	}
+}
+
+// Negative entry-local window start — the COMMON case (music bed already
+// playing when speech begins): the constant must print parenthesized, and
+// clamping/overlap math must hold.
+func TestBuildAudioSectionDuckingNegativeOffset(t *testing.T) {
+	music := &timeline.Clip{ID: "m", Name: "m", VersionID: "vm"}
+	entries := []timeline.AudioEntry{{Clip: music, Kind: "audio", Start: 6, Dur: 4}}
+	srcFor := func(*timeline.Clip) *exportSource {
+		return &exportSource{Path: "/t/m.mp3", ContentType: "audio/mpeg", HasAudio: true}
+	}
+	_, filters, _ := buildAudioSection(entries, srcFor, 24, 10, 0,
+		[]timeline.DuckWindow{{Start: 5, End: 8}})
+	joined := strings.Join(filters, ";")
+	want := "volume=volume='1-0.750000*(clip(min((t-(-1.000000))/0.150000\\,((2.150000)-t)/0.150000)\\,0\\,1))':eval=frame"
+	if !strings.Contains(joined, want) {
+		t.Errorf("negative-offset duck curve wrong\nwant %q\nin   %s", want, joined)
 	}
 }

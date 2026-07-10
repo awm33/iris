@@ -269,7 +269,11 @@ func duckVolume(e timeline.AudioEntry, ducks []timeline.DuckWindow, f func(float
 		if e0+timeline.DuckRampS <= 0 || s0-timeline.DuckRampS >= e.Dur {
 			continue // no overlap with this entry's span (incl. ramps)
 		}
-		term := fmt.Sprintf("clip(min((t-%s)/%s\\,(%s-t)/%s)\\,0\\,1)",
+		// Constants parenthesized: a negative s0 (window starting before
+		// the entry — the COMMON case for a music bed) would otherwise
+		// print "t--1.0", which ffmpeg happens to parse as t+1 but is
+		// load-bearing grammar luck (review PR38-F1, verified live).
+		term := fmt.Sprintf("clip(min((t-(%s))/%s\\,((%s)-t)/%s)\\,0\\,1)",
 			f(s0), f(timeline.DuckRampS), f(e0+timeline.DuckRampS), f(timeline.DuckRampS))
 		if cov == "" {
 			cov = term
