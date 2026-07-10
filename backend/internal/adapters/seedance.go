@@ -41,10 +41,16 @@ type seedanceJob struct {
 	remoteID    string
 	putURL      string
 	contentType string
+	// billableS: the manifest prices usd_per_second — output duration is
+	// the billable quantity, reported via Metrics at completion.
+	billableS float64
 	// terminal caches the mapped final status so repeated polls after
 	// upload don't re-download the artifact.
 	terminal *inference.JobStatus
 }
+
+// Var, not const: tests shrink it to exercise the truncation boundary.
+var maxArtifactBytes int64 = 512 << 20
 
 func newSeedance(baseURL, token string) *seedance {
 	return &seedance{
@@ -87,7 +93,9 @@ func (s *seedance) GetManifest(ctx context.Context) (json.RawMessage, error) {
 		return nil, fmt.Errorf("seedance unreachable: %w", err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode >= 500 {
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		// 401/403 especially: a bad key must make the endpoint UNHEALTHY,
+		// not healthy-until-every-job-fails.
 		return nil, fmt.Errorf("seedance ping %d", res.StatusCode)
 	}
 	return seedanceManifest, nil
@@ -132,9 +140,12 @@ func (s *seedance) CreateJob(ctx context.Context, req *inference.CreateJobReques
 		if out.DurationS > 0 {
 			text += fmt.Sprintf(" --duration %d", int(out.DurationS+0.5))
 		}
-		if out.Height >= 1080 {
+		switch {
+		case out.Height >= 1080:
 			text += " --resolution 1080p"
-		} else {
+		case out.Height >= 720:
+			text += " --resolution 720p"
+		default:
 			text += " --resolution 480p"
 		}
 	}
@@ -165,7 +176,11 @@ func (s *seedance) CreateJob(ctx context.Context, req *inference.CreateJobReques
 		}
 	}
 	s.mu.Lock()
-	s.jobs[req.ID] = &seedanceJob{remoteID: task.ID, putURL: putURL, contentType: contentType}
+	billable := 0.0
+	if req.Output != nil {
+		billable = req.Output.DurationS
+	}
+	s.jobs[req.ID] = &seedanceJob{remoteID: task.ID, putURL: putURL, contentType: contentType, billableS: billable}
 	s.mu.Unlock()
 	return &inference.JobStatus{ID: req.ID, State: "queued"}, nil
 }
@@ -175,7 +190,12 @@ func (s *seedance) GetJob(ctx context.Context, id string) (*inference.JobStatus,
 	j := s.jobs[id]
 	s.mu.Unlock()
 	if j == nil {
-		return nil, fmt.Errorf("seedance: unknown job %s (adapter state is per-process; a reclaim re-submits)", id)
+		// Adapter state is per-DISPATCH (a client is built per attempt):
+		// a reclaim/restart re-submits a fresh remote task and the old one
+		// is never canceled — acceptable against the mock, DOUBLE-BILLING
+		// with real keys. Ticketed: persist remoteID on the job row and
+		// re-attach instead of re-submitting, before real keys land.
+		return nil, fmt.Errorf("seedance: unknown job %s", id)
 	}
 	if j.terminal != nil {
 		return j.terminal, nil
@@ -202,9 +222,19 @@ func (s *seedance) GetJob(ctx context.Context, id string) (*inference.JobStatus,
 		}
 		art, err := s.proxyArtifact(ctx, task.Content.VideoURL, j)
 		if err != nil {
-			return nil, err // transient: re-poll re-attempts the transfer
+			// NEVER let a *url.Error reach the orchestrator here: its
+			// unreachable fast-path requeues at zero attempt cost and each
+			// requeue re-SUBMITS — a paid generation per loop for up to an
+			// hour after the money was already spent. Transfer failures are
+			// ordinary transients: attempt-costed, bounded, parked honestly.
+			return nil, &inference.JobError{Code: "transient", Retryable: true,
+				Message: fmt.Sprintf("artifact transfer after remote success: %v", err)}
 		}
-		st := &inference.JobStatus{ID: id, State: "complete", Progress: 1, Artifacts: []inference.Artifact{*art}}
+		st := &inference.JobStatus{
+			ID: id, State: "complete", Progress: 1,
+			Artifacts: []inference.Artifact{*art},
+			Metrics:   &inference.Metrics{GPUSeconds: j.billableS},
+		}
 		j.terminal = st
 		return st, nil
 	default:
@@ -239,9 +269,14 @@ func (s *seedance) proxyArtifact(ctx context.Context, videoURL string, j *seedan
 		return nil, fmt.Errorf("fetch seedance result: %d", res.StatusCode)
 	}
 	// Buffer + hash: results are bounded by duration/resolution caps.
-	data, err := io.ReadAll(io.LimitReader(res.Body, 512<<20))
+	// LimitReader alone would TRUNCATE silently — and the truncated bytes
+	// hash consistently, so the corrupt artifact would land as verified.
+	data, err := io.ReadAll(io.LimitReader(res.Body, maxArtifactBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(data)) > maxArtifactBytes {
+		return nil, fmt.Errorf("seedance result exceeds %dMB cap", maxArtifactBytes>>20)
 	}
 	sum := sha256.Sum256(data)
 
@@ -304,11 +339,17 @@ func (s *seedance) call(ctx context.Context, method, path string, body, out any)
 		return err
 	}
 	defer res.Body.Close()
-	if res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnprocessableEntity {
+	switch {
+	case res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnprocessableEntity:
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		return &inference.ValidationError{Msg: fmt.Sprintf("seedance rejected the request: %s", strings.TrimSpace(string(b)))}
-	}
-	if res.StatusCode >= 300 {
+	case res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden:
+		// Retrying auth failures burns attempts for nothing.
+		return &inference.JobError{Code: "invalid_input", Retryable: false,
+			Message: "seedance auth failed — check the endpoint key"}
+	case res.StatusCode == http.StatusTooManyRequests:
+		return &inference.JobError{Code: "overloaded", Retryable: true, Message: "seedance rate limited"}
+	case res.StatusCode >= 300:
 		return fmt.Errorf("seedance %s %s: %d", method, path, res.StatusCode)
 	}
 	if out != nil {

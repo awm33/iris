@@ -119,9 +119,14 @@ type JobStatus struct {
 	EtaS      *int       `json:"eta_s"`
 	Artifacts []Artifact `json:"artifacts"`
 	Error     *JobError  `json:"error"`
-	Metrics   *struct {
-		GPUSeconds float64 `json:"gpu_seconds"`
-	} `json:"metrics"`
+	Metrics   *Metrics   `json:"metrics"`
+}
+
+// Metrics: endpoint-reported spend indicators (spec §3). For commercial
+// adapters GPUSeconds carries the BILLABLE quantity in the manifest's
+// pricing unit (e.g. output seconds for usd_per_second).
+type Metrics struct {
+	GPUSeconds float64 `json:"gpu_seconds"`
 }
 
 func (s *JobStatus) Terminal() bool {

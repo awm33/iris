@@ -37,7 +37,7 @@ func For(kind, baseURL, authRef string) (Client, error) {
 	switch kind {
 	case "seedance":
 		return newSeedance(baseURL, token), nil
-	case "", "inference", "iris", "http", "mock":
+	case "", "inference", "iris", "http", "mock", "openweight", "commercial":
 		return inference.New(baseURL, token), nil
 	default:
 		return nil, fmt.Errorf("unknown endpoint kind %q", kind)

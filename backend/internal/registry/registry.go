@@ -26,7 +26,9 @@ type Endpoint struct {
 	DisplayName string
 	Kind        string // iris | openweight | commercial | mock
 	BaseURL     string
-	Token       string
+	// AuthRef is the VAULT reference (or a legacy plaintext dev row) — it
+	// resolves to a secret only inside adapters.For.
+	AuthRef     string
 	Manifest    *inference.Manifest
 	ManifestRaw json.RawMessage
 	Healthy     bool
@@ -101,17 +103,21 @@ func (r *Registry) Refresh(ctx context.Context) error {
 	for _, e := range eps {
 		ep := &Endpoint{
 			ID: e.id, WorkspaceID: e.ws, DisplayName: e.name,
-			Kind: e.kind, BaseURL: e.url, Token: e.token,
+			Kind: e.kind, BaseURL: e.url, AuthRef: e.token,
 		}
 		client, aerr := adapters.For(e.kind, e.url, e.token)
-		if aerr != nil {
+		var raw json.RawMessage
+		err := aerr
+		if aerr == nil {
+			fctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			raw, err = client.GetManifest(fctx)
+			cancel()
+		} else {
+			// Fall THROUGH to the unhealthy handling below — a continue here
+			// once left stale healthy=true rows in the DB and skipped the
+			// last-known-good manifest reload.
 			slog.Warn("endpoint adapter unavailable", "endpoint", e.name, "err", aerr)
-			fresh[e.id] = ep
-			continue
 		}
-		fctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		raw, err := client.GetManifest(fctx)
-		cancel()
 		if err == nil {
 			// Schema validation first — a manifest that would fail every job
 			// (empty profiles, negative pricing) marks the endpoint unhealthy

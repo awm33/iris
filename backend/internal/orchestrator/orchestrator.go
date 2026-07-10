@@ -266,7 +266,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 		}
 	}
 
-	client, err := adapters.For(ep.Kind, ep.BaseURL, ep.Token)
+	client, err := adapters.For(ep.Kind, ep.BaseURL, ep.AuthRef)
 	if err != nil {
 		return err
 	}
