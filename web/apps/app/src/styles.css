@@ -527,3 +527,6 @@ kbd { background: var(--bg); border: 1px solid var(--border); border-radius: 4px
 .color-slider > .meta:last-child { width: 42px; text-align: right; }
 .color-slider input[type="range"] { flex: 1; }
 .tl-clip.tl-graded { border-bottom: 2px solid #c9a86a; }
+
+/* Transition marker (M7): dissolve fades out of the clip's right edge */
+.tl-clip.tl-trans { border-right: 3px solid transparent; background-image: linear-gradient(to right, transparent 82%, rgba(150, 190, 255, 0.55)); }

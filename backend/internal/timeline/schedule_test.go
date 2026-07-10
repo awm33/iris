@@ -76,3 +76,55 @@ func TestAudioEntriesTrimsToTotal(t *testing.T) {
 		t.Errorf("kinds wrong: %+v", entries)
 	}
 }
+
+func TestFlattenDissolveWindows(t *testing.T) {
+	tr := func(d float64) *TransitionDef { return &TransitionDef{Duration: &d} }
+	st := Reduce([]*Op{
+		{OpID: "t1", Type: "add_track", Track: &TrackDef{ID: "v1", Kind: "video"}},
+		{OpID: "c1", Type: "add_clip", TrackID: "v1", Clip: &ClipDef{ID: "a", Name: "a", VersionID: "va", Start: 0, Duration: 4, Transition: tr(1)}},
+		{OpID: "c2", Type: "add_clip", TrackID: "v1", Clip: &ClipDef{ID: "b", Name: "b", VersionID: "vb", Start: 4, Duration: 3}},
+		// c ends into a gap → fades to black over the gap piece
+		{OpID: "c3", Type: "add_clip", TrackID: "v1", Clip: &ClipDef{ID: "c", Name: "c", VersionID: "vc", Start: 8, Duration: 2, Transition: tr(0.5), InPoint: fl(1)}},
+		{OpID: "c4", Type: "add_clip", TrackID: "v1", Clip: &ClipDef{ID: "d", Name: "d", VersionID: "vd", Start: 12, Duration: 2}},
+	})
+	pieces := Flatten(st, 14)
+	type want struct {
+		start, dur float64
+		clip, from string
+		fromSeek   float64
+	}
+	wants := []want{
+		{0, 4, "a", "", 0},
+		{4, 1, "b", "a", 4},  // dissolve a→b, FromSeekS = a.InPoint(0)+4
+		{5, 2, "b", "", 0},   // rest of b
+		{7, 1, "", "", 0},    // gap
+		{8, 2, "c", "", 0},   // c plays fully…
+		{10, 0.5, "", "c", 4}, // …then fades to black; FromSeekS = 1+3? c.InPoint=1, dur=2 → 3
+		{10.5, 1.5, "", "", 0},
+		{12, 2, "d", "", 0},
+	}
+	if len(pieces) != len(wants) {
+		t.Fatalf("got %d pieces want %d: %+v", len(pieces), len(wants), pieces)
+	}
+	for i, w := range wants {
+		p := pieces[i]
+		clip, from, seek := "", "", 0.0
+		if p.Clip != nil {
+			clip = p.Clip.ID
+		}
+		if p.BlendFrom != nil {
+			from, seek = p.BlendFrom.ID, p.FromSeekS
+		}
+		if p.Start != w.start || p.Duration != w.dur || clip != w.clip || from != w.from {
+			t.Errorf("piece %d: got (%.2f %.2f clip=%q from=%q seek=%.2f), want %+v", i, p.Start, p.Duration, clip, from, seek, w)
+		}
+	}
+	// FromSeekS spot checks: a has inPoint 0 dur 4 → 4; c has inPoint 1 dur 2 → 3.
+	if pieces[1].FromSeekS != 4 || pieces[5].FromSeekS != 3 {
+		t.Errorf("FromSeekS wrong: %v / %v", pieces[1].FromSeekS, pieces[5].FromSeekS)
+	}
+	// The incoming piece inside the window keeps ITS OWN content timing.
+	if pieces[1].Clip.InPoint != 0 || pieces[2].Clip.InPoint != 1 {
+		t.Errorf("incoming in-points wrong: %v / %v", pieces[1].Clip.InPoint, pieces[2].Clip.InPoint)
+	}
+}

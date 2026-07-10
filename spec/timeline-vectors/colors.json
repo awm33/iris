@@ -150,7 +150,8 @@
               "exposure": -1,
               "contrast": 0.8,
               "temp": 0.3
-            }
+            },
+            "transition": null
           },
           {
             "id": "y",
@@ -164,7 +165,8 @@
               "exposure": 0.5,
               "contrast": 1.2,
               "temp": 1
-            }
+            },
+            "transition": null
           },
           {
             "id": "z",
@@ -178,7 +180,8 @@
               "exposure": 3,
               "contrast": 1,
               "temp": -0.5
-            }
+            },
+            "transition": null
           },
           {
             "id": "w",
@@ -192,7 +195,8 @@
               "exposure": -3,
               "contrast": 0,
               "temp": 0
-            }
+            },
+            "transition": null
           },
           {
             "id": "q",
@@ -202,7 +206,8 @@
             "version_id": "vv_q",
             "shot_id": "",
             "text": "",
-            "color": null
+            "color": null,
+            "transition": null
           }
         ]
       }

@@ -81,7 +81,8 @@
             "version_id": "vv_a",
             "shot_id": "",
             "text": "",
-            "color": null
+            "color": null,
+            "transition": null
           },
           {
             "id": "b",
@@ -91,7 +92,8 @@
             "version_id": "vv_b",
             "shot_id": "",
             "text": "",
-            "color": null
+            "color": null,
+            "transition": null
           }
         ]
       },

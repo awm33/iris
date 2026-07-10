@@ -18,7 +18,7 @@ import {
 } from "@iris/doc-runtime";
 import { AudioMixer, ClipDecoder, type Segment } from "@iris/media-engine";
 import { assetClient, storyClient, timelineClient, timelineKeepaliveClient } from "../api";
-import { EngineCanvas } from "./EngineCanvas";
+import { type BlendWindow, EngineCanvas } from "./EngineCanvas";
 import { ExportControl } from "./ExportControl";
 import { HistoryPanel } from "./HistoryPanel";
 import { TranscribeControl } from "./TranscribeControl";
@@ -470,6 +470,54 @@ export function TimelinePage(props: {
     if (colorEdit && (colorEdit.clipId !== selected || !selectedVideoClip)) setColorEdit(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, selectedVideoClip]);
+  // Dissolve windows for the compositor — mirrors the Go Flatten
+  // eligibility (applyTransitions): the outgoing clip must be the visible
+  // winner right up to its end, and the window blends into whatever wins
+  // after (the adjacent same-track clip, or a gap = fade to black); a
+  // different track winning after the cut = hard cut, skipped.
+  const blends = useMemo(() => {
+    const st = docState;
+    if (!st) return [];
+    const eps = 0.001;
+    const out: BlendWindow[] = [];
+    const total = timelineDuration(st);
+    for (const t of st.tracks) {
+      if (t.kind !== "video") continue;
+      for (let i = 0; i < t.clips.length; i++) {
+        const c = t.clips[i];
+        if (!c.transition) continue;
+        const cut = c.start + c.duration;
+        if (cut >= total - eps) continue;
+        const take = c.shotId ? takeByShot.get(c.shotId) : undefined;
+        const fromSourceId = c.versionId ?? (take?.contentType.startsWith("video/") ? take.versionId : undefined);
+        if (!fromSourceId) continue; // stills/unresolved don't dissolve in v1
+        if (clipAt(st, cut - eps, "video")?.id !== c.id) continue; // covered before the cut
+        const next = t.clips[i + 1];
+        const adjacent = next && Math.abs(next.start - cut) < eps;
+        const after = clipAt(st, cut + eps, "video");
+        let duration = c.transition.duration;
+        let toClipId: string | undefined;
+        if (adjacent && after?.id === next.id) {
+          toClipId = next.id;
+          duration = Math.min(duration, next.duration);
+        } else if (!after) {
+          // Fade to black across the gap — clamp to the gap (the export's
+          // window clamps to the gap piece).
+          const nextStartAnywhere = Math.min(
+            ...st.tracks.filter((tr) => tr.kind === "video").flatMap((tr) => tr.clips.map((cc) => cc.start)).filter((v) => v > cut + eps),
+            total,
+          );
+          duration = Math.min(duration, nextStartAnywhere - cut);
+        } else {
+          continue; // another track wins after the cut — hard cut
+        }
+        if (duration < eps) continue;
+        out.push({ start: cut, duration, fromSourceId, fromClipId: c.id, fromSeekS: c.inPoint + c.duration, toClipId });
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docState, takeByShot]);
 
   if (loadError) return <div className="status error">Couldn’t open timeline: {loadError}</div>;
   if (!session) return <div className="empty">Opening timeline…</div>;
@@ -633,6 +681,47 @@ export function TimelinePage(props: {
         >
           🎨
         </button>
+        <button
+          className={`btn secondary${selectedVideoClip?.transition ? " tool-active" : ""}`}
+          disabled={!selectedVideoClip}
+          title={
+            selectedVideoClip
+              ? selectedVideoClip.transition
+                ? "Remove the dissolve into the next clip"
+                : "Dissolve into the next clip (0.5s)"
+              : "Select a video clip to add a transition"
+          }
+          onClick={() => {
+            const c = selectedVideoClip!;
+            doc.apply(
+              c.transition
+                ? { op_id: oid(), type: "set_clip_transition", clip_id: c.id }
+                : { op_id: oid(), type: "set_clip_transition", clip_id: c.id, transition: { kind: "dissolve", duration: 0.5 } },
+            );
+          }}
+        >
+          ⧓
+        </button>
+        {selectedVideoClip?.transition && (
+          <select
+            title="Dissolve duration"
+            value={String(selectedVideoClip.transition.duration)}
+            onChange={(e) =>
+              doc.apply({
+                op_id: oid(),
+                type: "set_clip_transition",
+                clip_id: selectedVideoClip.id,
+                transition: { kind: "dissolve", duration: Number(e.target.value) },
+              })
+            }
+          >
+            {["0.25", "0.5", "1", "2"].map((d) => (
+              <option key={d} value={d}>
+                ⧓ {d}s
+              </option>
+            ))}
+          </select>
+        )}
         {ClipDecoder.supported() && (
           <button
             className={`btn secondary${engineOn ? " tool-active" : ""}`}
@@ -729,7 +818,7 @@ export function TimelinePage(props: {
       )}
       {engineOn ? (
         <div className="tl-preview">
-          <EngineCanvas segments={segments} time={time} playing={playing} grades={grades} srcFor={srcFor} onError={setEngineError} />
+          <EngineCanvas segments={segments} time={time} playing={playing} grades={grades} blends={blends} srcFor={srcFor} onError={setEngineError} />
           {engineError && <div className="tl-preview-note">{engineError}</div>}
           {active?.shotId && takeByShot.get(active.shotId)?.contentType.startsWith("image/") && (
             <StillOverlay versionId={takeByShot.get(active.shotId)!.versionId} />
@@ -796,7 +885,7 @@ export function TimelinePage(props: {
               return (
                 <div
                   key={c.id}
-                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${track.kind === "caption" ? " tl-cap" : ""}${c.color ? " tl-graded" : ""}${active?.id === c.id ? " tl-active" : ""}${selected === c.id ? " tl-selected" : ""}`}
+                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${track.kind === "caption" ? " tl-cap" : ""}${c.color ? " tl-graded" : ""}${c.transition ? " tl-trans" : ""}${active?.id === c.id ? " tl-active" : ""}${selected === c.id ? " tl-selected" : ""}`}
                   style={{ left: start * PX_PER_SEC, width }}
                   onPointerDown={(e) => onClipDown(e, "move", c)}
                   onPointerMove={onClipMove}
