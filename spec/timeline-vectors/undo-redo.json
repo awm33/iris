@@ -1,22 +1,80 @@
 {
-  "name": "undo/redo activity — redo is an undo of an undo; a suppressed undo never suppresses its target",
+  "name": "undo/redo activity \u2014 redo is an undo of an undo; a suppressed undo never suppresses its target",
   "ops": [
-    { "op_id": "t1", "type": "add_track", "track": { "id": "v1", "kind": "video" } },
-    { "op_id": "c1", "type": "add_clip", "track_id": "v1", "clip": { "id": "x", "name": "x", "version_id": "vv_x", "start": 0, "duration": 2 } },
-    { "op_id": "m1", "type": "move_clip", "clip_id": "x", "start": 5 },
-    { "op_id": "u1", "type": "undo", "target": "m1" },
-    { "op_id": "u2", "type": "undo", "target": "u1" },
-    { "op_id": "m2", "type": "move_clip", "clip_id": "x", "start": 8 },
-    { "op_id": "u3", "type": "undo", "target": "m2" },
-    { "op_id": "u4", "type": "undo", "target": "u3" },
-    { "op_id": "u5", "type": "undo", "target": "u4" }
+    {
+      "op_id": "t1",
+      "type": "add_track",
+      "track": {
+        "id": "v1",
+        "kind": "video"
+      }
+    },
+    {
+      "op_id": "c1",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "x",
+        "name": "x",
+        "version_id": "vv_x",
+        "start": 0,
+        "duration": 2
+      }
+    },
+    {
+      "op_id": "m1",
+      "type": "move_clip",
+      "clip_id": "x",
+      "start": 5
+    },
+    {
+      "op_id": "u1",
+      "type": "undo",
+      "target": "m1"
+    },
+    {
+      "op_id": "u2",
+      "type": "undo",
+      "target": "u1"
+    },
+    {
+      "op_id": "m2",
+      "type": "move_clip",
+      "clip_id": "x",
+      "start": 8
+    },
+    {
+      "op_id": "u3",
+      "type": "undo",
+      "target": "m2"
+    },
+    {
+      "op_id": "u4",
+      "type": "undo",
+      "target": "u3"
+    },
+    {
+      "op_id": "u5",
+      "type": "undo",
+      "target": "u4"
+    }
   ],
   "expected": {
     "tracks": [
       {
-        "id": "v1", "kind": "video", "name": "V",
+        "id": "v1",
+        "kind": "video",
+        "name": "V",
         "clips": [
-          { "id": "x", "start": 5, "duration": 2, "in_point": 0, "version_id": "vv_x", "shot_id": "" }
+          {
+            "id": "x",
+            "start": 5,
+            "duration": 2,
+            "in_point": 0,
+            "version_id": "vv_x",
+            "shot_id": "",
+            "text": ""
+          }
         ]
       }
     ]

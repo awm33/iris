@@ -20,6 +20,7 @@ import { assetClient, storyClient, timelineClient, timelineKeepaliveClient } fro
 import { EngineCanvas } from "./EngineCanvas";
 import { ExportControl } from "./ExportControl";
 import { HistoryPanel } from "./HistoryPanel";
+import { TranscribeControl } from "./TranscribeControl";
 import { AssetKind } from "@iris/api-client";
 import { useEscape } from "../components/AssetThumb";
 
@@ -88,6 +89,12 @@ export function TimelinePage(props: {
   const [engineOn, setEngineOn] = useState(() => ClipDecoder.supported());
   const [showHistory, setShowHistory] = useState(false);
   const [engineError, setEngineError] = useState<string>();
+  // Caption text editing (double-click a caption clip).
+  const [editingCap, setEditingCap] = useState<{ id: string; draft: string } | null>(null);
+  // Bumped when a transcription completes: server-authored caption ops
+  // exist only in the DB — reload the session to pick them up (v1; a live
+  // remote-ops channel is the standing sync follow-up).
+  const [reloadTick, setReloadTick] = useState(0);
   const playRef = useRef<{ raf: number } | null>(null);
   const togglePlayRef = useRef<() => void>(() => {});
 
@@ -145,7 +152,8 @@ export function TimelinePage(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.timelineId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.timelineId, reloadTick]);
 
   useEffect(() => {
     if (!session) return;
@@ -433,6 +441,7 @@ export function TimelinePage(props: {
   const state = doc.state;
   const dur = Math.max(timelineDuration(state), 30);
   const active = clipAt(state, time, "video");
+  const activeCaption = clipAt(state, time, "caption");
 
   // Capture keeps drags alive off-element but can throw for already-
   // released pointers — never let it kill the gesture (state first).
@@ -575,6 +584,27 @@ export function TimelinePage(props: {
             ⚙
           </button>
         )}
+        <TranscribeControl
+          timelineId={props.timelineId}
+          onComplete={() => {
+            // Server-authored ops are only in the DB: flush local edits,
+            // then rebuild the session over the fresh log. flush() RESOLVES
+            // even when the send failed (its contract) — reloading with
+            // pending ops would silently discard the edits the status line
+            // promised were kept, so retry until the flush actually lands.
+            const s = session;
+            if (!s) return;
+            const tryReload = (attempt: number) => {
+              void s.sync.flush(true).then(() => {
+                if (s.sync.pendingCount === 0) setReloadTick((t) => t + 1);
+                else if (attempt < 5) setTimeout(() => tryReload(attempt + 1), 4000);
+                // else: give up — the save-failed status is already showing,
+                // and captions appear on the next successful load.
+              });
+            };
+            tryReload(0);
+          }}
+        />
         <ExportControl timelineId={props.timelineId} />
         <span className={`status${status === "error" ? " error" : ""}`}>{status === "saved" ? "saved" : status === "error" ? "save failed — ops kept locally" : "…"}</span>
       </div>
@@ -599,9 +629,13 @@ export function TimelinePage(props: {
               </div>
             )}
           {!active && <div className="meta tl-preview-overlay">No clip under the playhead.</div>}
+          {activeCaption?.text && <div className="tl-caption-render">{activeCaption.text}</div>}
         </div>
       ) : (
-        <PreviewPane clip={active} time={time} playing={playing} onGenerate={props.onGenerateForShot} />
+        <div className="tl-preview-wrap">
+          <PreviewPane clip={active} time={time} playing={playing} onGenerate={props.onGenerateForShot} />
+          {activeCaption?.text && <div className="tl-caption-render">{activeCaption.text}</div>}
+        </div>
       )}
 
       <div
@@ -645,16 +679,45 @@ export function TimelinePage(props: {
               return (
                 <div
                   key={c.id}
-                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${active?.id === c.id ? " tl-active" : ""}${selected === c.id ? " tl-selected" : ""}`}
+                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${track.kind === "caption" ? " tl-cap" : ""}${active?.id === c.id ? " tl-active" : ""}${selected === c.id ? " tl-selected" : ""}`}
                   style={{ left: start * PX_PER_SEC, width }}
                   onPointerDown={(e) => onClipDown(e, "move", c)}
                   onPointerMove={onClipMove}
                   onPointerUp={onClipUp}
                   onPointerCancel={() => onClipUp() /* a cancelled gesture commits the trim (pre-existing) but must never amplify into a ripple */}
-                  title={`${c.name} · ${c.duration.toFixed(1)}s — drag moves · edges trim (⇧ right edge: ripple)`}
+                  onDoubleClick={() => {
+                    if (track.kind === "caption") setEditingCap({ id: c.id, draft: c.text ?? "" });
+                  }}
+                  title={
+                    track.kind === "caption"
+                      ? `${c.text ?? ""} — double-click edits · drag moves · edges trim`
+                      : `${c.name} · ${c.duration.toFixed(1)}s — drag moves · edges trim (⇧ right edge: ripple)`
+                  }
                 >
                   {handle("trim-l", "tl-handle-l")}
-                  <span className="truncate">{c.shotId ? `🎬 ${c.name}` : c.name}</span>
+                  {editingCap?.id === c.id ? (
+                    <input
+                      className="tl-cap-input"
+                      autoFocus
+                      value={editingCap.draft}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onChange={(e) => setEditingCap({ id: c.id, draft: e.target.value })}
+                      onBlur={() => {
+                        if (editingCap.draft !== (c.text ?? ""))
+                          doc.apply({ op_id: oid(), type: "set_clip_text", clip_id: c.id, text: editingCap.draft });
+                        setEditingCap(null);
+                      }}
+                      onKeyDown={(e) => {
+                        e.stopPropagation(); // Space/B/Delete belong to the text, not the doc
+                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                        if (e.key === "Escape") setEditingCap(null);
+                      }}
+                    />
+                  ) : (
+                    <span className="truncate">
+                      {track.kind === "caption" ? `💬 ${c.text ?? ""}` : c.shotId ? `🎬 ${c.name}` : c.name}
+                    </span>
+                  )}
                   <button
                     className="chip-x"
                     title="Remove (⇧: ripple — close the gap)"

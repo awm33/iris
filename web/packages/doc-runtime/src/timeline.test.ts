@@ -299,3 +299,17 @@ describe("undoTo (history revert)", () => {
     expect(doc.ops.length).toBe(before);
   });
 });
+
+describe("bladeOps on caption clips", () => {
+  it("carries text to the right half (a silent '💬' chip burns in nothing)", () => {
+    const ops: TimelineOp[] = [
+      { op_id: "t1", type: "add_track", track: { id: "c1", kind: "caption" } },
+      { op_id: "a1", type: "add_clip", track_id: "c1", clip: { id: "cap", name: "cap", text: "hello world", start: 0, duration: 4 } },
+    ];
+    const st = reduceTimeline(ops);
+    const cut = bladeOps(st, "cap", 2, "cap-r");
+    expect(cut).not.toBeNull();
+    const st2 = reduceTimeline([...ops, ...cut!]);
+    expect(st2.tracks[0].clips.map((c) => c.text)).toEqual(["hello world", "hello world"]);
+  });
+});

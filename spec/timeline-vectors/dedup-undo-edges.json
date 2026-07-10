@@ -1,21 +1,79 @@
 {
   "name": "duplicate op_ids keep first occurrence; forward- and self-targeting undos suppress nothing; undoing add_track rejects the cross-track move",
   "ops": [
-    { "op_id": "t1", "type": "add_track", "track": { "id": "v1", "kind": "video" } },
-    { "op_id": "t2", "type": "add_track", "track": { "id": "v2", "kind": "video" } },
-    { "op_id": "c1", "type": "add_clip", "track_id": "v1", "clip": { "id": "x", "name": "x", "version_id": "vv_x", "start": 0, "duration": 2 } },
-    { "op_id": "m1", "type": "move_clip", "clip_id": "x", "start": 3, "track_id": "v2" },
-    { "op_id": "m1", "type": "move_clip", "clip_id": "x", "start": 9 },
-    { "op_id": "uf", "type": "undo", "target": "u1" },
-    { "op_id": "us", "type": "undo", "target": "us" },
-    { "op_id": "u1", "type": "undo", "target": "t2" }
+    {
+      "op_id": "t1",
+      "type": "add_track",
+      "track": {
+        "id": "v1",
+        "kind": "video"
+      }
+    },
+    {
+      "op_id": "t2",
+      "type": "add_track",
+      "track": {
+        "id": "v2",
+        "kind": "video"
+      }
+    },
+    {
+      "op_id": "c1",
+      "type": "add_clip",
+      "track_id": "v1",
+      "clip": {
+        "id": "x",
+        "name": "x",
+        "version_id": "vv_x",
+        "start": 0,
+        "duration": 2
+      }
+    },
+    {
+      "op_id": "m1",
+      "type": "move_clip",
+      "clip_id": "x",
+      "start": 3,
+      "track_id": "v2"
+    },
+    {
+      "op_id": "m1",
+      "type": "move_clip",
+      "clip_id": "x",
+      "start": 9
+    },
+    {
+      "op_id": "uf",
+      "type": "undo",
+      "target": "u1"
+    },
+    {
+      "op_id": "us",
+      "type": "undo",
+      "target": "us"
+    },
+    {
+      "op_id": "u1",
+      "type": "undo",
+      "target": "t2"
+    }
   ],
   "expected": {
     "tracks": [
       {
-        "id": "v1", "kind": "video", "name": "V",
+        "id": "v1",
+        "kind": "video",
+        "name": "V",
         "clips": [
-          { "id": "x", "start": 0, "duration": 2, "in_point": 0, "version_id": "vv_x", "shot_id": "" }
+          {
+            "id": "x",
+            "start": 0,
+            "duration": 2,
+            "in_point": 0,
+            "version_id": "vv_x",
+            "shot_id": "",
+            "text": ""
+          }
         ]
       }
     ]
