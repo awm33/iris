@@ -408,6 +408,13 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 			}
 			infReq.Conditioning.SourceImage = &inference.FrameRef{URL: url}
 		}
+		if c.SourceVideo != nil {
+			url, err := o.resolveRefURL(ctx, c.SourceVideo, "video/")
+			if err != nil {
+				return nil, "", err
+			}
+			infReq.Conditioning.SourceVideo = &inference.SourceVideo{URL: url}
+		}
 		if c.Mask != nil {
 			url, err := o.resolveRefURL(ctx, c.Mask, "image/")
 			if err != nil {
@@ -487,7 +494,7 @@ func (o *Orchestrator) pinFloatingRefs(ctx context.Context, req *store.GenReques
 		}
 	}
 	if c := req.Conditioning; c != nil {
-		for _, r := range []*store.GenRef{c.FirstFrame, c.SourceImage, c.Mask} {
+		for _, r := range []*store.GenRef{c.FirstFrame, c.SourceImage, c.SourceVideo, c.Mask} {
 			if err := pin(r); err != nil {
 				return err
 			}
@@ -523,6 +530,7 @@ func genCacheHash(ep *registry.Endpoint, job *queue.GenerationJob, req *store.Ge
 		Refs       []refID         `json:"refs"`
 		FirstFrame string          `json:"first_frame"`
 		SourceImg  string          `json:"source_image"`
+		SourceVid  string          `json:"source_video"`
 		Mask       string          `json:"mask"`
 	}{
 		Model:    ep.Manifest.ID + "@" + ep.Manifest.Version,
@@ -546,6 +554,9 @@ func genCacheHash(ep *registry.Endpoint, job *queue.GenerationJob, req *store.Ge
 		}
 		if c.SourceImage != nil {
 			key.SourceImg = c.SourceImage.VersionID
+		}
+		if c.SourceVideo != nil {
+			key.SourceVid = c.SourceVideo.VersionID
 		}
 		if c.Mask != nil {
 			key.Mask = c.Mask.VersionID
@@ -716,7 +727,7 @@ func (o *Orchestrator) landVersion(ctx context.Context, job *queue.GenerationJob
 	// "what conditioned it" must be walkable from the graph, not only
 	// recoverable by parsing the job-row request JSON.
 	if req.Conditioning != nil {
-		for _, ref := range []*store.GenRef{req.Conditioning.FirstFrame, req.Conditioning.SourceImage, req.Conditioning.Mask} {
+		for _, ref := range []*store.GenRef{req.Conditioning.FirstFrame, req.Conditioning.SourceImage, req.Conditioning.SourceVideo, req.Conditioning.Mask} {
 			if ref == nil || ref.VersionID == "" {
 				continue
 			}

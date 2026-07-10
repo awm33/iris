@@ -4,7 +4,7 @@
 // image references with manifest-declared roles. Targets the project library;
 // shot/canvas targeting arrives with M3/M4 surfaces.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AssetKind, type ModelEndpoint } from "@iris/api-client";
 import { assetClient, generationClient, storyClient } from "../api";
 
@@ -20,7 +20,7 @@ type Manifest = {
   params_schema?: {
     properties?: Record<string, { type?: string; enum?: string[]; description?: string }>;
   };
-  conditioning?: { first_frame?: boolean };
+  conditioning?: { first_frame?: boolean; source_video?: boolean };
   features?: { seed?: boolean; prompt?: boolean };
   pricing?: { unit: string; estimates?: Record<string, number> };
 };
@@ -147,6 +147,9 @@ export function GeneratePanel(props: {
   // params_schema-driven fields (enum strings only, v1): voice selection
   // for TTS endpoints is the first consumer.
   const [params, setParams] = useState<Record<string, string>>(props.prefill?.params ?? {});
+  // lipsync_post: the clip being re-timed to the audio ref.
+  const [sourceVideo, setSourceVideo] = useState<{ assetId: string; name: string } | null>(null);
+  const [showSourcePicker, setShowSourcePicker] = useState(false);
   // Continuity carry (W3): the nearest EARLIER shot in the scene with a
   // selected take supplies its last frame as first_frame conditioning.
   const [carry, setCarry] = useState(true);
@@ -181,6 +184,29 @@ export function GeneratePanel(props: {
     }
     return best;
   }, [targetShot.data, carryScene.data]);
+  // W4 voice binding: shot-targeted TTS prefills the voice from the shot's
+  // cast (first member with a bound voice that the model's enum accepts).
+  // Only fills an UNSET voice — never overrides the user or a recipe.
+  const castCharacters = useQuery({
+    queryKey: ["characters", props.projectId],
+    enabled: !!props.target && (targetShot.data?.shot?.castIds.length ?? 0) > 0,
+    queryFn: () => storyClient.listCharacters({ projectId: props.projectId }),
+  });
+  useEffect(() => {
+    if (params.voice_id) return;
+    const spec = manifest?.params_schema?.properties?.voice_id;
+    if (!spec?.enum) return;
+    const cast = targetShot.data?.shot?.castIds ?? [];
+    for (const cid of cast) {
+      const chr = castCharacters.data?.characters.find((c) => c.id === cid);
+      if (chr?.voiceId && spec.enum.includes(chr.voiceId)) {
+        setParams((p) => (p.voice_id ? p : { ...p, voice_id: chr.voiceId }));
+        return;
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [castCharacters.data, targetShot.data, manifest]);
+
   const carryProbe = useQuery({
     queryKey: ["lastFrameReady", carrySource?.versionId],
     enabled: !!carrySource && !carrySource.isImage,
@@ -200,6 +226,8 @@ export function GeneratePanel(props: {
   const isVideo = manifest?.modality === "video";
   const refDecl = manifest?.references?.image;
   const audioDecl = manifest?.references?.audio;
+  const isLipsyncPost = activeTask === "lipsync_post";
+  const needsSourceVideo = isLipsyncPost && manifest?.conditioning?.source_video === true;
   const enumParams = Object.entries(manifest?.params_schema?.properties ?? {}).filter(
     ([, spec]) => Array.isArray(spec.enum) && spec.enum.length > 0,
   );
@@ -267,9 +295,14 @@ export function GeneratePanel(props: {
           paramsJson,
           // A VIDEO version as first_frame means "its last frame" (the prep
           // artifact) — the orchestrator resolves the derived key.
-          conditioning: carryActive
-            ? { firstFrame: { assetId: "", versionId: carrySource!.versionId } }
-            : undefined,
+          conditioning:
+            carryActive || (needsSourceVideo && sourceVideo)
+              ? {
+                  firstFrame: carryActive ? { assetId: "", versionId: carrySource!.versionId } : undefined,
+                  sourceVideo:
+                    needsSourceVideo && sourceVideo ? { assetId: sourceVideo.assetId, versionId: "" } : undefined,
+                }
+              : undefined,
         },
       }),
     onSuccess: () => {
@@ -342,6 +375,7 @@ export function GeneratePanel(props: {
             setShowRefPicker(false);
             setShowAudioPicker(false);
             setParams({}); // params_schema is per-model
+            setSourceVideo(null);
 
           }}
         >
@@ -420,6 +454,34 @@ export function GeneratePanel(props: {
                 setShowRefPicker(false);
               }}
               onClose={() => setShowRefPicker(false)}
+            />
+          )}
+        </div>
+      )}
+
+      {needsSourceVideo && (
+        <div className="field">
+          <span>Source clip (re-timed to the audio)</span>
+          <div className="chips">
+            {sourceVideo ? (
+              <span className="chip">
+                🎬 {sourceVideo.name}
+                <button onClick={() => setSourceVideo(null)}>×</button>
+              </span>
+            ) : (
+              <button className="btn secondary chip-add" onClick={() => setShowSourcePicker(true)}>
+                + Pick video
+              </button>
+            )}
+          </div>
+          {showSourcePicker && (
+            <VideoSourcePicker
+              projectId={props.projectId}
+              onPick={(v) => {
+                setSourceVideo(v);
+                setShowSourcePicker(false);
+              }}
+              onClose={() => setShowSourcePicker(false)}
             />
           )}
         </div>
@@ -504,7 +566,14 @@ export function GeneratePanel(props: {
 
       <button
         className="btn generate"
-        disabled={!prompt.trim() || !durationValid || !seedValid || !activeProfile || create.isPending}
+        disabled={
+          (!prompt.trim() && !isLipsyncPost) ||
+          (needsSourceVideo && !sourceVideo) ||
+          !durationValid ||
+          !seedValid ||
+          !activeProfile ||
+          create.isPending
+        }
         onClick={() => create.mutate()}
       >
         ⚡ Generate {count} {isVideo ? "take" : "candidate"}
@@ -553,6 +622,34 @@ function modalityOf(ep: ModelEndpoint): string {
   } catch {
     return "?";
   }
+}
+
+/** Source-clip picker for lipsync_post — library video only. */
+function VideoSourcePicker(props: {
+  projectId: string;
+  onPick: (v: { assetId: string; name: string }) => void;
+  onClose: () => void;
+}) {
+  const assets = useQuery({
+    queryKey: ["assets", props.projectId, "video-source-picker"],
+    queryFn: () => assetClient.listAssets({ projectId: props.projectId, kind: AssetKind.VIDEO }),
+  });
+  return (
+    <div className="ref-picker">
+      <span className="field">Library video</span>
+      {(assets.data?.assets.length ?? 0) === 0 && <div className="empty">No video in the library yet.</div>}
+      <div className="ref-picker-list">
+        {assets.data?.assets.map((a) => (
+          <button key={a.id} className="btn secondary" onClick={() => props.onPick({ assetId: a.id, name: a.name })}>
+            🎬 <span className="truncate">{a.name}</span>
+          </button>
+        ))}
+      </div>
+      <button className="btn secondary" onClick={props.onClose}>
+        Cancel
+      </button>
+    </div>
+  );
 }
 
 /** Audio reference picker — library audio (TTS output, uploads) for

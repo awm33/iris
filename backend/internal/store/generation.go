@@ -58,6 +58,8 @@ type GenConditioning struct {
 	// version means "its last frame" (the prep artifact) — the W3 carry.
 	FirstFrame  *GenRef `json:"first_frame,omitempty"`
 	SourceImage *GenRef `json:"source_image,omitempty"`
+	// SourceVideo: the clip a lipsync_post pass re-times to the audio ref.
+	SourceVideo *GenRef `json:"source_video,omitempty"`
 	Mask        *GenRef `json:"mask,omitempty"`
 }
 
