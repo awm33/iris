@@ -72,7 +72,8 @@
             "in_point": 0,
             "version_id": "vv_x",
             "shot_id": "",
-            "text": ""
+            "text": "",
+            "color": null
           }
         ]
       }

@@ -1,21 +1,90 @@
 {
   "name": "caption track: text clips, set_clip_text (incl. undo), default name C",
   "ops": [
-    { "op_id": "t1", "type": "add_track", "track": { "id": "c1", "kind": "caption", "name": "" } },
-    { "op_id": "a1", "type": "add_clip", "track_id": "c1", "clip": { "id": "cap1", "name": "cap1", "text": "hello there", "start": 0, "duration": 2.5 } },
-    { "op_id": "a2", "type": "add_clip", "track_id": "c1", "clip": { "id": "cap2", "name": "cap2", "text": "second line", "start": 2.5, "duration": 2 } },
-    { "op_id": "e1", "type": "set_clip_text", "clip_id": "cap1", "text": "hello world" },
-    { "op_id": "e2", "type": "set_clip_text", "clip_id": "cap2", "text": "edited away" },
-    { "op_id": "u1", "type": "undo", "target": "e2" },
-    { "op_id": "m1", "type": "move_clip", "clip_id": "cap2", "start": 3 }
+    {
+      "op_id": "t1",
+      "type": "add_track",
+      "track": {
+        "id": "c1",
+        "kind": "caption",
+        "name": ""
+      }
+    },
+    {
+      "op_id": "a1",
+      "type": "add_clip",
+      "track_id": "c1",
+      "clip": {
+        "id": "cap1",
+        "name": "cap1",
+        "text": "hello there",
+        "start": 0,
+        "duration": 2.5
+      }
+    },
+    {
+      "op_id": "a2",
+      "type": "add_clip",
+      "track_id": "c1",
+      "clip": {
+        "id": "cap2",
+        "name": "cap2",
+        "text": "second line",
+        "start": 2.5,
+        "duration": 2
+      }
+    },
+    {
+      "op_id": "e1",
+      "type": "set_clip_text",
+      "clip_id": "cap1",
+      "text": "hello world"
+    },
+    {
+      "op_id": "e2",
+      "type": "set_clip_text",
+      "clip_id": "cap2",
+      "text": "edited away"
+    },
+    {
+      "op_id": "u1",
+      "type": "undo",
+      "target": "e2"
+    },
+    {
+      "op_id": "m1",
+      "type": "move_clip",
+      "clip_id": "cap2",
+      "start": 3
+    }
   ],
   "expected": {
     "tracks": [
       {
-        "id": "c1", "kind": "caption", "name": "C",
+        "id": "c1",
+        "kind": "caption",
+        "name": "C",
         "clips": [
-          { "id": "cap1", "start": 0, "duration": 2.5, "in_point": 0, "version_id": "", "shot_id": "", "text": "hello world" },
-          { "id": "cap2", "start": 3, "duration": 2, "in_point": 0, "version_id": "", "shot_id": "", "text": "second line" }
+          {
+            "id": "cap1",
+            "start": 0,
+            "duration": 2.5,
+            "in_point": 0,
+            "version_id": "",
+            "shot_id": "",
+            "text": "hello world",
+            "color": null
+          },
+          {
+            "id": "cap2",
+            "start": 3,
+            "duration": 2,
+            "in_point": 0,
+            "version_id": "",
+            "shot_id": "",
+            "text": "second line",
+            "color": null
+          }
         ]
       }
     ]

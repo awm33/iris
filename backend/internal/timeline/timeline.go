@@ -10,6 +10,7 @@ package timeline
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 )
 
@@ -27,7 +28,37 @@ type Op struct {
 	Duration *float64  `json:"duration,omitempty"`
 	InPoint  *float64  `json:"in_point,omitempty"`
 	Text     *string   `json:"text,omitempty"`
+	Color    *ColorDef `json:"color,omitempty"`
 	Target   string    `json:"target,omitempty"`
+}
+
+// ColorDef is the wire form of a color grade — pointer fields because an
+// ABSENT field means that field's neutral (the TS clamp's isFinite guard),
+// which a zero-value decode cannot represent (0 is a valid contrast).
+type ColorDef struct {
+	Exposure *float64 `json:"exposure,omitempty"` // stops, -3..3
+	Contrast *float64 `json:"contrast,omitempty"` // 0..2, 1 = neutral
+	Temp     *float64 `json:"temp,omitempty"`     // -1 (cool) .. 1 (warm)
+}
+
+// Color is the reduced (clamped, defaulted) grade. Neutral = {0, 1, 0}.
+type Color struct {
+	Exposure, Contrast, Temp float64
+}
+
+// ClampColor mirrors clampColor in timeline.ts exactly.
+func ClampColor(c *ColorDef) Color {
+	f := func(p *float64, neutral, lo, hi float64) float64 {
+		if p == nil {
+			return neutral
+		}
+		return math.Min(hi, math.Max(lo, *p))
+	}
+	return Color{
+		Exposure: f(c.Exposure, 0, -3, 3),
+		Contrast: f(c.Contrast, 1, 0, 2),
+		Temp:     f(c.Temp, 0, -1, 1),
+	}
 }
 
 type TrackDef struct {
@@ -37,14 +68,15 @@ type TrackDef struct {
 }
 
 type ClipDef struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	VersionID string   `json:"version_id,omitempty"`
-	ShotID    string   `json:"shot_id,omitempty"`
-	Text      string   `json:"text,omitempty"`
-	Start     float64  `json:"start"`
-	Duration  float64  `json:"duration"`
-	InPoint   *float64 `json:"in_point,omitempty"`
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	VersionID string    `json:"version_id,omitempty"`
+	ShotID    string    `json:"shot_id,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	Color     *ColorDef `json:"color,omitempty"`
+	Start     float64   `json:"start"`
+	Duration  float64   `json:"duration"`
+	InPoint   *float64  `json:"in_point,omitempty"`
 }
 
 type Clip struct {
@@ -53,6 +85,7 @@ type Clip struct {
 	VersionID string
 	ShotID    string
 	Text      string
+	Color     *Color // nil = neutral
 	Start     float64
 	Duration  float64
 	InPoint   float64
@@ -199,12 +232,18 @@ func Reduce(ops []*Op) *State {
 			if op.Clip.InPoint != nil {
 				inPoint = *op.Clip.InPoint
 			}
+			var col *Color
+			if op.Clip.Color != nil {
+				c := ClampColor(op.Clip.Color)
+				col = &c
+			}
 			t.Clips = append(t.Clips, &Clip{
 				ID:        op.Clip.ID,
 				Name:      op.Clip.Name,
 				VersionID: op.Clip.VersionID,
 				ShotID:    op.Clip.ShotID,
 				Text:      op.Clip.Text,
+				Color:     col,
 				Start:     max(0, op.Clip.Start),
 				Duration:  max(MinClipS, op.Clip.Duration),
 				InPoint:   max(0, inPoint),
@@ -267,6 +306,16 @@ func Reduce(ops []*Op) *State {
 			clip.Text = ""
 			if op.Text != nil {
 				clip.Text = *op.Text
+			}
+		case "set_clip_color":
+			_, clip := findClip(op.ClipID)
+			if clip == nil {
+				break
+			}
+			clip.Color = nil
+			if op.Color != nil {
+				c := ClampColor(op.Color)
+				clip.Color = &c
 			}
 		}
 	}

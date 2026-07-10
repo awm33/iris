@@ -6,6 +6,10 @@
 export interface Segment {
   /** Opaque source identity (version id) — decoder cache key. */
   sourceId: string;
+  /** Owning clip id — lets the compositor look up per-clip presentation
+   * (color grades) WITHOUT it living here: segment identity keys decode
+   * sessions, and presentation must never respawn a decoder. */
+  clipId?: string;
   /** Timeline position, seconds. */
   startS: number;
   durationS: number;

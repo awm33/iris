@@ -1,0 +1,25 @@
+{
+  "name": "color grades: initial clamp + absent-field neutral, set + clamp, clear, undo of a clear",
+  "ops": [
+    { "op_id": "t1", "type": "add_track", "track": { "id": "v1", "kind": "video" } },
+    { "op_id": "a0", "type": "add_clip", "track_id": "v1", "clip": { "id": "z", "name": "z", "version_id": "vv_z", "start": 4, "duration": 1, "color": { "exposure": 9, "temp": -0.5 } } },
+    { "op_id": "a1", "type": "add_clip", "track_id": "v1", "clip": { "id": "x", "name": "x", "version_id": "vv_x", "start": 0, "duration": 2 } },
+    { "op_id": "a2", "type": "add_clip", "track_id": "v1", "clip": { "id": "y", "name": "y", "version_id": "vv_y", "start": 2, "duration": 2 } },
+    { "op_id": "c1", "type": "set_clip_color", "clip_id": "y", "color": { "exposure": 0.5, "contrast": 1.2, "temp": 2 } },
+    { "op_id": "c2", "type": "set_clip_color", "clip_id": "x", "color": { "exposure": -1, "contrast": 0.8, "temp": 0.3 } },
+    { "op_id": "c3", "type": "set_clip_color", "clip_id": "x" },
+    { "op_id": "u1", "type": "undo", "target": "c3" }
+  ],
+  "expected": {
+    "tracks": [
+      {
+        "id": "v1", "kind": "video", "name": "V",
+        "clips": [
+          { "id": "x", "start": 0, "duration": 2, "in_point": 0, "version_id": "vv_x", "shot_id": "", "text": "", "color": { "exposure": -1, "contrast": 0.8, "temp": 0.3 } },
+          { "id": "y", "start": 2, "duration": 2, "in_point": 0, "version_id": "vv_y", "shot_id": "", "text": "", "color": { "exposure": 0.5, "contrast": 1.2, "temp": 1 } },
+          { "id": "z", "start": 4, "duration": 1, "in_point": 0, "version_id": "vv_z", "shot_id": "", "text": "", "color": { "exposure": 3, "contrast": 1, "temp": -0.5 } }
+        ]
+      }
+    ]
+  }
+}

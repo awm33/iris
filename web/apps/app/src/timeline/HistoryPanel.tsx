@@ -25,6 +25,8 @@ function label(op: TimelineOp): string {
       return "Trim clip";
     case "set_clip_text":
       return `Edit caption “${op.text.length > 24 ? op.text.slice(0, 24) + "…" : op.text}”`;
+    case "set_clip_color":
+      return op.color ? "Grade clip" : "Clear grade";
     case "undo":
       return "Undo";
   }

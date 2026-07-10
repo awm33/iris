@@ -94,7 +94,8 @@
             "in_point": 1.5,
             "version_id": "",
             "shot_id": "sh_1",
-            "text": ""
+            "text": "",
+            "color": null
           }
         ]
       },
@@ -116,7 +117,8 @@
             "in_point": 2,
             "version_id": "vv_m",
             "shot_id": "",
-            "text": ""
+            "text": "",
+            "color": null
           }
         ]
       }
