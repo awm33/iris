@@ -37,6 +37,8 @@ func For(kind, baseURL, authRef string) (Client, error) {
 	switch kind {
 	case "seedance":
 		return newSeedance(baseURL, token), nil
+	case "elevenlabs":
+		return newElevenLabs(baseURL, token), nil
 	case "", "inference", "iris", "http", "mock", "openweight", "commercial":
 		return inference.New(baseURL, token), nil
 	default:
@@ -50,5 +52,5 @@ func For(kind, baseURL, authRef string) (Client, error) {
 // blob URLs — the external advertisement (host.docker.internal) exists for
 // containerized endpoints and doesn't resolve from the host.
 func InProcess(kind string) bool {
-	return kind == "seedance"
+	return kind == "seedance" || kind == "elevenlabs"
 }

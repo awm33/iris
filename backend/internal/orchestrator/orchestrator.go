@@ -600,10 +600,14 @@ func (o *Orchestrator) resolveFrameURL(ctx context.Context, ref *store.GenRef) (
 // content type is untrusted and never stored (a reported "text/html" would
 // otherwise be reflected by SignDownload's response-content-type).
 func expectedContentType(modality string) string {
-	if modality == "image" {
+	switch modality {
+	case "image":
 		return "image/png"
+	case "audio":
+		return "audio/mpeg"
+	default:
+		return "video/mp4"
 	}
-	return "video/mp4"
 }
 
 var hexSHA = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
@@ -661,8 +665,11 @@ func (o *Orchestrator) landVersion(ctx context.Context, job *queue.GenerationJob
 	assetID, versionID := ids.New("ast"), ids.New("astv")
 	name := generatedName(req.Prompt, job.Task, ep.Manifest.Modality)
 	kind := "video"
-	if ep.Manifest.Modality == "image" {
+	switch ep.Manifest.Modality {
+	case "image":
 		kind = "image"
+	case "audio":
+		kind = "audio"
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO assets (id, workspace_id, project_id, kind, name, head_version_id)

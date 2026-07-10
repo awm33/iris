@@ -79,11 +79,13 @@
         "properties": {
           "max_width": {
             "type": "integer",
-            "minimum": 64
+            "minimum": 0,
+            "not": {"minimum": 1, "maximum": 63}
           },
           "max_height": {
             "type": "integer",
-            "minimum": 64
+            "minimum": 0,
+            "not": {"minimum": 1, "maximum": 63}
           },
           "steps": {
             "type": "integer"
