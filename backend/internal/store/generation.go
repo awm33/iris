@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"github.com/jackc/pgx/v5"
 	"context"
 	"encoding/json"
 	"math/rand/v2"
@@ -292,3 +294,30 @@ func (s *Store) RecordUsage(ctx context.Context, workspaceID, jobID, kind, unit 
 // Pool exposes the pgx pool for packages that need transaction control with
 // queue helpers (the orchestrator's artifact-landing transaction).
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
+// GenCacheEntry: a previously landed artifact for an identical resolved
+// request — the dev/test cache that keeps repeated runs off the bill.
+type GenCacheEntry struct {
+	SHA256      string
+	SizeBytes   int64
+	ContentType string
+}
+
+func (s *Store) GetGenCache(ctx context.Context, requestHash string) (*GenCacheEntry, error) {
+	e := &GenCacheEntry{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT sha256, size_bytes, content_type FROM generation_cache WHERE request_hash = $1`,
+		requestHash).Scan(&e.SHA256, &e.SizeBytes, &e.ContentType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return e, err
+}
+
+func (s *Store) PutGenCache(ctx context.Context, requestHash, sha256, contentType string, sizeBytes int64) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO generation_cache (request_hash, sha256, size_bytes, content_type)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (request_hash) DO NOTHING`, requestHash, sha256, sizeBytes, contentType)
+	return err
+}

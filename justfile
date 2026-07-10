@@ -31,8 +31,10 @@ conformance url token="dev":
 api:
     cd backend && go run ./cmd/api
 
+# Dev runs with the generation cache ON: identical requests replay landed
+# artifacts (free) — unset IRIS_GEN_CACHE to exercise real dispatch.
 orchestrator:
-    cd backend && go run ./cmd/orchestrator
+    cd backend && IRIS_GEN_CACHE=${IRIS_GEN_CACHE:-1} go run ./cmd/orchestrator
 
 worker:
     cd backend && go run ./cmd/media-worker

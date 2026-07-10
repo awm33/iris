@@ -58,6 +58,9 @@ func main() {
 		Registry: reg,
 		DSN:      dsn,
 		Name:     host + "-orch-" + time.Now().Format("150405"),
+		// Dev/test helper: identical resolved requests reuse landed
+		// artifacts instead of re-billing the endpoint. Default OFF.
+		CacheEnabled: os.Getenv("IRIS_GEN_CACHE") == "1" || os.Getenv("IRIS_GEN_CACHE") == "true",
 	}
 	if err := o.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("orchestrator exited", "err", err)
