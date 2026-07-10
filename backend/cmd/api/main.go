@@ -75,6 +75,14 @@ func main() {
 			Kind:    "elevenlabs",
 			AuthRef: "env:MOCK_ELEVENLABS_KEY",
 		},
+		// First REAL image backend's adapter, against the recorded-shape
+		// mock (image dogfood track). Swapping to production = base URL +
+		// key change after the live-shape verification pass.
+		"FLUX (dev mock)": {
+			BaseURL: getenv("IRIS_BFL_URL", "http://127.0.0.1:8907"),
+			Kind:    "bfl",
+			AuthRef: "env:MOCK_BFL_KEY",
+		},
 	}); err != nil {
 		slog.Error("endpoint seed", "err", err)
 		os.Exit(1)

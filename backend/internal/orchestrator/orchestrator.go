@@ -354,7 +354,7 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 		if ref.Kind != "" {
 			wantCT = ref.Kind + "/"
 		}
-		url, err := o.resolveRefURL(ctx, &ref, wantCT)
+		url, err := o.resolveRefURL(ctx, &ref, wantCT, adapters.InProcess(ep.Kind))
 		if err != nil {
 			return nil, "", err
 		}
@@ -395,28 +395,28 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	if c := req.Conditioning; c != nil {
 		infReq.Conditioning = &inference.Conditioning{}
 		if c.FirstFrame != nil {
-			url, err := o.resolveFrameURL(ctx, c.FirstFrame)
+			url, err := o.resolveFrameURL(ctx, c.FirstFrame, adapters.InProcess(ep.Kind))
 			if err != nil {
 				return nil, "", err
 			}
 			infReq.Conditioning.FirstFrame = &inference.FrameRef{URL: url}
 		}
 		if c.SourceImage != nil {
-			url, err := o.resolveRefURL(ctx, c.SourceImage, "image/")
+			url, err := o.resolveRefURL(ctx, c.SourceImage, "image/", adapters.InProcess(ep.Kind))
 			if err != nil {
 				return nil, "", err
 			}
 			infReq.Conditioning.SourceImage = &inference.FrameRef{URL: url}
 		}
 		if c.SourceVideo != nil {
-			url, err := o.resolveRefURL(ctx, c.SourceVideo, "video/")
+			url, err := o.resolveRefURL(ctx, c.SourceVideo, "video/", adapters.InProcess(ep.Kind))
 			if err != nil {
 				return nil, "", err
 			}
 			infReq.Conditioning.SourceVideo = &inference.SourceVideo{URL: url}
 		}
 		if c.Mask != nil {
-			url, err := o.resolveRefURL(ctx, c.Mask, "image/")
+			url, err := o.resolveRefURL(ctx, c.Mask, "image/", adapters.InProcess(ep.Kind))
 			if err != nil {
 				return nil, "", err
 			}
@@ -446,7 +446,7 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 // float-to-head at dispatch time (HLD pin-vs-float). A non-empty
 // wantCTPrefix constrains the version's content type (ValidationError →
 // invalid_input park, no retries).
-func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef, wantCTPrefix string) (string, error) {
+func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef, wantCTPrefix string, internal bool) (string, error) {
 	versionID := ref.VersionID
 	if versionID == "" {
 		a, _, err := o.Store.GetAsset(ctx, ref.AssetID)
@@ -463,7 +463,14 @@ func (o *Orchestrator) resolveRefURL(ctx context.Context, ref *store.GenRef, wan
 		return "", &inference.ValidationError{Msg: fmt.Sprintf(
 			"input %s is %s — want %s*", versionID, info.ContentType, wantCTPrefix)}
 	}
-	url, err := o.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
+	// In-process adapters DOWNLOAD inputs from this process — the external
+	// advertisement (host.docker.internal) doesn't resolve on the host.
+	// Remote endpoints fetch the URL themselves and need the external form.
+	presign := o.Blob.PresignGetExternal
+	if internal {
+		presign = o.Blob.PresignGet
+	}
+	url, err := presign(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
 	if err != nil {
 		return "", fmt.Errorf("presign reference: %w", err)
 	}
@@ -579,7 +586,7 @@ func genCacheHash(ep *registry.Endpoint, job *queue.GenerationJob, req *store.Ge
 // prep must not park the job.
 // TODO(workspace-scoping): like resolveRefURL, this presigns any version id
 // with no ownership check — must be scoped before multi-workspace lands.
-func (o *Orchestrator) resolveFrameURL(ctx context.Context, ref *store.GenRef) (string, error) {
+func (o *Orchestrator) resolveFrameURL(ctx context.Context, ref *store.GenRef, internal bool) (string, error) {
 	versionID := ref.VersionID
 	if versionID == "" {
 		a, _, err := o.Store.GetAsset(ctx, ref.AssetID)
@@ -592,8 +599,12 @@ func (o *Orchestrator) resolveFrameURL(ctx context.Context, ref *store.GenRef) (
 	if err != nil {
 		return "", &inference.ValidationError{Msg: fmt.Sprintf("first_frame version %s not found", versionID)}
 	}
+	presign := o.Blob.PresignGetExternal
+	if internal {
+		presign = o.Blob.PresignGet
+	}
 	if strings.HasPrefix(info.ContentType, "image/") {
-		url, err := o.Blob.PresignGetExternal(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
+		url, err := presign(ctx, blob.ContentKey(info.SHA256), info.ContentType, refGetTTL)
 		if err != nil {
 			return "", fmt.Errorf("presign first_frame: %w", err)
 		}
@@ -605,7 +616,7 @@ func (o *Orchestrator) resolveFrameURL(ctx context.Context, ref *store.GenRef) (
 			return "", fmt.Errorf(
 				"first_frame source %s: last frame not extracted yet (media prep in flight — transient)", versionID)
 		}
-		url, err := o.Blob.PresignGetExternal(ctx, key, "image/png", refGetTTL)
+		url, err := presign(ctx, key, "image/png", refGetTTL)
 		if err != nil {
 			return "", fmt.Errorf("presign last frame: %w", err)
 		}

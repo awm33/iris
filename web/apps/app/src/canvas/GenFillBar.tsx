@@ -36,7 +36,16 @@ export function GenFillBar(props: {
 }) {
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState(4);
-  const [endpointId, setEndpointId] = useState<string>();
+  // Model selection is per-OPERATION (image dogfood track): gen-fill keeps
+  // its own choice, persisted — you might generate with one model and
+  // inpaint with another. Junk in storage degrades to the first endpoint.
+  const [endpointId, setEndpointId] = useState<string | undefined>(() => {
+    try {
+      return localStorage.getItem("iris.genfill.endpoint") ?? undefined;
+    } catch {
+      return undefined;
+    }
+  });
   const st = props.state;
   // Prompted generation only offers endpoints that condition on prompts;
   // Remove auto-routes (specialist first — the fast tier).
@@ -106,7 +115,18 @@ export function GenFillBar(props: {
         style={{ flex: 1 }}
       />
       {promptable.length > 1 && (
-        <select value={endpoint?.id} onChange={(e) => setEndpointId(e.target.value)} aria-label="Model">
+        <select
+          value={endpoint?.id}
+          onChange={(e) => {
+            setEndpointId(e.target.value);
+            try {
+              localStorage.setItem("iris.genfill.endpoint", e.target.value);
+            } catch {
+              /* session-only */
+            }
+          }}
+          aria-label="Model"
+        >
           {promptable.map((e) => (
             <option key={e.id} value={e.id}>
               {e.name}
