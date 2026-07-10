@@ -1,0 +1,31 @@
+{
+  "name": "cross-track move both-or-neither, trim clamps, shot clips",
+  "ops": [
+    { "op_id": "t1", "type": "add_track", "track": { "id": "v1", "kind": "video" } },
+    { "op_id": "t2", "type": "add_track", "track": { "id": "v2", "kind": "video", "name": "V2" }, "index": 0 },
+    { "op_id": "t3", "type": "add_track", "track": { "id": "a1", "kind": "audio" } },
+    { "op_id": "c1", "type": "add_clip", "track_id": "v1", "clip": { "id": "s", "name": "shot", "shot_id": "sh_1", "start": 1, "duration": 4 } },
+    { "op_id": "c2", "type": "add_clip", "track_id": "a1", "clip": { "id": "mus", "name": "music", "version_id": "vv_m", "start": 0, "duration": 10, "in_point": 2 } },
+    { "op_id": "m1", "type": "move_clip", "clip_id": "s", "start": 3, "track_id": "a1" },
+    { "op_id": "m2", "type": "move_clip", "clip_id": "s", "start": 2, "track_id": "v2" },
+    { "op_id": "tr1", "type": "trim_clip", "clip_id": "s", "duration": 0.001, "in_point": 1.5 },
+    { "op_id": "tr2", "type": "trim_clip", "clip_id": "mus", "start": -4 }
+  ],
+  "expected": {
+    "tracks": [
+      {
+        "id": "v2", "kind": "video", "name": "V2",
+        "clips": [
+          { "id": "s", "start": 2, "duration": 0.04, "in_point": 1.5, "version_id": "", "shot_id": "sh_1" }
+        ]
+      },
+      { "id": "v1", "kind": "video", "name": "V", "clips": [] },
+      {
+        "id": "a1", "kind": "audio", "name": "A",
+        "clips": [
+          { "id": "mus", "start": 0, "duration": 10, "in_point": 2, "version_id": "vv_m", "shot_id": "" }
+        ]
+      }
+    ]
+  }
+}

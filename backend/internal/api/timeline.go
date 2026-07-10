@@ -9,6 +9,7 @@ import (
 	"connectrpc.com/connect"
 
 	irisv1 "github.com/awm33/iris/backend/gen/iris/v1"
+	"github.com/awm33/iris/backend/internal/mediaworker"
 	"github.com/awm33/iris/backend/internal/store"
 )
 
@@ -111,6 +112,62 @@ func (s *TimelineServer) DeleteTimeline(ctx context.Context, req *connect.Reques
 		return nil, connectErr(err)
 	}
 	return connect.NewResponse(&irisv1.DeleteTimelineResponse{}), nil
+}
+
+// Export presets are a closed set — the worker maps them to ffmpeg args and
+// an unknown preset must fail HERE, not as a parked media job. The list is
+// the worker's own, so the two can't drift.
+var exportPresets = mediaworker.PresetNames()
+
+func (s *TimelineServer) StartExport(ctx context.Context, req *connect.Request[irisv1.StartExportRequest]) (*connect.Response[irisv1.StartExportResponse], error) {
+	m := req.Msg
+	if m.TimelineId == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("timeline_id is required"))
+	}
+	preset := m.Preset
+	if preset == "" {
+		preset = "draft"
+	}
+	if !exportPresets[preset] {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown preset %q (draft|master)", preset))
+	}
+	tl, err := s.Store.GetTimeline(ctx, m.TimelineId)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	e := &store.Export{
+		WorkspaceID: tl.WorkspaceID,
+		ProjectID:   tl.ProjectID,
+		TimelineID:  tl.ID,
+		Preset:      preset,
+	}
+	if err := s.Store.CreateExport(ctx, e); err != nil {
+		return nil, connectErr(err)
+	}
+	return connect.NewResponse(&irisv1.StartExportResponse{Export: exportPB(e)}), nil
+}
+
+func (s *TimelineServer) ListExports(ctx context.Context, req *connect.Request[irisv1.ListExportsRequest]) (*connect.Response[irisv1.ListExportsResponse], error) {
+	if req.Msg.TimelineId == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("timeline_id is required"))
+	}
+	es, err := s.Store.ListExports(ctx, req.Msg.TimelineId)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	resp := &irisv1.ListExportsResponse{}
+	for _, e := range es {
+		resp.Exports = append(resp.Exports, exportPB(e))
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func exportPB(e *store.Export) *irisv1.Export {
+	return &irisv1.Export{
+		Id: e.ID, TimelineId: e.TimelineID, Preset: e.Preset, State: e.State,
+		Error: e.Error, AssetId: e.AssetID, VersionId: e.VersionID,
+		Timestamps: ts(e.CreatedAt, e.UpdatedAt),
+	}
 }
 
 func timelinePB(t *store.Timeline) *irisv1.Timeline {

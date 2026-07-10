@@ -18,6 +18,7 @@ import {
 import { AudioMixer, ClipDecoder, type Segment } from "@iris/media-engine";
 import { assetClient, storyClient, timelineClient, timelineKeepaliveClient } from "../api";
 import { EngineCanvas } from "./EngineCanvas";
+import { ExportControl } from "./ExportControl";
 import { HistoryPanel } from "./HistoryPanel";
 import { AssetKind } from "@iris/api-client";
 import { useEscape } from "../components/AssetThumb";
@@ -574,6 +575,7 @@ export function TimelinePage(props: {
             ⚙
           </button>
         )}
+        <ExportControl timelineId={props.timelineId} />
         <span className={`status${status === "error" ? " error" : ""}`}>{status === "saved" ? "saved" : status === "error" ? "save failed — ops kept locally" : "…"}</span>
       </div>
 
