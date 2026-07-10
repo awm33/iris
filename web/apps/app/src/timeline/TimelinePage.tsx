@@ -18,6 +18,7 @@ import {
 import { AudioMixer, ClipDecoder, type Segment } from "@iris/media-engine";
 import { assetClient, storyClient, timelineClient, timelineKeepaliveClient } from "../api";
 import { EngineCanvas } from "./EngineCanvas";
+import { HistoryPanel } from "./HistoryPanel";
 import { AssetKind } from "@iris/api-client";
 import { useEscape } from "../components/AssetThumb";
 
@@ -84,6 +85,7 @@ export function TimelinePage(props: {
   // Default ON since the audio slice: the engine preview is now the better
   // player (gapless + mixed audio); the <video> chase stays as fallback.
   const [engineOn, setEngineOn] = useState(() => ClipDecoder.supported());
+  const [showHistory, setShowHistory] = useState(false);
   const [engineError, setEngineError] = useState<string>();
   const playRef = useRef<{ raf: number } | null>(null);
   const togglePlayRef = useRef<() => void>(() => {});
@@ -548,6 +550,13 @@ export function TimelinePage(props: {
         <button className="btn secondary" disabled={!doc.canRedo} onClick={() => doc.redo()}>↪</button>
         <button className="btn secondary" title="Blade at playhead (B)" onClick={blade}>🔪</button>
         <button className="btn secondary" title="Play/pause (space)" onClick={togglePlay}>{playing ? "⏸" : "▶"}</button>
+        <button
+          className={`btn secondary${showHistory ? " tool-active" : ""}`}
+          title="History — the op log, newest first"
+          onClick={() => setShowHistory((v) => !v)}
+        >
+          🕘
+        </button>
         {ClipDecoder.supported() && (
           <button
             className={`btn secondary${engineOn ? " tool-active" : ""}`}
@@ -563,6 +572,7 @@ export function TimelinePage(props: {
         <span className={`status${status === "error" ? " error" : ""}`}>{status === "saved" ? "saved" : status === "error" ? "save failed — ops kept locally" : "…"}</span>
       </div>
 
+      {showHistory && <HistoryPanel doc={doc} onClose={() => setShowHistory(false)} />}
       {engineOn ? (
         <div className="tl-preview">
           <EngineCanvas segments={segments} time={time} playing={playing} srcFor={srcFor} onError={setEngineError} />
