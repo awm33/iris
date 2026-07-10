@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/awm33/iris/backend/internal/adapters"
 	"github.com/awm33/iris/backend/internal/blob"
 	"github.com/awm33/iris/backend/internal/ids"
 	"github.com/awm33/iris/backend/internal/inference"
@@ -265,7 +266,10 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 		}
 	}
 
-	client := inference.New(ep.BaseURL, ep.Token)
+	client, err := adapters.For(ep.Kind, ep.BaseURL, ep.AuthRef)
+	if err != nil {
+		return err
+	}
 	status, err := client.CreateJob(ctx, infReq)
 	if err != nil {
 		if isUnreachable(err) {
@@ -409,7 +413,13 @@ func (o *Orchestrator) buildInferenceRequest(ctx context.Context, job *queue.Gen
 	// prior attempt's still-valid PUT URL writing into this attempt's key
 	// would corrupt the landed artifact.
 	artifactKey := "uploads/gen/" + infReq.ID + "/0"
-	putURL, err := o.Blob.PresignPutExternal(ctx, artifactKey, artifactPutTTL)
+	presign := o.Blob.PresignPutExternal
+	if adapters.InProcess(ep.Kind) {
+		// The adapter uploads from THIS process: the external advertisement
+		// (host.docker.internal, for containerized endpoints) won't resolve.
+		presign = o.Blob.PresignPut
+	}
+	putURL, err := presign(ctx, artifactKey, artifactPutTTL)
 	if err != nil {
 		return nil, "", fmt.Errorf("presign artifact target: %w", err)
 	}

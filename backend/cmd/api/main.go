@@ -58,10 +58,18 @@ func main() {
 	}
 
 	reg := registry.New(st.Pool())
-	if err := reg.SeedDevEndpoints(ctx, store.DevWorkspaceID, map[string]string{
-		"Mock Video (dev)":  getenv("IRIS_MOCK_VIDEO_URL", "http://localhost:8900"),
-		"Mock Image (dev)":  getenv("IRIS_MOCK_IMAGE_URL", "http://localhost:8901"),
-		"LaMa Remove (dev)": getenv("IRIS_LAMA_URL", "http://localhost:8902"),
+	if err := reg.SeedDevEndpoints(ctx, store.DevWorkspaceID, map[string]registry.DevSeed{
+		"Mock Video (dev)":  {BaseURL: getenv("IRIS_MOCK_VIDEO_URL", "http://localhost:8900")},
+		"Mock Image (dev)":  {BaseURL: getenv("IRIS_MOCK_IMAGE_URL", "http://localhost:8901")},
+		"LaMa Remove (dev)": {BaseURL: getenv("IRIS_LAMA_URL", "http://localhost:8902")},
+		// First commercial adapter, against the recorded-shape mock. The
+		// auth_ref is a VAULT reference — the key itself lives in the
+		// orchestrator's env, resolved only at dispatch.
+		"Seedance (dev mock)": {
+			BaseURL: getenv("IRIS_SEEDANCE_URL", "http://127.0.0.1:8905"), // 127.0.0.1: the mock binds IPv4; localhost resolves ::1 first
+			Kind:    "seedance",
+			AuthRef: "env:MOCK_SEEDANCE_KEY",
+		},
 	}); err != nil {
 		slog.Error("endpoint seed", "err", err)
 		os.Exit(1)
