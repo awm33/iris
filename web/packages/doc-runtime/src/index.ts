@@ -12,6 +12,8 @@ export {
   TimelineDoc,
   type TimelineOp,
   type TrackKind,
+  type ClipColor,
+  clampColor,
   type TimelineState,
   type TrackState,
   type ClipState,

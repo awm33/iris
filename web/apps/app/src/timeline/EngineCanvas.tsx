@@ -33,11 +33,17 @@ export function EngineCanvas(props: {
   segments: Segment[];
   time: number;
   playing: boolean;
+  /** Per-clip color grades (incl. any in-flight slider draft) — kept OFF
+   * the segments array so a grade tick never respawns decode sessions. */
+  grades?: Map<string, { exposure: number; contrast: number; temp: number }>;
   /** Resolve a segment source to a fetchable (signed) URL. */
   srcFor: (sourceId: string) => Promise<string>;
   onError?: (message: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Raw (ungraded) copy of the last painted frame: VideoFrames must close
+  // promptly, but a paused grade change still needs pixels to recomposite.
+  const rawRef = useRef<HTMLCanvasElement | null>(null);
   const decodersRef = useRef(new Map<string, Promise<ClipDecoder>>());
   const sessionRef = useRef<PlaySession | null>(null);
   const scrubAbortRef = useRef<AbortController | null>(null);
@@ -81,17 +87,55 @@ export function EngineCanvas(props: {
   };
 
   const paintFrame = (frame: VideoFrame) => {
+    const raw = (rawRef.current ??= document.createElement("canvas"));
+    if (raw.width !== frame.displayWidth || raw.height !== frame.displayHeight) {
+      raw.width = frame.displayWidth;
+      raw.height = frame.displayHeight;
+    }
+    raw.getContext("2d")!.drawImage(frame, 0, 0);
+    frame.close();
+    composite();
+  };
+
+  // composite applies the active clip's grade raw → visible. The math is
+  // the EXPORT's lutrgb pipeline exactly (plan PR 36): brightness(2^stops)
+  // then contrast() — each clamped, per channel, sRGB — then an
+  // attenuation-only per-channel multiply for temperature (gains ≤ 1 by
+  // construction; a multiply blend cannot brighten).
+  const composite = () => {
     const canvas = canvasRef.current;
-    if (!canvas) {
-      frame.close();
+    const raw = rawRef.current;
+    if (!canvas || !raw || raw.width === 0) return;
+    const { segments, time, grades } = propsRef.current;
+    const seg = segmentAt(segments, time);
+    const ctx = canvas.getContext("2d")!;
+    if (!seg) {
+      // Stale raw pixels must not recomposite into a gap (grade-change
+      // repaint while the playhead sits on no clip).
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       return;
     }
-    if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-      canvas.width = frame.displayWidth;
-      canvas.height = frame.displayHeight;
+    if (canvas.width !== raw.width || canvas.height !== raw.height) {
+      canvas.width = raw.width;
+      canvas.height = raw.height;
     }
-    canvas.getContext("2d")!.drawImage(frame, 0, 0);
-    frame.close();
+    const grade = seg.clipId ? grades?.get(seg.clipId) : undefined;
+    if (grade && (grade.exposure !== 0 || grade.contrast !== 1)) {
+      ctx.filter = `brightness(${2 ** grade.exposure}) contrast(${grade.contrast})`;
+    }
+    ctx.drawImage(raw, 0, 0);
+    ctx.filter = "none";
+    if (grade && grade.temp !== 0) {
+      const t = grade.temp;
+      const rG = t < 0 ? 1 + 0.3 * t : 1;
+      const gG = t > 0 ? 1 - 0.1 * t : 1 + 0.1 * t;
+      const bG = t > 0 ? 1 - 0.3 * t : 1;
+      ctx.save();
+      ctx.globalCompositeOperation = "multiply";
+      ctx.fillStyle = `rgb(${Math.round(255 * rG)}, ${Math.round(255 * gG)}, ${Math.round(255 * bG)})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
   };
 
   const startSession = (sourceId: string, fromS: number) => {
@@ -222,6 +266,13 @@ export function EngineCanvas(props: {
   }, [props.time, props.playing, props.segments]);
 
   // Unmount: kill everything (decoder cache holds no GPU frames; sessions do).
+  // A grade change while PAUSED must repaint from the raw copy — no new
+  // frame is coming to trigger paintFrame.
+  useEffect(() => {
+    if (!propsRef.current.playing) composite();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.grades]);
+
   useEffect(
     () => () => {
       endSession();

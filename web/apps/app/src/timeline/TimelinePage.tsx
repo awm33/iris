@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Timeline } from "@iris/api-client";
 import {
   bladeOps,
+  type ClipColor,
   clipAt,
   rippleOps,
   MIN_CLIP_S,
@@ -91,6 +92,14 @@ export function TimelinePage(props: {
   const [engineError, setEngineError] = useState<string>();
   // Caption text editing (double-click a caption clip).
   const [editingCap, setEditingCap] = useState<{ id: string; draft: string } | null>(null);
+  // Color panel draft — drives the preview live via the grades map. The
+  // ref mirrors the latest draft for commit handlers: an event handler's
+  // render closure is stale when input events batch (rapid slider moves).
+  const [colorEdit, setColorEdit] = useState<{ clipId: string; draft: ClipColor } | null>(null);
+  const colorEditRef = useRef(colorEdit);
+  useEffect(() => {
+    colorEditRef.current = colorEdit;
+  });
   // Bumped when a transcription completes: server-authored caption ops
   // exist only in the DB — reload the session to pick them up (v1; a live
   // remote-ops channel is the standing sync follow-up).
@@ -375,7 +384,7 @@ export function TimelinePage(props: {
       const take = c.shotId ? takeByShot.get(c.shotId) : undefined;
       // Image takes render as stills (overlay), never as decode segments.
       const sourceId = c.versionId ?? (take?.contentType.startsWith("video/") ? take.versionId : undefined);
-      return sourceId ? [{ sourceId, startS: c.start, durationS: c.duration, inPointS: c.inPoint }] : [];
+      return sourceId ? [{ sourceId, clipId: c.id, startS: c.start, durationS: c.duration, inPointS: c.inPoint }] : [];
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoClips, takeByShot]);
@@ -435,6 +444,33 @@ export function TimelinePage(props: {
     [],
   );
 
+  const selectedVideoClip = useMemo(() => {
+    for (const t of docState?.tracks ?? []) {
+      if (t.kind !== "video") continue;
+      const c = t.clips.find((c) => c.id === selected);
+      if (c) return c;
+    }
+    return undefined;
+  }, [docState, selected]);
+  // Committed grades + any in-flight slider draft, keyed by clip id. Kept
+  // OFF the segments array: a grade tick must never respawn decoders.
+  const grades = useMemo(() => {
+    const m = new Map<string, ClipColor>();
+    for (const t of docState?.tracks ?? []) {
+      if (t.kind !== "video") continue;
+      for (const c of t.clips) if (c.color) m.set(c.id, c.color);
+    }
+    if (colorEdit) m.set(colorEdit.clipId, colorEdit.draft);
+    return m;
+  }, [docState, colorEdit]);
+  useEffect(() => {
+    // Selection moved or the clip vanished: a panel editing a stale clip
+    // would commit grades into something the user isn't looking at (and a
+    // gone clip left the 🎨 button lit while disabled).
+    if (colorEdit && (colorEdit.clipId !== selected || !selectedVideoClip)) setColorEdit(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, selectedVideoClip]);
+
   if (loadError) return <div className="status error">Couldn’t open timeline: {loadError}</div>;
   if (!session) return <div className="empty">Opening timeline…</div>;
   const { doc, tl } = session;
@@ -442,6 +478,14 @@ export function TimelinePage(props: {
   const dur = Math.max(timelineDuration(state), 30);
   const active = clipAt(state, time, "video");
   const activeCaption = clipAt(state, time, "caption");
+  const commitColorDraft = () => {
+    const cur = colorEditRef.current;
+    if (!cur) return;
+    const committed = selectedVideoClip?.color ?? { exposure: 0, contrast: 1, temp: 0 };
+    const d = cur.draft;
+    if (d.exposure === committed.exposure && d.contrast === committed.contrast && d.temp === committed.temp) return;
+    doc.apply({ op_id: oid(), type: "set_clip_color", clip_id: cur.clipId, color: d });
+  };
 
   // Capture keeps drags alive off-element but can throw for already-
   // released pointers — never let it kill the gesture (state first).
@@ -572,6 +616,23 @@ export function TimelinePage(props: {
         >
           🕘
         </button>
+        <button
+          className={`btn secondary${colorEdit ? " tool-active" : ""}`}
+          disabled={!selectedVideoClip}
+          title={selectedVideoClip ? "Color — exposure, contrast, temperature" : "Select a video clip to grade"}
+          onClick={() =>
+            setColorEdit(
+              colorEdit
+                ? null
+                : {
+                    clipId: selectedVideoClip!.id,
+                    draft: { exposure: 0, contrast: 1, temp: 0, ...selectedVideoClip!.color },
+                  },
+            )
+          }
+        >
+          🎨
+        </button>
         {ClipDecoder.supported() && (
           <button
             className={`btn secondary${engineOn ? " tool-active" : ""}`}
@@ -610,9 +671,65 @@ export function TimelinePage(props: {
       </div>
 
       {showHistory && <HistoryPanel doc={doc} onClose={() => setShowHistory(false)} />}
+      {/* commitColorDraft: one undoable op per gesture end (release, key,
+          blur), skipped when the draft equals the committed grade —
+          tab-through must not spam history. Reads the ref: input events
+          batch and a render-closure draft would be stale. */}
+      {colorEdit && selectedVideoClip && (
+        <div className="color-panel">
+          <div className="panel-header">
+            <h3>🎨 {selectedVideoClip.name}</h3>
+            <button
+              className="btn secondary"
+              title="Clear the grade (undoable)"
+              onClick={() => {
+                doc.apply({ op_id: oid(), type: "set_clip_color", clip_id: colorEdit.clipId });
+                setColorEdit(null);
+              }}
+            >
+              Reset
+            </button>
+            <button className="btn secondary" onClick={() => setColorEdit(null)}>×</button>
+          </div>
+          {(
+            [
+              ["exposure", "Exposure", -3, 3, 0.05],
+              ["contrast", "Contrast", 0, 2, 0.01],
+              ["temp", "Temp", -1, 1, 0.01],
+            ] as const
+          ).map(([key, label, min, max, step]) => (
+            <label key={key} className="color-slider">
+              <span className="meta">{label}</span>
+              <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={colorEdit.draft[key]}
+                onChange={(e) => {
+                  // Functional update: rapid input events batch, and a
+                  // render-closure draft would drop the other sliders' moves.
+                  const v = Number(e.target.value);
+                  setColorEdit((cur) => (cur ? { clipId: cur.clipId, draft: { ...cur.draft, [key]: v } } : cur));
+                }}
+                onPointerUp={commitColorDraft}
+                onKeyUp={(e) => {
+                  // Every key that moves a range input, not just arrows —
+                  // Home/End/Page* previewing a grade that never commits
+                  // would silently drop what the user just saw.
+                  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(e.key))
+                    commitColorDraft();
+                }}
+                onBlur={commitColorDraft}
+              />
+              <span className="meta">{colorEdit.draft[key].toFixed(2)}</span>
+            </label>
+          ))}
+        </div>
+      )}
       {engineOn ? (
         <div className="tl-preview">
-          <EngineCanvas segments={segments} time={time} playing={playing} srcFor={srcFor} onError={setEngineError} />
+          <EngineCanvas segments={segments} time={time} playing={playing} grades={grades} srcFor={srcFor} onError={setEngineError} />
           {engineError && <div className="tl-preview-note">{engineError}</div>}
           {active?.shotId && takeByShot.get(active.shotId)?.contentType.startsWith("image/") && (
             <StillOverlay versionId={takeByShot.get(active.shotId)!.versionId} />
@@ -679,7 +796,7 @@ export function TimelinePage(props: {
               return (
                 <div
                   key={c.id}
-                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${track.kind === "caption" ? " tl-cap" : ""}${active?.id === c.id ? " tl-active" : ""}${selected === c.id ? " tl-selected" : ""}`}
+                  className={`tl-clip${c.shotId ? " tl-shot" : ""}${track.kind === "caption" ? " tl-cap" : ""}${c.color ? " tl-graded" : ""}${active?.id === c.id ? " tl-active" : ""}${selected === c.id ? " tl-selected" : ""}`}
                   style={{ left: start * PX_PER_SEC, width }}
                   onPointerDown={(e) => onClipDown(e, "move", c)}
                   onPointerMove={onClipMove}

@@ -53,9 +53,18 @@ func buildExportArgs(
 	frameAt := func(t float64) int { return int(math.Round(t * float64(fps))) }
 	totalF := frameAt(totalS)
 	totalQ := float64(totalF) / float64(fps)
-	scaleChain := fmt.Sprintf(
-		"fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p",
-		fps, p.W, p.H, p.W, p.H)
+	// The color grade slots between scale and pad: the preview colors only
+	// the painted FRAME (canvas filter + multiply rect), never the black
+	// letterbox — contrast ≠ 1 would lift padding to gray if applied after.
+	scaleFor := func(clip *timeline.Clip) string {
+		grade := ""
+		if clip != nil {
+			grade = colorFilter(clip.Color)
+		}
+		return fmt.Sprintf(
+			"fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease%s,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p",
+			fps, p.W, p.H, grade, p.W, p.H)
+	}
 
 	var inputs []string
 	var filters []string
@@ -95,7 +104,7 @@ func buildExportArgs(
 			inputs = append(inputs, "-ss", f(ss), "-t", f(dur), "-i", src.Path)
 			filters = append(filters, fmt.Sprintf(
 				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
-				nInput, scaleChain, f(dur), frames, label))
+				nInput, scaleFor(piece.Clip), f(dur), frames, label))
 			nInput++
 		case src != nil && strings.HasPrefix(src.ContentType, "image/"):
 			// Stills (image takes) hold the frame for the piece duration —
@@ -103,7 +112,7 @@ func buildExportArgs(
 			inputs = append(inputs, "-loop", "1", "-t", f(dur), "-i", src.Path)
 			filters = append(filters, fmt.Sprintf(
 				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
-				nInput, scaleChain, f(dur), frames, label))
+				nInput, scaleFor(nil), f(dur), frames, label)) // stills: no grade in v1 — the preview overlay doesn't color either
 			nInput++
 		default:
 			// Gap — or a clip whose source can't paint (audio on a video
@@ -256,4 +265,38 @@ func buildSRT(st *timeline.State) string {
 func srtTime(t float64) string {
 	ms := int(math.Round(t * 1000))
 	return fmt.Sprintf("%02d:%02d:%02d,%03d", ms/3600000, ms/60000%60, ms/1000%60, ms%1000)
+}
+
+// colorFilter renders a clip grade as one numeric-only lutrgb link (leading
+// comma — empty for neutral). The math is the PREVIEW's, per channel in
+// sRGB: clamp after exposure, clamp after contrast, then attenuation-only
+// temperature gains — canvas `brightness() contrast()` + a multiply-blend
+// rect compute this to within ~1-2 LSB (lutrgb truncates where canvas
+// rounds — the trailing +0.5 makes lutrgb round-half-up; the multiply
+// fill quantizes its gain to 1/255; the golden-frame slice must budget
+// a small tolerance). format=gbrp is LOAD-BEARING: the expressions
+// assume 8-bit (0..255, pivot 127.5), but lutrgb negotiates 9..16-bit
+// GBRP for deep sources — a 10-bit original (phone HDR) would crush to
+// val≤255/1023 (review PR36-H1, reproduced). 8-bit is also exactly what
+// the preview canvas computes, so it is the parity-true depth. The +0.5
+// cannot overflow: clip ≤255, gain ≤1, max 255.5 → 255.
+func colorFilter(c *timeline.Color) string {
+	if c == nil || (c.Exposure == 0 && c.Contrast == 1 && c.Temp == 0) {
+		return ""
+	}
+	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
+	e := math.Pow(2, c.Exposure)
+	rG, gG, bG := 1.0, 1.0, 1.0
+	if c.Temp > 0 { // warm: attenuate blue, a little green
+		gG = 1 - 0.1*c.Temp
+		bG = 1 - 0.3*c.Temp
+	} else if c.Temp < 0 { // cool: attenuate red, a little green
+		rG = 1 + 0.3*c.Temp
+		gG = 1 + 0.1*c.Temp
+	}
+	expr := func(gain float64) string {
+		return fmt.Sprintf("clip((clip(val*%s\\,0\\,255)-127.5)*%s+127.5\\,0\\,255)*%s+0.5",
+			f(e), f(c.Contrast), f(gain))
+	}
+	return fmt.Sprintf(",format=gbrp,lutrgb=r='%s':g='%s':b='%s'", expr(rG), expr(gG), expr(bG))
 }

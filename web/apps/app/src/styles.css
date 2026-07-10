@@ -515,3 +515,15 @@ kbd { background: var(--bg); border: 1px solid var(--border); border-radius: 4px
   background: rgba(0, 0, 0, 0.65); color: #fff; font-size: 15px; text-align: center;
   pointer-events: none; white-space: pre-wrap;
 }
+
+/* Color panel (M7) */
+.color-panel {
+  position: absolute; right: 16px; top: 96px; z-index: 30; width: 280px;
+  background: #1d1f24; border: 1px solid #333; border-radius: 8px; padding: 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.color-slider { display: flex; align-items: center; gap: 8px; }
+.color-slider > .meta:first-child { width: 64px; }
+.color-slider > .meta:last-child { width: 42px; text-align: right; }
+.color-slider input[type="range"] { flex: 1; }
+.tl-clip.tl-graded { border-bottom: 2px solid #c9a86a; }

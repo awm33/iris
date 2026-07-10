@@ -315,3 +315,69 @@ func TestBuildExportArgsCombinedInputOrdering(t *testing.T) {
 		}
 	}
 }
+
+// Color grades render as one numeric lutrgb between scale and pad (the
+// preview never colors the letterbox), stills stay ungraded in v1, and a
+// neutral grade adds nothing.
+func TestBuildExportArgsColorGrade(t *testing.T) {
+	graded := &timeline.Clip{ID: "g", Name: "g", VersionID: "v1",
+		Color: &timeline.Color{Exposure: 1, Contrast: 0.8, Temp: 0.5}}
+	neutral := &timeline.Clip{ID: "n", Name: "n", VersionID: "v1",
+		Color: &timeline.Color{Exposure: 0, Contrast: 1, Temp: 0}}
+	args, err := buildExportArgs(
+		[]timeline.Piece{
+			{Start: 0, Duration: 1, Clip: graded},
+			{Start: 1, Duration: 1, Clip: neutral},
+		},
+		nil, map[string]string{"g": "v1", "n": "v1"},
+		map[string]*exportSource{"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30}},
+		exportPresets["draft"], 24, 2, nil, "/t/out.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := graphOf(t, args)
+	// exposure 1 → ×2; contrast 0.8 around 127.5; warm 0.5 → g×0.95 b×0.85.
+	// format=gbrp forces 8-bit before the 0..255 expressions (10-bit
+	// sources negotiate deep GBRP and would crush); +0.5 rounds like the
+	// canvas instead of truncating.
+	want := "force_original_aspect_ratio=decrease," +
+		"format=gbrp,lutrgb=r='clip((clip(val*2.000000\\,0\\,255)-127.5)*0.800000+127.5\\,0\\,255)*1.000000+0.5'" +
+		":g='clip((clip(val*2.000000\\,0\\,255)-127.5)*0.800000+127.5\\,0\\,255)*0.950000+0.5'" +
+		":b='clip((clip(val*2.000000\\,0\\,255)-127.5)*0.800000+127.5\\,0\\,255)*0.850000+0.5',pad="
+	if !strings.Contains(graph, want) {
+		t.Errorf("graded piece missing format=gbrp,lutrgb between scale and pad\ngraph: %s", graph)
+	}
+	if strings.Count(graph, "lutrgb") != 1 {
+		t.Errorf("neutral grade must add no filter (want exactly 1 lutrgb): %s", graph)
+	}
+}
+
+// Cool temps attenuate red/green; stills stay ungraded even when their
+// clip carries a grade (the preview's <img> overlay doesn't color in v1).
+func TestBuildExportArgsColorCoolAndStill(t *testing.T) {
+	cool := &timeline.Clip{ID: "c", Name: "c", VersionID: "v1",
+		Color: &timeline.Color{Exposure: 0, Contrast: 1, Temp: -1}}
+	still := &timeline.Clip{ID: "s", Name: "s", VersionID: "v2",
+		Color: &timeline.Color{Exposure: 2, Contrast: 2, Temp: 1}}
+	args, err := buildExportArgs(
+		[]timeline.Piece{
+			{Start: 0, Duration: 1, Clip: cool},
+			{Start: 1, Duration: 1, Clip: still},
+		},
+		nil, map[string]string{"c": "v1", "s": "v2"},
+		map[string]*exportSource{
+			"v1": {Path: "/t/a.mp4", ContentType: "video/mp4", DurationS: 30},
+			"v2": {Path: "/t/b.png", ContentType: "image/png"},
+		},
+		exportPresets["draft"], 24, 2, nil, "/t/out.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := graphOf(t, args)
+	if !strings.Contains(graph, "*0.700000+0.5':g='") || !strings.Contains(graph, "*0.900000+0.5':b='") {
+		t.Errorf("cool temp gains wrong (want r×0.70, g×0.90): %s", graph)
+	}
+	if strings.Count(graph, "lutrgb") != 1 {
+		t.Errorf("still must stay ungraded (want exactly 1 lutrgb): %s", graph)
+	}
+}

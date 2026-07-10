@@ -8,6 +8,15 @@ import { type CanvasOp, newOpId } from "./ops";
 
 export type TrackKind = "video" | "audio" | "caption";
 
+/** Per-clip color grade (M7). Neutral = {exposure: 0, contrast: 1, temp: 0}.
+ * The value ranges are reducer-clamped; the MATH is fixed by parity with
+ * the export's lutrgb pipeline — see docs/design plan PR 36. */
+export interface ClipColor {
+  exposure: number; // stops, -3..3
+  contrast: number; // 0..2, 1 = neutral
+  temp: number; // -1 (cool) .. 1 (warm), attenuation-only gains
+}
+
 export interface ClipInit {
   id: string;
   name: string;
@@ -18,6 +27,8 @@ export interface ClipInit {
   shot_id?: string;
   /** Caption clip: the text shown for the clip's span (caption tracks). */
   text?: string;
+  /** Color grade (video clips; absent = neutral). */
+  color?: ClipColor;
   start: number; // timeline position, seconds
   duration: number; // seconds on the timeline
   in_point?: number; // source in, seconds (default 0)
@@ -37,6 +48,7 @@ export type TimelineOp =
     }
   | { op_id: string; type: "trim_clip"; clip_id: string; start?: number; duration?: number; in_point?: number }
   | { op_id: string; type: "set_clip_text"; clip_id: string; text: string }
+  | { op_id: string; type: "set_clip_color"; clip_id: string; color?: ClipColor }
   | { op_id: string; type: "undo"; target: string };
 
 export interface ClipState {
@@ -45,9 +57,18 @@ export interface ClipState {
   versionId?: string;
   shotId?: string;
   text?: string;
+  color?: ClipColor;
   start: number;
   duration: number;
   inPoint: number;
+}
+
+/** Reducer clamp for color values — MUST match the Go port exactly.
+ * Non-finite (JSON null/absent field) lands on the field's neutral. */
+export function clampColor(c: ClipColor): ClipColor {
+  const f = (v: number, neutral: number, lo: number, hi: number) =>
+    Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : neutral;
+  return { exposure: f(c.exposure, 0, -3, 3), contrast: f(c.contrast, 1, 0, 2), temp: f(c.temp, 0, -1, 1) };
 }
 
 export interface TrackState {
@@ -106,6 +127,7 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
           versionId: op.clip.version_id,
           shotId: op.clip.shot_id,
           text: op.clip.text,
+          color: op.clip.color && clampColor(op.clip.color),
           start: Math.max(0, op.clip.start),
           duration: Math.max(MIN_CLIP_S, op.clip.duration),
           inPoint: Math.max(0, op.clip.in_point ?? 0),
@@ -150,6 +172,11 @@ export function reduceTimeline(ops: TimelineOp[]): TimelineState {
       case "set_clip_text": {
         const hit = findClip(op.clip_id);
         if (hit) hit[1].text = op.text;
+        break;
+      }
+      case "set_clip_color": {
+        const hit = findClip(op.clip_id);
+        if (hit) hit[1].color = op.color && clampColor(op.color);
         break;
       }
     }
@@ -202,6 +229,7 @@ export function bladeOps(
           version_id: clip.versionId,
           shot_id: clip.shotId,
           text: clip.text,
+          color: clip.color,
           start: rt,
           // Placeholders have no source: content anchoring is meaningless,
           // and a nonzero in_point would skew their left-trim clamp.

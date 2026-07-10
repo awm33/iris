@@ -80,7 +80,8 @@
             "in_point": 0,
             "version_id": "vv_a",
             "shot_id": "",
-            "text": ""
+            "text": "",
+            "color": null
           },
           {
             "id": "b",
@@ -89,7 +90,8 @@
             "in_point": 0,
             "version_id": "vv_b",
             "shot_id": "",
-            "text": ""
+            "text": "",
+            "color": null
           }
         ]
       },

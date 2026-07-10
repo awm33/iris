@@ -21,6 +21,7 @@ type vecClip struct {
 	VersionID string  `json:"version_id"`
 	ShotID    string  `json:"shot_id"`
 	Text      string  `json:"text"`
+	Color     *Color  `json:"color"`
 }
 
 type vecTrack struct {
@@ -86,7 +87,7 @@ func normalize(st *State) []vecTrack {
 			vt.Clips = append(vt.Clips, vecClip{
 				ID: c.ID, Start: c.Start, Duration: c.Duration,
 				InPoint: c.InPoint, VersionID: c.VersionID, ShotID: c.ShotID,
-				Text: c.Text,
+				Text: c.Text, Color: c.Color,
 			})
 		}
 		out = append(out, vt)
