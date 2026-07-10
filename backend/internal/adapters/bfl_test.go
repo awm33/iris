@@ -340,3 +340,42 @@ func TestBFLPollErrorClassification(t *testing.T) {
 		t.Fatalf("unknown Error details must default transient, got %v", err)
 	}
 }
+
+// Re-attach (PR 41): a fresh adapter instance (post-restart) attaches via
+// the persisted handle and polls the SAME remote task to completion,
+// bridging into the NEW attempt's upload target — no re-submission.
+func TestBFLAttachJob(t *testing.T) {
+	a, mock, uploads := bflPair(t)
+	st, err := a.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "job-a1", Task: "t2i", Prompt: "attach me", Seed: 7,
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: uploads.URL + "/a1.png", ContentType: "image/png"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Handle) == 0 {
+		t.Fatal("CreateJob must return a handle")
+	}
+
+	// "Restart": a brand-new adapter instance with an empty job map.
+	fresh := newBFL(mock.URL, "k")
+	if err := fresh.AttachJob("job-a2", st.Handle, &inference.Upload{
+		Artifacts: []inference.UploadTarget{{PutURL: uploads.URL + "/a2.png", ContentType: "image/png"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	final, err := pollUntilTerminal(t, fresh, "job-a2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !final.Artifacts[0].Uploaded {
+		t.Fatal("attached job must bridge the artifact")
+	}
+	// The bridge landed in the NEW attempt's key.
+	if res, _ := http.Get(uploads.URL + "/a2.png"); res.StatusCode != http.StatusOK {
+		t.Fatal("artifact must land at the new attempt's target")
+	}
+	if err := fresh.AttachJob("j", json.RawMessage(`{"nope":1}`), nil); err == nil {
+		t.Fatal("unusable handle must error (orchestrator falls back to re-submit)")
+	}
+}

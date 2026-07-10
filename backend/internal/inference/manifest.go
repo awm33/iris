@@ -50,7 +50,8 @@ type Manifest struct {
 		Seed           bool  `json:"seed"`
 		NegativePrompt bool  `json:"negative_prompt"`
 	} `json:"features"`
-	Pricing struct {
+	ParamsSchema json.RawMessage `json:"params_schema"`
+	Pricing      struct {
 		Unit      string             `json:"unit"`
 		Estimates map[string]float64 `json:"estimates"`
 	} `json:"pricing"`
@@ -181,8 +182,18 @@ func (m *Manifest) Validate(req *CreateJobRequest) error {
 			return invalid("model %s does not support source_image conditioning", m.ID)
 		}
 	}
-	// TODO(M2 follow-up): validate req.Params against manifest.params_schema
-	// (JSON Schema) — the advanced panel needs it before exposure in the UI.
+	// Params validate against the declared schema; params against a model
+	// that declares none are rejected outright — an undeclared param must
+	// fail HERE, not get forwarded to a paid endpoint or silently dropped
+	// (before-real-keys, PR 41).
+	if len(req.Params) > 0 && string(req.Params) != "null" && string(req.Params) != "{}" {
+		if len(m.ParamsSchema) == 0 {
+			return invalid("model %s declares no params", m.ID)
+		}
+		if err := ValidateParams(m.ParamsSchema, req.Params); err != nil {
+			return invalid("params rejected: %v", err)
+		}
+	}
 	return nil
 }
 

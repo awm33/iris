@@ -178,3 +178,19 @@ func TestSeedanceAudioRefBecomesLipSyncContent(t *testing.T) {
 	}
 	t.Fatalf("audio reference did not become a lip_sync audio_url content item: %s", created)
 }
+
+// The Ark text-command channel belongs to the adapter: user "--" tokens
+// are stripped (orphaned values stay as harmless prompt words).
+func TestStripArkFlags(t *testing.T) {
+	cases := map[string]string{
+		"a quiet diner":                        "a quiet diner",
+		"a diner --duration 99":                "a diner 99",
+		"--resolution 4k neon rain --seed 1 x": "4k neon rain 1 x",
+		"--":                                   "",
+	}
+	for in, want := range cases {
+		if got := stripArkFlags(in); got != want {
+			t.Errorf("stripArkFlags(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

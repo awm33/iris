@@ -270,12 +270,39 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 	if err != nil {
 		return err
 	}
-	status, err := client.CreateJob(ctx, infReq)
-	if err != nil {
-		if isUnreachable(err) {
-			return errUnreachable{err}
+	// Re-attach before re-submit: a reclaimed job whose previous attempt
+	// already created a remote task polls THAT task instead of paying for
+	// a duplicate (before-real-keys, PR 41). The upload target is this
+	// attempt's fresh presign, so custody lands in the current key. An
+	// unusable handle falls back to a clean re-submit.
+	var status *inference.JobStatus
+	attached := false
+	if len(job.RemoteHandle) > 0 {
+		if att, ok := client.(adapters.Attacher); ok {
+			if aerr := att.AttachJob(infReq.ID, job.RemoteHandle, infReq.Upload); aerr == nil {
+				slog.Info("re-attached to remote task", "job", job.ID, "attempt", job.Attempts)
+				status = &inference.JobStatus{ID: infReq.ID, State: "running"}
+				attached = true
+			} else {
+				slog.Warn("remote handle unusable — re-submitting", "job", job.ID, "err", aerr)
+			}
 		}
-		return err
+	}
+	if !attached {
+		status, err = client.CreateJob(ctx, infReq)
+		if err != nil {
+			if isUnreachable(err) {
+				return errUnreachable{err}
+			}
+			return err
+		}
+		if len(status.Handle) > 0 {
+			// Persistence is best-effort: losing it only re-exposes the
+			// pre-PR41 re-submit behavior on a later reclaim.
+			if herr := queue.SetGenerationJobHandle(ctx, o.Pool, job.ID, o.Name, status.Handle); herr != nil {
+				slog.Warn("persisting remote handle failed", "job", job.ID, "err", herr)
+			}
+		}
 	}
 
 	// Poll with heartbeats: the heartbeat also detects cancellation (the

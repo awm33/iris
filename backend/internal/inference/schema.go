@@ -44,3 +44,28 @@ func ValidateManifestDocument(raw []byte) error {
 	}
 	return nil
 }
+
+// ValidateParams checks a job's params blob against a manifest's
+// params_schema (before-real-keys: a param the model never declared must
+// be rejected at the API, not forwarded to a paid endpoint or silently
+// dropped). Compilation is per-call — job creation is low-rate and the
+// schemas are tiny; cache when that stops being true.
+func ValidateParams(paramsSchema, params []byte) error {
+	compiler := jsonschema.NewCompiler()
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(paramsSchema))
+	if err != nil {
+		return fmt.Errorf("endpoint params_schema is not valid JSON: %w", err)
+	}
+	if err := compiler.AddResource("urn:iris:params-schema", doc); err != nil {
+		return fmt.Errorf("endpoint params_schema unusable: %w", err)
+	}
+	s, err := compiler.Compile("urn:iris:params-schema")
+	if err != nil {
+		return fmt.Errorf("endpoint params_schema uncompilable: %w", err)
+	}
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(params))
+	if err != nil {
+		return fmt.Errorf("params are not valid JSON: %w", err)
+	}
+	return s.Validate(inst)
+}

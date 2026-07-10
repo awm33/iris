@@ -120,6 +120,12 @@ type JobStatus struct {
 	Artifacts []Artifact `json:"artifacts"`
 	Error     *JobError  `json:"error"`
 	Metrics   *Metrics   `json:"metrics"`
+	// Handle is an adapter-defined remote pointer (task id, polling URL)
+	// returned at CreateJob so the orchestrator can persist it and
+	// RE-ATTACH after a restart instead of re-submitting a paid
+	// generation (before-real-keys, PR 41). Spec-speaking remote services
+	// simply omit it.
+	Handle json.RawMessage `json:"handle,omitempty"`
 }
 
 // Metrics: endpoint-reported spend indicators (spec §3). For commercial

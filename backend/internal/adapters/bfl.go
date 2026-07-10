@@ -267,7 +267,24 @@ func (b *bfl) CreateJob(ctx context.Context, req *inference.CreateJobRequest) (*
 	b.mu.Lock()
 	b.jobs[req.ID] = &bflJob{PollingURL: created.PollingURL, Upload: req.Upload}
 	b.mu.Unlock()
-	return &inference.JobStatus{ID: req.ID, State: "queued"}, nil
+	handle, _ := json.Marshal(map[string]string{"polling_url": created.PollingURL})
+	return &inference.JobStatus{ID: req.ID, State: "queued", Handle: handle}, nil
+}
+
+// AttachJob re-binds a reclaimed job to its still-running remote task —
+// the persisted handle carries the polling_url; the upload target is the
+// NEW attempt's (fresh presign), so custody lands in the current key.
+func (b *bfl) AttachJob(id string, handle json.RawMessage, upload *inference.Upload) error {
+	var h struct {
+		PollingURL string `json:"polling_url"`
+	}
+	if err := json.Unmarshal(handle, &h); err != nil || h.PollingURL == "" {
+		return fmt.Errorf("bfl: unusable handle: %v", err)
+	}
+	b.mu.Lock()
+	b.jobs[id] = &bflJob{PollingURL: h.PollingURL, Upload: upload}
+	b.mu.Unlock()
+	return nil
 }
 
 func (b *bfl) GetJob(ctx context.Context, id string) (*inference.JobStatus, error) {
