@@ -51,6 +51,15 @@ func For(kind, baseURL, authRef string) (Client, error) {
 	}
 }
 
+// Attacher lets the orchestrator RE-ATTACH a reclaimed job to its
+// still-running remote task using the persisted JobStatus.Handle, instead
+// of re-submitting (a duplicate paid generation). Optional: adapters
+// without it (and sync adapters, which have no remote task) re-submit as
+// before.
+type Attacher interface {
+	AttachJob(id string, handle json.RawMessage, upload *inference.Upload) error
+}
+
 // InProcess reports whether this kind's adapter executes inside the
 // orchestrator process (commercial translators) rather than as a separate
 // service speaking our spec. In-process adapters must receive INTERNAL

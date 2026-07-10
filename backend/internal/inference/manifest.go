@@ -50,7 +50,8 @@ type Manifest struct {
 		Seed           bool  `json:"seed"`
 		NegativePrompt bool  `json:"negative_prompt"`
 	} `json:"features"`
-	Pricing struct {
+	ParamsSchema json.RawMessage `json:"params_schema"`
+	Pricing      struct {
 		Unit      string             `json:"unit"`
 		Estimates map[string]float64 `json:"estimates"`
 	} `json:"pricing"`
@@ -181,8 +182,18 @@ func (m *Manifest) Validate(req *CreateJobRequest) error {
 			return invalid("model %s does not support source_image conditioning", m.ID)
 		}
 	}
-	// TODO(M2 follow-up): validate req.Params against manifest.params_schema
-	// (JSON Schema) — the advanced panel needs it before exposure in the UI.
+	// Params validate against the declared schema; params against a model
+	// that declares none are rejected outright — an undeclared param must
+	// fail HERE, not get forwarded to a paid endpoint or silently dropped
+	// (before-real-keys, PR 41).
+	if hasParams(req.Params) {
+		if len(m.ParamsSchema) == 0 {
+			return invalid("model %s declares no params", m.ID)
+		}
+		if err := ValidateParams(m.ParamsSchema, req.Params); err != nil {
+			return invalid("params rejected: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -193,4 +204,18 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// hasParams: semantically non-empty params. Byte-literal checks would
+// reject a pretty-printed "{ }" against a schema-less model — parse, don't
+// pattern-match (review PR41-F5).
+func hasParams(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return true // not an object/null — let schema validation produce the real error
+	}
+	return len(m) > 0
 }

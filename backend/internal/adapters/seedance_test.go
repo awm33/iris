@@ -178,3 +178,62 @@ func TestSeedanceAudioRefBecomesLipSyncContent(t *testing.T) {
 	}
 	t.Fatalf("audio reference did not become a lip_sync audio_url content item: %s", created)
 }
+
+// The Ark text-command channel belongs to the adapter: user "--" tokens
+// are stripped (orphaned values stay as harmless prompt words).
+func TestStripArkFlags(t *testing.T) {
+	cases := map[string]string{
+		"a quiet diner":                        "a quiet diner",
+		"a diner --duration 99":                "a diner 99",
+		"--resolution 4k neon rain --seed 1 x": "4k neon rain 1 x",
+		"--":                                   "",
+	}
+	for in, want := range cases {
+		if got := stripArkFlags(in); got != want {
+			t.Errorf("stripArkFlags(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Re-attach (PR 41): a fresh seedance instance attaches via the persisted
+// handle, polls the SAME Ark task to completion, bridges into the NEW
+// attempt's upload, and cancel-after-attach reaches the remote task (the
+// map entry the attach seeded).
+func TestSeedanceAttachJob(t *testing.T) {
+	sd, mock, sink, uploaded := testStack(t)
+	st, err := sd.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "att-a1", Task: "t2v", Prompt: "reattach me", Seed: 3,
+		Output: &inference.Output{Width: 864, Height: 480, DurationS: 5},
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: sink.URL + "/a1", ContentType: "video/mp4"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Handle) == 0 {
+		t.Fatal("CreateJob must return a handle")
+	}
+
+	fresh := newSeedance(mock.URL, "k")
+	if err := fresh.AttachJob("att-a2", st.Handle, &inference.Upload{
+		Artifacts: []inference.UploadTarget{{PutURL: sink.URL + "/a2", ContentType: "video/mp4"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	final := waitTerminal(t, fresh, "att-a2")
+	if final.State != "complete" || len(*uploaded) == 0 {
+		t.Fatalf("attached job must complete and bridge: %+v", final)
+	}
+
+	// Cancel path after attach: the seeded map entry must reach the remote.
+	another := newSeedance(mock.URL, "k")
+	if err := another.AttachJob("att-a3", st.Handle, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := another.CancelJob(context.Background(), "att-a3"); err != nil {
+		t.Fatalf("cancel after attach must reach the remote task: %v", err)
+	}
+
+	if err := fresh.AttachJob("bad", json.RawMessage(`{"x":1}`), nil); err == nil {
+		t.Fatal("unusable handle must error")
+	}
+}

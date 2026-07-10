@@ -137,8 +137,12 @@ type sdTask struct {
 
 func (s *seedance) CreateJob(ctx context.Context, req *inference.CreateJobRequest) (*inference.JobStatus, error) {
 	// Seedance takes generation params as text-command suffixes (recorded
-	// convention) rather than structured fields.
-	text := req.Prompt
+	// convention) rather than structured fields. The text-command channel
+	// is OURS: user-supplied "--flag" tokens are stripped so a prompt
+	// containing "--duration 99" can't inject cost-controlling commands
+	// (before-real-keys ticket item). Orphaned values remain as harmless
+	// prompt words.
+	text := stripArkFlags(req.Prompt)
 	if out := req.Output; out != nil {
 		if out.DurationS > 0 {
 			text += fmt.Sprintf(" --duration %d", int(out.DurationS+0.5))
@@ -198,7 +202,35 @@ func (s *seedance) CreateJob(ctx context.Context, req *inference.CreateJobReques
 	}
 	s.jobs[req.ID] = &seedanceJob{remoteID: task.ID, putURL: putURL, contentType: contentType, billableS: billable}
 	s.mu.Unlock()
-	return &inference.JobStatus{ID: req.ID, State: "queued"}, nil
+	handle, _ := json.Marshal(map[string]any{"task_id": task.ID, "billable_s": billable, "content_type": contentType})
+	return &inference.JobStatus{ID: req.ID, State: "queued", Handle: handle}, nil
+}
+
+// AttachJob re-binds a reclaimed job to its still-running Ark task — the
+// upload target is the NEW attempt's fresh presign.
+func (s *seedance) AttachJob(id string, handle json.RawMessage, upload *inference.Upload) error {
+	var h struct {
+		TaskID      string  `json:"task_id"`
+		BillableS   float64 `json:"billable_s"`
+		ContentType string  `json:"content_type"`
+	}
+	if err := json.Unmarshal(handle, &h); err != nil || h.TaskID == "" {
+		return fmt.Errorf("seedance: unusable handle: %v", err)
+	}
+	putURL, contentType := "", "video/mp4"
+	if h.ContentType != "" {
+		contentType = h.ContentType
+	}
+	if upload != nil && len(upload.Artifacts) > 0 {
+		putURL = upload.Artifacts[0].PutURL
+		if upload.Artifacts[0].ContentType != "" {
+			contentType = upload.Artifacts[0].ContentType
+		}
+	}
+	s.mu.Lock()
+	s.jobs[id] = &seedanceJob{remoteID: h.TaskID, putURL: putURL, contentType: contentType, billableS: h.BillableS}
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *seedance) GetJob(ctx context.Context, id string) (*inference.JobStatus, error) {
@@ -379,4 +411,21 @@ func (s *seedance) call(ctx context.Context, method, path string, body, out any)
 		return json.NewDecoder(res.Body).Decode(out)
 	}
 	return nil
+}
+
+// stripArkFlags removes "--"-prefixed tokens from user text — the Ark
+// text-command channel belongs to the adapter, never the prompt author.
+// LIVE-VERIFY: whether Ark also accepts unicode dashes (em-dash — macOS
+// auto-substitutes typed "--") or mid-token "--"; and whether an empty
+// text item (a flags-only prompt with no Output) 422s.
+func stripArkFlags(p string) string {
+	fields := strings.Fields(p)
+	out := fields[:0]
+	for _, f := range fields {
+		if strings.HasPrefix(f, "--") {
+			continue
+		}
+		out = append(out, f)
+	}
+	return strings.Join(out, " ")
 }

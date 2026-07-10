@@ -32,6 +32,7 @@ type GenerationJob struct {
 	Request        []byte // resolved request JSON (prompt, refs as asset ids, output, params, seed)
 	DependsOnJobID string // set = the dispatch-time carry source (chain regeneration)
 	Attempts       int
+	RemoteHandle   []byte // adapter's persisted remote pointer (re-attach on reclaim)
 }
 
 // ClaimGenerationJobs claims runnable sub-jobs: queued, due, and either
@@ -54,7 +55,8 @@ func ClaimGenerationJobs(ctx context.Context, pool *pgxpool.Pool, worker string,
 		FROM next WHERE j.id = next.id
 		RETURNING j.id, j.workspace_id, j.project_id, j.endpoint_id,
 		          COALESCE(j.parent_job_id, ''), COALESCE(j.target_entity_id, ''),
-		          j.task, j.profile, j.request, COALESCE(j.depends_on_job_id, ''), j.attempts`,
+		          j.task, j.profile, j.request, COALESCE(j.depends_on_job_id, ''), j.attempts,
+		          j.remote_handle`,
 		limit, worker)
 	if err != nil {
 		return nil, err
@@ -65,7 +67,7 @@ func ClaimGenerationJobs(ctx context.Context, pool *pgxpool.Pool, worker string,
 		j := &GenerationJob{}
 		if err := rows.Scan(&j.ID, &j.WorkspaceID, &j.ProjectID, &j.EndpointID,
 			&j.ParentJobID, &j.TargetEntityID, &j.Task, &j.Profile, &j.Request,
-			&j.DependsOnJobID, &j.Attempts); err != nil {
+			&j.DependsOnJobID, &j.Attempts, &j.RemoteHandle); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, j)
@@ -462,4 +464,45 @@ func backoffFor(attempts int) time.Duration {
 		d *= 2
 	}
 	return d
+}
+
+// SetGenerationJobHandle persists the adapter's remote pointer. ATTEMPT-
+// granular ownership: claimed_by alone is worker-name-granular, and a
+// single orchestrator reaping its own stuck job would let the stale
+// goroutine's late persist overwrite the successor attempt's handle
+// (attempts increments per reclaim, so it disambiguates for free).
+func SetGenerationJobHandle(ctx context.Context, pool *pgxpool.Pool, jobID, worker string, attempts int, handle []byte) error {
+	tag, err := pool.Exec(ctx, `
+		UPDATE generation_jobs SET remote_handle = $3, updated_at = now()
+		WHERE id = $1 AND claimed_by = $2 AND attempts = $4 AND state IN ('dispatched', 'running')`,
+		jobID, worker, handle, attempts)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotOwner
+	}
+	return nil
+}
+
+// ClearGenerationJobHandle drops the remote pointer once the remote task is
+// observed TERMINAL (failed/canceled/expired): re-attaching to a corpse
+// would burn every remaining attempt polling it — the next attempt must
+// submit fresh. Same attempt-granular guard as the setter.
+func ClearGenerationJobHandle(ctx context.Context, pool *pgxpool.Pool, jobID, worker string, attempts int) error {
+	_, err := pool.Exec(ctx, `
+		UPDATE generation_jobs SET remote_handle = NULL, updated_at = now()
+		WHERE id = $1 AND claimed_by = $2 AND attempts = $3`,
+		jobID, worker, attempts)
+	return err
+}
+
+// GenerationJobState reads the row's current state — the poll loop uses it
+// to distinguish "the user canceled" (cancel the remote task) from "the
+// job was reclaimed by a successor attempt" (the remote task now belongs
+// to the successor: leave it alone).
+func GenerationJobState(ctx context.Context, pool *pgxpool.Pool, jobID string) (string, error) {
+	var state string
+	err := pool.QueryRow(ctx, `SELECT state FROM generation_jobs WHERE id = $1`, jobID).Scan(&state)
+	return state, err
 }

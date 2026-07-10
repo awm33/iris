@@ -195,10 +195,14 @@ func TestBFLModerationMapsToSafetyBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = a.GetJob(context.Background(), "job-3")
-	var je *inference.JobError
-	if !asJobError(err, &je) || je.Code != "safety_blocked" || je.Retryable {
-		t.Fatalf("want terminal safety_blocked, got %v", err)
+	st, err := a.GetJob(context.Background(), "job-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Task-terminal = STATUS-shaped failure (the orchestrator clears the
+	// handle on these), never a Go error (those mean transport blips).
+	if st.State != "failed" || st.Error == nil || st.Error.Code != "safety_blocked" || st.Error.Retryable {
+		t.Fatalf("want failed status with terminal safety_blocked, got %+v", st)
 	}
 }
 
@@ -327,16 +331,72 @@ func TestBFLPollErrorClassification(t *testing.T) {
 	if _, err := a.CreateJob(context.Background(), &inference.CreateJobRequest{ID: "j", Task: "t2i", Prompt: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := a.GetJob(context.Background(), "j")
-	var je *inference.JobError
-	if !asJobError(err, &je) || je.Code != "safety_blocked" {
-		t.Fatalf("moderation details must classify safety_blocked, got %v", err)
+	st, err := a.GetJob(context.Background(), "j")
+	if err != nil || st.State != "failed" || st.Error == nil || st.Error.Code != "safety_blocked" {
+		t.Fatalf("moderation details must classify safety_blocked failure, got %+v / %v", st, err)
 	}
 	details = `"gpu fell over"`
 	a2 := newBFL(srv.URL, "k")
 	_, _ = a2.CreateJob(context.Background(), &inference.CreateJobRequest{ID: "j2", Task: "t2i", Prompt: "x"})
-	_, err = a2.GetJob(context.Background(), "j2")
-	if !asJobError(err, &je) || je.Code != "transient" || !je.Retryable {
-		t.Fatalf("unknown Error details must default transient, got %v", err)
+	st, err = a2.GetJob(context.Background(), "j2")
+	if err != nil || st.State != "failed" || st.Error == nil || st.Error.Code != "transient" || !st.Error.Retryable {
+		t.Fatalf("unknown Error details must default transient failure, got %+v / %v", st, err)
+	}
+}
+
+// Re-attach (PR 41): a fresh adapter instance (post-restart) attaches via
+// the persisted handle and polls the SAME remote task to completion,
+// bridging into the NEW attempt's upload target — no re-submission.
+func TestBFLAttachJob(t *testing.T) {
+	a, mock, uploads := bflPair(t)
+	st, err := a.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "job-a1", Task: "t2i", Prompt: "attach me", Seed: 7,
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: uploads.URL + "/a1.png", ContentType: "image/png"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Handle) == 0 {
+		t.Fatal("CreateJob must return a handle")
+	}
+
+	// "Restart": a brand-new adapter instance with an empty job map.
+	fresh := newBFL(mock.URL, "k")
+	if err := fresh.AttachJob("job-a2", st.Handle, &inference.Upload{
+		Artifacts: []inference.UploadTarget{{PutURL: uploads.URL + "/a2.png", ContentType: "image/png"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	final, err := pollUntilTerminal(t, fresh, "job-a2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !final.Artifacts[0].Uploaded {
+		t.Fatal("attached job must bridge the artifact")
+	}
+	// The bridge landed in the NEW attempt's key.
+	if res, _ := http.Get(uploads.URL + "/a2.png"); res.StatusCode != http.StatusOK {
+		t.Fatal("artifact must land at the new attempt's target")
+	}
+	if err := fresh.AttachJob("j", json.RawMessage(`{"nope":1}`), nil); err == nil {
+		t.Fatal("unusable handle must error (orchestrator falls back to re-submit)")
+	}
+}
+
+// F1 regression: attaching to a DEAD remote task must surface a
+// status-shaped failure (so the orchestrator clears the handle and the
+// next attempt submits fresh) — never a transport-style error that would
+// keep the corpse handle alive.
+func TestBFLAttachToDeadTask(t *testing.T) {
+	mock := httptest.NewServer(mockbfl.New("k").Handler())
+	defer mock.Close()
+	a := newBFL(mock.URL, "k")
+	handle, _ := json.Marshal(map[string]string{"polling_url": mock.URL + "/v1/poll/never-existed"})
+	if err := a.AttachJob("j-dead", handle, nil); err != nil {
+		t.Fatal(err)
+	}
+	st, err := a.GetJob(context.Background(), "j-dead")
+	if err != nil || st.State != "failed" || st.Error == nil || st.Error.Code != "transient" || !st.Error.Retryable {
+		t.Fatalf("dead task must be a retryable status failure, got %+v / %v", st, err)
 	}
 }
