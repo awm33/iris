@@ -481,3 +481,33 @@ func TestBuildAudioSectionDuckingNegativeOffset(t *testing.T) {
 		t.Errorf("negative-offset duck curve wrong\nwant %q\nin   %s", want, joined)
 	}
 }
+
+// Tagged 601 sources convert to 709 in the scale link; untagged and
+// already-709 sources pass through untouched (converting untagged would
+// hue-shift true-709 HD, the common case).
+func TestBuildExportArgsColorMatrixConversion(t *testing.T) {
+	sd := &timeline.Clip{ID: "sd", Name: "sd", VersionID: "v1"}
+	hd := &timeline.Clip{ID: "hd", Name: "hd", VersionID: "v2"}
+	args, err := buildExportArgs(
+		[]timeline.Piece{
+			{Start: 0, Duration: 1, Clip: sd},
+			{Start: 1, Duration: 1, Clip: hd},
+		},
+		nil, map[string]string{"sd": "v1", "hd": "v2"},
+		map[string]*exportSource{
+			"v1": {Path: "/t/sd.mp4", ContentType: "video/mp4", DurationS: 30, ColorMatrix: "smpte170m"},
+			"v2": {Path: "/t/hd.mp4", ContentType: "video/mp4", DurationS: 30},
+		},
+		exportPresets["draft"], 24, 2, nil, nil, "/t/out.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := graphOf(t, args)
+	if strings.Count(graph, ":in_color_matrix=bt601:out_color_matrix=bt709") != 1 {
+		t.Errorf("tagged-601 source must convert exactly once: %s", graph)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-colorspace bt709") {
+		t.Errorf("output must tag bt709: %s", joined)
+	}
+}
