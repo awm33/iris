@@ -119,6 +119,7 @@ function CharacterCard({ character, projectId }: { character: Character; project
           <input
             type="text"
             placeholder="e.g. mara (ElevenLabs)"
+            maxLength={256}
             value={voiceDraft}
             onChange={(e) => setVoiceDraft(e.target.value)}
             onBlur={() => {

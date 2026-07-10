@@ -34,6 +34,17 @@ describe("prefillFromRecipe", () => {
     expect(p.params).toEqual({ voice_id: "mara" });
   });
 
+  it("carries conditioning.source_video (lipsync replay)", () => {
+    const p = prefillFromRecipe(
+      JSON.stringify({
+        endpoint_id: "e",
+        task: "lipsync_post",
+        request: { conditioning: { source_video: { asset_id: "ast_v", version_id: "astv_v" } } },
+      }),
+    )!;
+    expect(p.sourceVideo).toEqual({ assetId: "ast_v", versionId: "astv_v" });
+  });
+
   it("omits params when none are strings", () => {
     const p = prefillFromRecipe(JSON.stringify({ endpoint_id: "e", request: { params: { n: 1 } } }))!;
     expect(p.params).toBeUndefined();

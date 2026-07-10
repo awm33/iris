@@ -307,6 +307,9 @@ func (s *StoryServer) UpdateCharacter(ctx context.Context, req *connect.Request[
 			return nil, err
 		}
 	}
+	if req.Msg.VoiceId != nil && len([]rune(*req.Msg.VoiceId)) > 256 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("voice_id too long (max 256)"))
+	}
 	c, err := s.Store.UpdateCharacter(ctx, req.Msg.Id, req.Msg.Name, req.Msg.VoiceId)
 	if err != nil {
 		return nil, connectErr(err)

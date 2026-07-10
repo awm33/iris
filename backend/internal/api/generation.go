@@ -433,6 +433,11 @@ func (s *GenerationServer) jobFromTakeRecipe(ctx context.Context, sh *store.Shot
 			Output         json.RawMessage `json:"output"`
 			References     []store.GenRef  `json:"references"`
 			Params         json.RawMessage `json:"params"`
+			Conditioning   *struct {
+				SourceVideo *store.GenRef `json:"source_video"`
+				SourceImage *store.GenRef `json:"source_image"`
+				Mask        *store.GenRef `json:"mask"`
+			} `json:"conditioning"`
 		} `json:"request"`
 	}
 	if err := json.Unmarshal(recipe, &r); err != nil || r.EndpointID == "" {
@@ -452,6 +457,25 @@ func (s *GenerationServer) jobFromTakeRecipe(ctx context.Context, sh *store.Shot
 		// Dropping params would silently replay with different generation
 		// semantics (guidance, motion) than the take being regenerated.
 		j.ParamsJson = string(r.Request.Params)
+	}
+	// Replay conditioning the task depends on — a lipsync_post recipe
+	// without its source_video can't even be created. (first_frame is
+	// deliberately NOT replayed here: chain regeneration re-derives the
+	// carry from the current upstream.)
+	if c := r.Request.Conditioning; c != nil {
+		toRef := func(g *store.GenRef) *irisv1.AssetRef {
+			if g == nil {
+				return nil
+			}
+			return &irisv1.AssetRef{AssetId: g.AssetID, VersionId: g.VersionID}
+		}
+		if c.SourceVideo != nil || c.SourceImage != nil || c.Mask != nil {
+			j.Conditioning = &irisv1.Conditioning{
+				SourceVideo: toRef(c.SourceVideo),
+				SourceImage: toRef(c.SourceImage),
+				Mask:        toRef(c.Mask),
+			}
+		}
 	}
 	if len(r.Request.Output) > 0 {
 		var out struct {

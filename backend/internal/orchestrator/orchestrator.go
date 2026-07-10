@@ -858,10 +858,15 @@ func generatedName(prompt, task, modality string) string {
 		p = string(r[:48]) + "…"
 	}
 	if p == "" {
-		// Empty inpaint prompt is a removal by contract (spec §2).
-		if task == "inpaint" {
+		// Empty inpaint prompt is a removal by contract (spec §2);
+		// lipsync_post is promptless by nature — name it for what it is
+		// rather than piling "untitled" into the library.
+		switch task {
+		case "inpaint":
 			p = "removal"
-		} else {
+		case "lipsync_post":
+			p = "lipsync"
+		default:
 			p = "untitled"
 		}
 	}
