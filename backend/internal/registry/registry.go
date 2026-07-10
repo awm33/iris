@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/awm33/iris/backend/internal/ids"
+	"github.com/awm33/iris/backend/internal/adapters"
 	"github.com/awm33/iris/backend/internal/inference"
 )
 
@@ -44,14 +45,27 @@ func New(pool *pgxpool.Pool) *Registry {
 
 // SeedDevEndpoints registers the dockerized mock endpoints for the dev
 // workspace if absent (mirrors the dev-workspace seed).
-func (r *Registry) SeedDevEndpoints(ctx context.Context, workspaceID string, seeds map[string]string) error {
-	for name, baseURL := range seeds {
+type DevSeed struct {
+	BaseURL string
+	Kind    string // "" = mock (our spec); "seedance" etc. route adapters
+	AuthRef string // vault reference — never the secret itself
+}
+
+func (r *Registry) SeedDevEndpoints(ctx context.Context, workspaceID string, seeds map[string]DevSeed) error {
+	for name, seed := range seeds {
+		kind, authRef := seed.Kind, seed.AuthRef
+		if kind == "" {
+			kind = "mock"
+		}
+		if authRef == "" {
+			authRef = "dev"
+		}
 		_, err := r.pool.Exec(ctx, `
 			INSERT INTO model_endpoints (id, workspace_id, display_name, kind, base_url, auth_ref)
-			SELECT $1, $2, $3, 'mock', $4, 'dev'
+			SELECT $1, $2, $3, $5, $4, $6
 			WHERE NOT EXISTS (
 				SELECT 1 FROM model_endpoints WHERE workspace_id = $2 AND base_url = $4)`,
-			ids.New("mep"), workspaceID, name, baseURL)
+			ids.New("mep"), workspaceID, name, seed.BaseURL, kind, authRef)
 		if err != nil {
 			return err
 		}
@@ -89,7 +103,12 @@ func (r *Registry) Refresh(ctx context.Context) error {
 			ID: e.id, WorkspaceID: e.ws, DisplayName: e.name,
 			Kind: e.kind, BaseURL: e.url, Token: e.token,
 		}
-		client := inference.New(e.url, e.token)
+		client, aerr := adapters.For(e.kind, e.url, e.token)
+		if aerr != nil {
+			slog.Warn("endpoint adapter unavailable", "endpoint", e.name, "err", aerr)
+			fresh[e.id] = ep
+			continue
+		}
 		fctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		raw, err := client.GetManifest(fctx)
 		cancel()
