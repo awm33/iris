@@ -1,0 +1,23 @@
+{
+  "name": "basic add/sort/clamp",
+  "ops": [
+    { "op_id": "t1", "type": "add_track", "track": { "id": "v1", "kind": "video" } },
+    { "op_id": "t2", "type": "add_track", "track": { "id": "a1", "kind": "audio", "name": "Music" } },
+    { "op_id": "c1", "type": "add_clip", "track_id": "v1", "clip": { "id": "b", "name": "b", "version_id": "vv_b", "start": 5, "duration": 2 } },
+    { "op_id": "c2", "type": "add_clip", "track_id": "v1", "clip": { "id": "a", "name": "a", "version_id": "vv_a", "start": -1, "duration": 0.001, "in_point": -3 } },
+    { "op_id": "c3", "type": "add_clip", "track_id": "v1", "clip": { "id": "b", "name": "dup ignored", "start": 9, "duration": 1 } },
+    { "op_id": "c4", "type": "add_clip", "track_id": "missing", "clip": { "id": "z", "name": "z", "start": 0, "duration": 1 } }
+  ],
+  "expected": {
+    "tracks": [
+      {
+        "id": "v1", "kind": "video", "name": "V",
+        "clips": [
+          { "id": "a", "start": 0, "duration": 0.04, "in_point": 0, "version_id": "vv_a", "shot_id": "" },
+          { "id": "b", "start": 5, "duration": 2, "in_point": 0, "version_id": "vv_b", "shot_id": "" }
+        ]
+      },
+      { "id": "a1", "kind": "audio", "name": "Music", "clips": [] }
+    ]
+  }
+}

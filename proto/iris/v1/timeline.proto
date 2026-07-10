@@ -27,7 +27,31 @@ service TimelineService {
   rpc GetTimeline(GetTimelineRequest) returns (GetTimelineResponse);
   rpc AppendTimelineOps(AppendTimelineOpsRequest) returns (AppendTimelineOpsResponse);
   rpc DeleteTimeline(DeleteTimelineRequest) returns (DeleteTimelineResponse);
+  // Export v1 (M7): server render of the timeline to H.264. The render is a
+  // media job; the result lands as a library asset (version_id downloads
+  // through the normal asset signing path).
+  rpc StartExport(StartExportRequest) returns (StartExportResponse);
+  rpc ListExports(ListExportsRequest) returns (ListExportsResponse);
 }
+
+message Export {
+  string id = 1;
+  string timeline_id = 2;
+  string preset = 3; // draft | master
+  string state = 4;  // queued | running | complete | failed
+  string error = 5;
+  string asset_id = 6;   // set when complete
+  string version_id = 7; // set when complete
+  Timestamps timestamps = 15;
+}
+
+message StartExportRequest {
+  string timeline_id = 1;
+  string preset = 2; // "" = draft
+}
+message StartExportResponse { Export export = 1; }
+message ListExportsRequest { string timeline_id = 1; }
+message ListExportsResponse { repeated Export exports = 1; }
 
 message CreateTimelineRequest {
   string project_id = 1;
