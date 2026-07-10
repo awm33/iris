@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { assetClient, timelineClient } from "../api";
 
 // Export v1 (M7): kick a server render and surface its lifecycle inline.
@@ -19,13 +19,30 @@ export function ExportControl(props: { timelineId: string }) {
     mutationFn: () => timelineClient.startExport({ timelineId: props.timelineId, preset }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["exports", props.timelineId] }),
   });
-  const download = useMutation({
-    mutationFn: async (versionId: string) => (await assetClient.signDownload({ versionId })).url,
-    onSuccess: (url) => window.open(url, "_blank"),
-  });
 
   const latest = exports.data?.exports[0];
   const busy = latest?.state === "queued" || latest?.state === "running";
+
+  // Download is a REAL anchor with a pre-signed href: signing inside a
+  // click handler puts window.open after an await, where Safari always —
+  // and Chrome eventually — blocks it as a popup. Presigns expire (15m),
+  // so refresh well inside that.
+  const dl = useQuery({
+    queryKey: ["exportDl", latest?.versionId ?? ""],
+    enabled: latest?.state === "complete" && !!latest.versionId,
+    staleTime: 5 * 60_000,
+    refetchInterval: 10 * 60_000,
+    queryFn: async () => (await assetClient.signDownload({ versionId: latest!.versionId })).url,
+  });
+
+  // The export lands as a library asset — surface it there without a remount.
+  const prevState = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (prevState.current && prevState.current !== "complete" && latest?.state === "complete") {
+      void qc.invalidateQueries({ queryKey: ["assets"] });
+    }
+    prevState.current = latest?.state;
+  }, [latest?.state, qc]);
 
   return (
     <span className="export-control">
@@ -47,15 +64,16 @@ export function ExportControl(props: { timelineId: string }) {
           export failed: {latest.error}
         </span>
       )}
-      {latest?.state === "complete" && latest.versionId && (
-        <button
+      {latest?.state === "complete" && dl.data && (
+        <a
           className="btn secondary"
-          disabled={download.isPending}
+          href={dl.data}
+          target="_blank"
+          rel="noreferrer"
           title={`Download the last export (${latest.preset})`}
-          onClick={() => download.mutate(latest.versionId)}
         >
           ⬇ {latest.preset}.mp4
-        </button>
+        </a>
       )}
     </span>
   );

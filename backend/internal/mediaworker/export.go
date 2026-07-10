@@ -1,7 +1,6 @@
 package mediaworker
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,11 +48,22 @@ var exportPresets = map[string]exportPreset{
 	"master": {W: 1920, H: 1080, CRF: "18", X264: "medium", AudioKbs: "192k"},
 }
 
+// PresetNames is the API's validation source — one list, so a preset the
+// API accepts can never park in the worker as unknown (and vice versa).
+func PresetNames() map[string]bool {
+	out := make(map[string]bool, len(exportPresets))
+	for name := range exportPresets {
+		out[name] = true
+	}
+	return out
+}
+
 // exportSource is one resolved, downloaded input.
 type exportSource struct {
 	Path        string
 	ContentType string
 	HasAudio    bool
+	DurationS   float64 // 0 = unknown (images, durationless containers)
 }
 
 func (w *Worker) runExport(ctx context.Context, job *queue.MediaJob) error {
@@ -86,7 +97,7 @@ func (w *Worker) runExport(ctx context.Context, job *queue.MediaJob) error {
 	}
 	preset, ok := exportPresets[presetName]
 	if !ok {
-		return w.failExport(ctx, job, in.ExportID, permanent(fmt.Errorf("unknown preset %q", presetName)))
+		return w.failExport(job, in.ExportID, permanent(fmt.Errorf("unknown preset %q", presetName)))
 	}
 	if _, err := w.Pool.Exec(ctx, `
 		UPDATE exports SET state = 'running', error = '', updated_at = now()
@@ -94,25 +105,41 @@ func (w *Worker) runExport(ctx context.Context, job *queue.MediaJob) error {
 		return err
 	}
 	if err := w.renderExport(ctx, job, in.ExportID, timelineID, presetName, preset); err != nil {
-		return w.failExport(ctx, job, in.ExportID, err)
+		return w.failExport(job, in.ExportID, err)
 	}
 	return nil
 }
 
-// failExport records the failure on the row (the UI reads it there) and
-// returns the error so the queue's usual retry/park policy still applies —
-// a transient failure that later succeeds flips the row back via 'running'.
-func (w *Worker) failExport(ctx context.Context, _ *queue.MediaJob, exportID string, err error) error {
-	msg := err.Error()
+// failExport records the failure on the row and returns the error so the
+// queue's retry/park policy applies. The row's state must agree with what
+// the queue will actually do: 'failed' is TERMINAL for the UI (polling
+// stops, the button re-enables), so a failure the queue is about to retry
+// records as 'queued' instead — the UI keeps polling and stays busy.
+func (w *Worker) failExport(job *queue.MediaJob, exportID string, jobErr error) error {
+	if errors.Is(jobErr, queue.ErrNotOwner) {
+		return jobErr // another worker owns this render now — don't stomp its row
+	}
+	// Fresh context: the job context is typically already dead here (render
+	// timeout, shutdown) — the same stranding class recordFailure guards
+	// against; an expired ctx would leave the row 'running' forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var perm permanentError
+	state := "failed"
+	if queue.WillRetry(job, !errors.As(jobErr, &perm)) {
+		state = "queued"
+	}
+	msg := jobErr.Error()
 	if len(msg) > 2000 {
-		msg = msg[:2000]
+		msg = strings.ToValidUTF8(msg[:2000], "")
 	}
 	if _, uerr := w.Pool.Exec(ctx, `
-		UPDATE exports SET state = 'failed', error = $2, updated_at = now()
-		WHERE id = $1`, exportID, msg); uerr != nil {
-		return fmt.Errorf("%w (and recording it failed: %v)", err, uerr)
+		UPDATE exports SET state = $2, error = $3, updated_at = now()
+		WHERE id = $1 AND state <> 'complete'`, exportID, state, msg); uerr != nil {
+		return fmt.Errorf("%w (and recording it failed: %v)", jobErr, uerr)
 	}
-	return err
+	return jobErr
 }
 
 func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID, timelineID, presetName string, preset exportPreset) error {
@@ -226,18 +253,31 @@ func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID
 	}
 
 	// 6. Land: content-addressed blob + asset/version rows + lineage +
-	// probe chain + export completion, atomically with the job.
-	data, err := os.ReadFile(outPath)
+	// probe chain + export completion, atomically with the job. Streamed —
+	// a master render of a long timeline must never sit fully in RAM
+	// (prep's proxy discipline).
+	out, err := os.Open(outPath)
 	if err != nil {
 		return err
 	}
-	if len(data) == 0 {
+	defer out.Close()
+	stat, err := out.Stat()
+	if err != nil {
+		return err
+	}
+	size := stat.Size()
+	if size == 0 {
 		return errors.New("ffmpeg produced an empty file")
 	}
-	sum := sha256.Sum256(data)
-	sha := hex.EncodeToString(sum[:])
-	if err := w.Blob.PutObject(ctx, blob.ContentKey(sha), "video/mp4",
-		bytes.NewReader(data), int64(len(data))); err != nil {
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, out); err != nil {
+		return err
+	}
+	sha := hex.EncodeToString(hasher.Sum(nil))
+	if _, err := out.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := w.Blob.PutObject(ctx, blob.ContentKey(sha), "video/mp4", out, size); err != nil {
 		return fmt.Errorf("store export blob: %w", err)
 	}
 
@@ -262,7 +302,7 @@ func (w *Worker) renderExport(ctx context.Context, job *queue.MediaJob, exportID
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO asset_versions (id, asset_id, sha256, content_type, size_bytes)
 		VALUES ($1, $2, $3, 'video/mp4', $4)`,
-		versionID, assetID, sha, len(data)); err != nil {
+		versionID, assetID, sha, size); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
@@ -337,13 +377,31 @@ func (w *Worker) fetchExportSource(ctx context.Context, tmpDir, versionID string
 	src := &exportSource{Path: path, ContentType: contentType}
 	if strings.HasPrefix(contentType, "video/") || strings.HasPrefix(contentType, "audio/") {
 		out, err := exec.CommandContext(ctx, "ffprobe",
-			"-v", "error", "-select_streams", "a",
-			"-show_entries", "stream=codec_type",
+			"-v", "error",
+			"-show_entries", "stream=codec_type:format=duration",
 			"-print_format", "json", path).Output()
 		if err != nil {
 			return nil, permanent(fmt.Errorf("source %s unreadable: %w", versionID, withStderr(err)))
 		}
-		src.HasAudio = strings.Contains(string(out), `"codec_type"`)
+		var probed struct {
+			Streams []struct {
+				CodecType string `json:"codec_type"`
+			} `json:"streams"`
+			Format struct {
+				Duration string `json:"duration"`
+			} `json:"format"`
+		}
+		if err := json.Unmarshal(out, &probed); err != nil {
+			return nil, permanent(fmt.Errorf("source %s probe unreadable: %w", versionID, err))
+		}
+		for _, s := range probed.Streams {
+			if s.CodecType == "audio" {
+				src.HasAudio = true
+			}
+		}
+		// The graph builder clamps video in-points against this: a seek
+		// at/past EOF decodes zero frames and the piece silently vanishes.
+		src.DurationS, _ = strconv.ParseFloat(probed.Format.Duration, 64)
 	}
 	return src, nil
 }

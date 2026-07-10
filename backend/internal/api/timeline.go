@@ -9,6 +9,7 @@ import (
 	"connectrpc.com/connect"
 
 	irisv1 "github.com/awm33/iris/backend/gen/iris/v1"
+	"github.com/awm33/iris/backend/internal/mediaworker"
 	"github.com/awm33/iris/backend/internal/store"
 )
 
@@ -114,8 +115,9 @@ func (s *TimelineServer) DeleteTimeline(ctx context.Context, req *connect.Reques
 }
 
 // Export presets are a closed set — the worker maps them to ffmpeg args and
-// an unknown preset must fail HERE, not as a parked media job.
-var exportPresets = map[string]bool{"draft": true, "master": true}
+// an unknown preset must fail HERE, not as a parked media job. The list is
+// the worker's own, so the two can't drift.
+var exportPresets = mediaworker.PresetNames()
 
 func (s *TimelineServer) StartExport(ctx context.Context, req *connect.Request[irisv1.StartExportRequest]) (*connect.Response[irisv1.StartExportResponse], error) {
 	m := req.Msg

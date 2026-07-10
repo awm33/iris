@@ -5,11 +5,12 @@
 -- asset machinery.
 CREATE TABLE exports (
     id           TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    project_id   TEXT NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES workspaces (id),
+    project_id   TEXT NOT NULL REFERENCES projects (id),
     timeline_id  TEXT NOT NULL REFERENCES timelines (id) ON DELETE CASCADE,
     preset       TEXT NOT NULL,
-    state        TEXT NOT NULL DEFAULT 'queued', -- queued | running | complete | failed
+    state        TEXT NOT NULL DEFAULT 'queued'
+                 CHECK (state IN ('queued', 'running', 'complete', 'failed')),
     error        TEXT NOT NULL DEFAULT '',
     asset_id     TEXT NOT NULL DEFAULT '',
     version_id   TEXT NOT NULL DEFAULT '',

@@ -71,9 +71,13 @@ const MinClipS = 0.04
 
 // ParseOps decodes persisted op payloads. Unknown types are kept (activeOps
 // only needs op_id/type/target; Reduce ignores what it doesn't know — same
-// forward-compatibility posture as the TS reducer's switch).
+// forward-compatibility posture as the TS reducer's switch). Duplicate
+// op_ids keep the FIRST occurrence — the doc constructors dedup the log the
+// same way before reducing, and a duplicate that survives here can change
+// the outcome (e.g. a dup move re-applying after its original was rejected).
 func ParseOps(payloads [][]byte) ([]*Op, error) {
 	ops := make([]*Op, 0, len(payloads))
+	seen := make(map[string]bool, len(payloads))
 	for i, p := range payloads {
 		op := &Op{}
 		if err := json.Unmarshal(p, op); err != nil {
@@ -82,6 +86,10 @@ func ParseOps(payloads [][]byte) ([]*Op, error) {
 		if op.OpID == "" || op.Type == "" {
 			return nil, fmt.Errorf("op %d: missing op_id or type", i)
 		}
+		if seen[op.OpID] {
+			continue
+		}
+		seen[op.OpID] = true
 		ops = append(ops, op)
 	}
 	return ops, nil

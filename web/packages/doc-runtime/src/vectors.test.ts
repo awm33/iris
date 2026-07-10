@@ -1,12 +1,16 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { reduceTimeline, type TimelineOp, type TimelineState } from "./timeline";
+import { TimelineDoc, type TimelineOp, type TimelineState } from "./timeline";
 
 // Shared drift vectors: the same files replay through the Go reducer
 // (backend/internal/timeline/vectors_test.go) that the export service
 // renders from. A change to either reducer that fails here is
 // preview/export divergence — fix the port, don't touch the vector.
+//
+// Replayed through TimelineDoc, NOT bare reduceTimeline: the doc dedups
+// op_ids before reducing (as does Go's ParseOps), and the dedup is part of
+// the semantics the vectors pin — see dedup-undo-edges.json.
 
 const dir = fileURLToPath(new URL("../../../../spec/timeline-vectors/", import.meta.url));
 
@@ -36,7 +40,7 @@ describe("shared timeline vectors (TS ↔ Go reducer parity)", () => {
       expected: { tracks: unknown };
     };
     it(`${f}: ${vec.name}`, () => {
-      expect(normalize(reduceTimeline(vec.ops))).toEqual(vec.expected.tracks);
+      expect(normalize(new TimelineDoc(vec.ops).state)).toEqual(vec.expected.tracks);
     });
   }
 });

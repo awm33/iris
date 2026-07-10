@@ -2,6 +2,7 @@ package mediaworker
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -13,10 +14,20 @@ import (
 // dogfood-scale), a filter graph that normalizes every piece to the preset's
 // frame (fps/scale/pad), concats video, and mixes audio.
 //
-// Duration exactness is load-bearing: a clip whose duration outruns its
-// source must freeze on the last frame like the preview does (tpad clone),
-// never shorten — a shortened piece slides every later cut and desyncs the
-// mix. Same for audio (apad). trim/atrim then cut to the exact piece length.
+// Duration exactness is load-bearing, and seconds-based cuts don't provide
+// it: `trim=end=D` keeps ceil(D·fps) frames, so every non-frame-aligned cut
+// renders LONG and the error accumulates across concat (review PR34-H1 —
+// reproduced at ~20ms/cut, unbounded in cut count). So pieces are cut on
+// the OUTPUT FRAME GRID: piece boundaries quantize to round(t·fps) frames,
+// every branch overproduces slightly (tpad clone / color margin) and
+// `trim=end_frame` cuts exactly — Σframes = round(totalS·fps) by
+// construction, and audio delays derive from the same quantized grid.
+//
+// A clip whose in-point outruns its source must freeze on the last frame
+// like the preview does — but `-ss` at/past EOF decodes ZERO frames and
+// tpad has nothing to clone: ffmpeg exits 0 with the piece silently missing
+// (review PR34-H2). The seek is clamped to one frame before the probed
+// source duration so at least one frame always decodes.
 func buildExportArgs(
 	pieces []timeline.Piece,
 	entries []timeline.AudioEntry,
@@ -31,6 +42,9 @@ func buildExportArgs(
 		fps = 24
 	}
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
+	frameAt := func(t float64) int { return int(math.Round(t * float64(fps))) }
+	totalF := frameAt(totalS)
+	totalQ := float64(totalF) / float64(fps)
 	scaleChain := fmt.Sprintf(
 		"fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p",
 		fps, p.W, p.H, p.W, p.H)
@@ -47,9 +61,18 @@ func buildExportArgs(
 		return sources[vid]
 	}
 
-	// Video pieces → [v0..vN], in timeline order.
+	// Video pieces → [v0..vN], in timeline order. Sub-half-frame slivers
+	// quantize to zero frames and are skipped entirely (a zero-frame trim
+	// would make concat fail on an empty stream).
 	var vLabels []string
 	for i, piece := range pieces {
+		startF := frameAt(piece.Start)
+		endF := frameAt(piece.Start + piece.Duration)
+		frames := endF - startF
+		if frames <= 0 {
+			continue
+		}
+		dur := float64(frames) / float64(fps)
 		label := fmt.Sprintf("v%d", i)
 		src := (*exportSource)(nil)
 		if piece.Clip != nil {
@@ -57,26 +80,30 @@ func buildExportArgs(
 		}
 		switch {
 		case src != nil && strings.HasPrefix(src.ContentType, "video/"):
-			inputs = append(inputs,
-				"-ss", f(piece.Clip.InPoint), "-t", f(piece.Duration), "-i", src.Path)
+			ss := piece.Clip.InPoint
+			if src.DurationS > 0 {
+				ss = math.Min(ss, math.Max(0, src.DurationS-1.0/float64(fps)))
+			}
+			inputs = append(inputs, "-ss", f(ss), "-t", f(dur), "-i", src.Path)
 			filters = append(filters, fmt.Sprintf(
-				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end=%s,setpts=PTS-STARTPTS[%s]",
-				nInput, scaleChain, f(piece.Duration), f(piece.Duration), label))
+				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
+				nInput, scaleChain, f(dur), frames, label))
 			nInput++
 		case src != nil && strings.HasPrefix(src.ContentType, "image/"):
 			// Stills (image takes) hold the frame for the piece duration —
 			// the preview's overlay semantics.
-			inputs = append(inputs, "-loop", "1", "-t", f(piece.Duration), "-i", src.Path)
+			inputs = append(inputs, "-loop", "1", "-t", f(dur), "-i", src.Path)
 			filters = append(filters, fmt.Sprintf(
-				"[%d:v]%s,trim=end=%s,setpts=PTS-STARTPTS[%s]",
-				nInput, scaleChain, f(piece.Duration), label))
+				"[%d:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
+				nInput, scaleChain, f(dur), frames, label))
 			nInput++
 		default:
 			// Gap — or a clip whose source can't paint (audio on a video
 			// track can't happen via the UI; render black over failing).
+			// One frame of margin on d, trim cuts exact.
 			filters = append(filters, fmt.Sprintf(
-				"color=black:s=%dx%d:r=%d:d=%s,format=yuv420p[%s]",
-				p.W, p.H, fps, f(piece.Duration), label))
+				"color=black:s=%dx%d:r=%d:d=%s,format=yuv420p,trim=end_frame=%d,setpts=PTS-STARTPTS[%s]",
+				p.W, p.H, fps, f(float64(frames+1)/float64(fps)), frames, label))
 		}
 		vLabels = append(vLabels, "["+label+"]")
 	}
@@ -86,8 +113,11 @@ func buildExportArgs(
 	filters = append(filters, fmt.Sprintf("%sconcat=n=%d:v=1:a=0[vout]",
 		strings.Join(vLabels, ""), len(vLabels)))
 
-	// Audio entries → [a0..aK] → amix. Silence-only timelines still get a
-	// track: players expect one, and the mix keeps A/V duration equal.
+	// Audio entries → [a0..aK] → amix, delays on the same frame grid as the
+	// video cuts. Silence-only timelines still get a track: players expect
+	// one, and the mix keeps A/V duration equal. An audio in-point past EOF
+	// needs no clamp: zero decoded samples + apad = silence, which IS the
+	// preview's behavior for an out-of-range audio offset.
 	var aLabels []string
 	for _, e := range entries {
 		src := srcFor(e.Clip)
@@ -95,26 +125,27 @@ func buildExportArgs(
 			continue // stills, silent sources — the mixer's null-cached skip
 		}
 		label := fmt.Sprintf("a%d", len(aLabels))
+		delayMs := int(math.Round(float64(frameAt(e.Start)) / float64(fps) * 1000))
 		inputs = append(inputs,
 			"-ss", f(e.Clip.InPoint), "-t", f(e.Dur), "-i", src.Path)
 		filters = append(filters, fmt.Sprintf(
 			"[%d:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"+
 				"apad=pad_dur=%s,atrim=end=%s,asetpts=PTS-STARTPTS,adelay=%d:all=1[%s]",
-			nInput, f(e.Dur), f(e.Dur), int(e.Start*1000+0.5), label))
+			nInput, f(e.Dur), f(e.Dur), delayMs, label))
 		nInput++
 		aLabels = append(aLabels, "["+label+"]")
 	}
 	switch len(aLabels) {
 	case 0:
 		filters = append(filters, fmt.Sprintf(
-			"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=end=%s[aout]", f(totalS)))
+			"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=end=%s[aout]", f(totalQ)))
 	case 1:
 		filters = append(filters, fmt.Sprintf(
-			"%sapad=whole_dur=%s,atrim=end=%s[aout]", aLabels[0], f(totalS), f(totalS)))
+			"%sapad=whole_dur=%s,atrim=end=%s[aout]", aLabels[0], f(totalQ), f(totalQ)))
 	default:
 		filters = append(filters, fmt.Sprintf(
 			"%samix=inputs=%d:duration=longest:normalize=0,apad=whole_dur=%s,atrim=end=%s[aout]",
-			strings.Join(aLabels, ""), len(aLabels), f(totalS), f(totalS)))
+			strings.Join(aLabels, ""), len(aLabels), f(totalQ), f(totalQ)))
 	}
 
 	args := append([]string{"-hide_banner", "-nostdin", "-v", "error"}, inputs...)

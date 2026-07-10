@@ -158,6 +158,13 @@ func CompleteMediaJob(ctx context.Context, tx pgx.Tx, jobID, worker string) erro
 //
 // Callers should pass a context that survives shutdown (not the canceled
 // worker context) so failures during SIGTERM still get recorded.
+// WillRetry reports whether FailMediaJob would requeue rather than park —
+// callers with their own status rows (exports) keep their state machine in
+// agreement with the queue's.
+func WillRetry(job *MediaJob, retryable bool) bool {
+	return retryable && job.Attempts < maxAttempts
+}
+
 func FailMediaJob(ctx context.Context, pool *pgxpool.Pool, job *MediaJob, worker string, jobErr error, retryable bool) error {
 	var (
 		tag pgconn.CommandTag
