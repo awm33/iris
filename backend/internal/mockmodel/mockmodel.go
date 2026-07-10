@@ -102,6 +102,7 @@ type createRequest struct {
 	Conditioning *struct {
 		FirstFrame  *urlRef `json:"first_frame"`
 		SourceImage *urlRef `json:"source_image"`
+		SourceVideo *urlRef `json:"source_video"`
 		Mask        *urlRef `json:"mask"`
 	} `json:"conditioning"`
 	Upload struct {
@@ -278,6 +279,14 @@ func (s *server) makeAndUploadArtifact(req createRequest) (artifact, error) {
 				return artifact{}, fmt.Errorf("%w: first_frame: %v", errInvalidInput, err)
 			}
 		}
+		// lipsync_post: the source clip is FETCHED (output stays canned) so a
+		// broken source_video URL fails loudly in dev — same reference-
+		// implementation role as first_frame.
+		if req.Conditioning != nil && req.Conditioning.SourceVideo != nil {
+			if err := s.fetchAny(req.Conditioning.SourceVideo.URL); err != nil {
+				return artifact{}, fmt.Errorf("%w: source_video: %v", errInvalidInput, err)
+			}
+		}
 		data = cannedMP4
 		art = artifact{ContentType: "video/mp4", Width: 640, Height: 360, DurationS: 2, FPS: 24}
 	}
@@ -400,6 +409,20 @@ func (s *server) inpaintPNG(req createRequest) ([]byte, int, int, error) {
 	return buf.Bytes(), w, h, nil
 }
 
+// fetchAny verifies a conditioning input URL is fetchable without decoding.
+func (s *server) fetchAny(url string) error {
+	res, err := s.client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("fetch %d", res.StatusCode)
+	}
+	_, err = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<20))
+	return err
+}
+
 func (s *server) fetchImage(url string) (image.Image, error) {
 	if url == "" {
 		return nil, fmt.Errorf("missing url")
@@ -498,7 +521,7 @@ func Manifest(modality string) []byte {
 		"family":       "mock",
 		"version":      "0.1.0",
 		"modality":     modality,
-		"tasks":        []string{"t2v", "i2v", "v2v", "extend"},
+		"tasks":        []string{"t2v", "i2v", "v2v", "extend", "lipsync_post"},
 		"profiles": map[string]any{
 			"draft":  map[string]any{"max_width": 832, "max_height": 480, "steps": 12},
 			"master": map[string]any{"max_width": 1920, "max_height": 1080, "steps": 40},

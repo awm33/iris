@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Character } from "@iris/api-client";
 import { storyClient } from "../api";
 import { AssetThumb } from "../components/AssetThumb";
@@ -67,6 +67,15 @@ function CharacterCard({ character, projectId }: { character: Character; project
       storyClient.addCharacterRef({ characterId: character.id, role, asset: { assetId, versionId: "" } }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["characters"] }),
   });
+  // Voice binding (W4): the vendor voice this character speaks with. The
+  // generate panel prefills it for shot-targeted TTS when the model
+  // declares a voice_id param. Draft-and-commit-on-blur, like text props.
+  const [voiceDraft, setVoiceDraft] = useState(character.voiceId);
+  useEffect(() => setVoiceDraft(character.voiceId), [character.voiceId]);
+  const setVoice = useMutation({
+    mutationFn: (voiceId: string) => storyClient.updateCharacter({ id: character.id, voiceId }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["characters"] }),
+  });
   const removeRef = useMutation({
     mutationFn: (p: { role: string; assetId: string }) =>
       storyClient.removeCharacterRef({ characterId: character.id, role: p.role, assetId: p.assetId }),
@@ -105,6 +114,20 @@ function CharacterCard({ character, projectId }: { character: Character; project
             + Add ref
           </button>
         </div>
+        <label className="field" title="The vendor voice this character speaks with — shot-targeted TTS prefills it">
+          🎙 voice id
+          <input
+            type="text"
+            placeholder="e.g. mara (ElevenLabs)"
+            maxLength={256}
+            value={voiceDraft}
+            onChange={(e) => setVoiceDraft(e.target.value)}
+            onBlur={() => {
+              if (voiceDraft !== character.voiceId) setVoice.mutate(voiceDraft.trim());
+            }}
+          />
+        </label>
+        {setVoice.isError && <div className="status error">{String(setVoice.error)}</div>}
       </div>
       {(addRef.isError || removeRef.isError) && (
         <div className="status error">{String(addRef.error ?? removeRef.error)}</div>

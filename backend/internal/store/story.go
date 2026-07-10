@@ -30,6 +30,7 @@ type ViewRow struct {
 
 type CharacterRow struct {
 	ID, WorkspaceID, ProjectID, Name string
+	VoiceID                          string
 	Refs                             []CharacterRefJSON
 	CreatedAt, UpdatedAt             Time
 }
@@ -542,9 +543,9 @@ func (s *Store) CreateCharacter(ctx context.Context, workspaceID, projectID, nam
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO characters (id, workspace_id, project_id, name)
 		VALUES ($1, $2, NULLIF($3,''), $4)
-		RETURNING id, workspace_id, project_id, name, refs, created_at, updated_at`,
+		RETURNING id, workspace_id, project_id, name, voice_id, refs, created_at, updated_at`,
 		ids.New("chr"), workspaceID, projectID, name).
-		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
+		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &c.VoiceID, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -557,7 +558,7 @@ func (s *Store) CreateCharacter(ctx context.Context, workspaceID, projectID, nam
 
 func (s *Store) ListCharacters(ctx context.Context, workspaceID, projectID string) ([]*CharacterRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, workspace_id, COALESCE(project_id,''), name, refs, created_at, updated_at
+		SELECT id, workspace_id, COALESCE(project_id,''), name, voice_id, refs, created_at, updated_at
 		FROM characters
 		WHERE workspace_id = $1 AND (project_id IS NULL OR $2 = '' OR project_id = $2)
 		ORDER BY created_at`, workspaceID, projectID)
@@ -569,7 +570,7 @@ func (s *Store) ListCharacters(ctx context.Context, workspaceID, projectID strin
 	for rows.Next() {
 		c := &CharacterRow{}
 		var refsRaw []byte
-		if err := rows.Scan(&c.ID, &c.WorkspaceID, &c.ProjectID, &c.Name, &refsRaw,
+		if err := rows.Scan(&c.ID, &c.WorkspaceID, &c.ProjectID, &c.Name, &c.VoiceID, &refsRaw,
 			&c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -579,16 +580,16 @@ func (s *Store) ListCharacters(ctx context.Context, workspaceID, projectID strin
 	return out, rows.Err()
 }
 
-func (s *Store) UpdateCharacter(ctx context.Context, id string, name *string) (*CharacterRow, error) {
+func (s *Store) UpdateCharacter(ctx context.Context, id string, name, voiceID *string) (*CharacterRow, error) {
 	c := &CharacterRow{}
 	var refsRaw []byte
 	var pID *string
 	err := s.pool.QueryRow(ctx, `
-		UPDATE characters SET name = COALESCE($2, name), updated_at = now()
+		UPDATE characters SET name = COALESCE($2, name), voice_id = COALESCE($3, voice_id), updated_at = now()
 		WHERE id = $1
-		RETURNING id, workspace_id, project_id, name, refs, created_at, updated_at`,
-		id, name).
-		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
+		RETURNING id, workspace_id, project_id, name, voice_id, refs, created_at, updated_at`,
+		id, name, voiceID).
+		Scan(&c.ID, &c.WorkspaceID, &pID, &c.Name, &c.VoiceID, &refsRaw, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, wrapNotFound(err)
 	}

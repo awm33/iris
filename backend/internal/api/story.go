@@ -307,7 +307,10 @@ func (s *StoryServer) UpdateCharacter(ctx context.Context, req *connect.Request[
 			return nil, err
 		}
 	}
-	c, err := s.Store.UpdateCharacter(ctx, req.Msg.Id, req.Msg.Name)
+	if req.Msg.VoiceId != nil && len([]rune(*req.Msg.VoiceId)) > 256 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("voice_id too long (max 256)"))
+	}
+	c, err := s.Store.UpdateCharacter(ctx, req.Msg.Id, req.Msg.Name, req.Msg.VoiceId)
 	if err != nil {
 		return nil, connectErr(err)
 	}
@@ -413,6 +416,7 @@ func takePB(t *store.TakeRow) *irisv1.Take {
 func characterPB(c *store.CharacterRow) *irisv1.Character {
 	pb := &irisv1.Character{
 		Id: c.ID, WorkspaceId: c.WorkspaceID, ProjectId: c.ProjectID, Name: c.Name,
+		VoiceId:    c.VoiceID,
 		Timestamps: ts(c.CreatedAt, c.UpdatedAt),
 	}
 	for _, r := range c.Refs {

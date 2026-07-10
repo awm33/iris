@@ -39,6 +39,10 @@ message Character {
   string project_id = 3; // empty = workspace-level (shared across projects)
   string name = 4;
   repeated CharacterRef refs = 5;
+  // Vendor voice binding (W4): the voice this character speaks with (e.g.
+  // an ElevenLabs voice id). A refs entry with role=voice is the CLONING
+  // sample; this is the resolved identity TTS generation uses.
+  string voice_id = 6;
   Timestamps timestamps = 15;
 }
 
@@ -209,6 +213,7 @@ message ListCharactersResponse { repeated Character characters = 1; }
 message UpdateCharacterRequest {
   string id = 1;
   optional string name = 2;
+  optional string voice_id = 3;
 }
 message UpdateCharacterResponse { Character character = 1; }
 

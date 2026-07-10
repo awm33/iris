@@ -46,8 +46,9 @@ func (s *GenerationServer) createJobMsg(ctx context.Context, j *irisv1.Generatio
 	// behaving as generation.
 	j.Prompt = strings.TrimSpace(j.Prompt)
 	// Empty prompt is a REMOVAL for inpaint (spec §2: reconstruct background,
-	// insert nothing); every other task needs one.
-	if j.Prompt == "" && j.Task != "inpaint" {
+	// insert nothing). lipsync_post re-times an existing clip to audio —
+	// there is nothing to prompt. Every other task needs one.
+	if j.Prompt == "" && j.Task != "inpaint" && j.Task != "lipsync_post" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("job.prompt is required"))
 	}
 	if j.ProjectId == "" {
@@ -231,12 +232,11 @@ func (s *GenerationServer) toGenRequest(j *irisv1.GenerationJob, count int) (*st
 	// proto carries them but they are rejected here rather than silently
 	// dropped.
 	if c := j.Conditioning; c != nil {
-		if c.LastFrame != nil || len(c.Keyframes) > 0 ||
-			c.DepthSequence != nil || c.SourceVideo != nil {
+		if c.LastFrame != nil || len(c.Keyframes) > 0 || c.DepthSequence != nil {
 			return nil, nil, connect.NewError(connect.CodeUnimplemented,
-				errors.New("only first_frame, source_image and mask conditioning are supported so far"))
+				errors.New("only first_frame, source_video, source_image and mask conditioning are supported so far"))
 		}
-		if c.FirstFrame != nil || c.SourceImage != nil || c.Mask != nil {
+		if c.FirstFrame != nil || c.SourceImage != nil || c.Mask != nil || c.SourceVideo != nil {
 			genReq.Conditioning = &store.GenConditioning{}
 			infReq.Conditioning = &inference.Conditioning{}
 			if c.FirstFrame != nil {
@@ -247,6 +247,15 @@ func (s *GenerationServer) toGenRequest(j *irisv1.GenerationJob, count int) (*st
 					AssetID: c.FirstFrame.AssetId, VersionID: c.FirstFrame.VersionId,
 				}
 				infReq.Conditioning.FirstFrame = &inference.FrameRef{}
+			}
+			if c.SourceVideo != nil {
+				if c.SourceVideo.AssetId == "" && c.SourceVideo.VersionId == "" {
+					return nil, nil, connect.NewError(connect.CodeInvalidArgument, errors.New("conditioning.source_video missing asset or version"))
+				}
+				genReq.Conditioning.SourceVideo = &store.GenRef{
+					AssetID: c.SourceVideo.AssetId, VersionID: c.SourceVideo.VersionId,
+				}
+				infReq.Conditioning.SourceVideo = &inference.SourceVideo{}
 			}
 			if c.SourceImage != nil {
 				if c.SourceImage.AssetId == "" {
@@ -268,6 +277,10 @@ func (s *GenerationServer) toGenRequest(j *irisv1.GenerationJob, count int) (*st
 				infReq.Conditioning.Mask = &inference.FrameRef{}
 			}
 		}
+	}
+	if j.Task == "lipsync_post" && (genReq.Conditioning == nil || genReq.Conditioning.SourceVideo == nil) {
+		return nil, nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("lipsync_post requires conditioning.source_video (the clip to re-time)"))
 	}
 	if j.Task == "inpaint" && (genReq.Conditioning == nil ||
 		genReq.Conditioning.SourceImage == nil || genReq.Conditioning.Mask == nil) {
@@ -420,6 +433,11 @@ func (s *GenerationServer) jobFromTakeRecipe(ctx context.Context, sh *store.Shot
 			Output         json.RawMessage `json:"output"`
 			References     []store.GenRef  `json:"references"`
 			Params         json.RawMessage `json:"params"`
+			Conditioning   *struct {
+				SourceVideo *store.GenRef `json:"source_video"`
+				SourceImage *store.GenRef `json:"source_image"`
+				Mask        *store.GenRef `json:"mask"`
+			} `json:"conditioning"`
 		} `json:"request"`
 	}
 	if err := json.Unmarshal(recipe, &r); err != nil || r.EndpointID == "" {
@@ -439,6 +457,25 @@ func (s *GenerationServer) jobFromTakeRecipe(ctx context.Context, sh *store.Shot
 		// Dropping params would silently replay with different generation
 		// semantics (guidance, motion) than the take being regenerated.
 		j.ParamsJson = string(r.Request.Params)
+	}
+	// Replay conditioning the task depends on — a lipsync_post recipe
+	// without its source_video can't even be created. (first_frame is
+	// deliberately NOT replayed here: chain regeneration re-derives the
+	// carry from the current upstream.)
+	if c := r.Request.Conditioning; c != nil {
+		toRef := func(g *store.GenRef) *irisv1.AssetRef {
+			if g == nil {
+				return nil
+			}
+			return &irisv1.AssetRef{AssetId: g.AssetID, VersionId: g.VersionID}
+		}
+		if c.SourceVideo != nil || c.SourceImage != nil || c.Mask != nil {
+			j.Conditioning = &irisv1.Conditioning{
+				SourceVideo: toRef(c.SourceVideo),
+				SourceImage: toRef(c.SourceImage),
+				Mask:        toRef(c.Mask),
+			}
+		}
 	}
 	if len(r.Request.Output) > 0 {
 		var out struct {
@@ -637,6 +674,9 @@ func genJobPB(j *store.GenJob) *irisv1.GenerationJob {
 		}
 		if c.SourceImage != nil {
 			pb.Conditioning.SourceImage = &irisv1.AssetRef{AssetId: c.SourceImage.AssetID, VersionId: c.SourceImage.VersionID}
+		}
+		if c.SourceVideo != nil {
+			pb.Conditioning.SourceVideo = &irisv1.AssetRef{AssetId: c.SourceVideo.AssetID, VersionId: c.SourceVideo.VersionID}
 		}
 		if c.Mask != nil {
 			pb.Conditioning.Mask = &irisv1.AssetRef{AssetId: c.Mask.AssetID, VersionId: c.Mask.VersionID}
