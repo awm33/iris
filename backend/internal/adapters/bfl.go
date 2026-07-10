@@ -324,6 +324,15 @@ func (b *bfl) GetJob(ctx context.Context, id string) (*inference.JobStatus, erro
 			Message: fmt.Sprintf("bfl: unreadable poll response: %v", err)}
 	}
 
+	// Task-TERMINAL outcomes return as JobStatus{State:"failed"} (the
+	// seedance shape), never as Go errors: the orchestrator must be able
+	// to tell "the remote task is dead — clear the handle, re-submit
+	// fresh" from a transport blip where re-attaching is the whole point
+	// (review PR41-F1).
+	failed := func(code, msg string, retryable bool) (*inference.JobStatus, error) {
+		return &inference.JobStatus{ID: id, State: "failed",
+			Error: &inference.JobError{Code: code, Retryable: retryable, Message: msg}}, nil
+	}
 	switch polled.Status {
 	case "Pending", "Reasoning":
 		return &inference.JobStatus{ID: id, State: "running", Progress: 0.2}, nil
@@ -331,30 +340,25 @@ func (b *bfl) GetJob(ctx context.Context, id string) (*inference.JobStatus, erro
 		return &inference.JobStatus{ID: id, State: "running", Progress: 0.6}, nil
 	case "Request Moderated", "Content Moderated":
 		// Distinct statuses in BFL's enum — our safety taxonomy, terminal.
-		return nil, &inference.JobError{Code: "safety_blocked", Retryable: false,
-			Message: fmt.Sprintf("bfl moderation: %s", polled.Status)}
+		return failed("safety_blocked", fmt.Sprintf("bfl moderation: %s", polled.Status), false)
 	case "Error":
 		// BFL's generic catch-all: genuine input errors already surface as
 		// 422 at submit, so default the poll-time failure to TRANSIENT
-		// (attempt-bounded) and only classify on recognizable details —
-		// the seedance rule for unknown vendor failures.
+		// (attempt-bounded, fresh submit next try) and only classify on
+		// recognizable details — the seedance rule for vendor failures.
 		d := strings.ToLower(strings.TrimSpace(string(polled.Details)))
 		switch {
 		case strings.Contains(d, "moderat"):
-			return nil, &inference.JobError{Code: "safety_blocked", Retryable: false,
-				Message: fmt.Sprintf("bfl moderation (Error details): %s", d)}
+			return failed("safety_blocked", fmt.Sprintf("bfl moderation (Error details): %s", d), false)
 		case strings.Contains(d, "invalid") || strings.Contains(d, "validation"):
-			return nil, &inference.JobError{Code: "invalid_input", Retryable: false,
-				Message: fmt.Sprintf("bfl error: %s", d)}
+			return failed("invalid_input", fmt.Sprintf("bfl error: %s", d), false)
 		default:
-			return nil, &inference.JobError{Code: "transient", Retryable: true,
-				Message: fmt.Sprintf("bfl error: %s", d)}
+			return failed("transient", fmt.Sprintf("bfl error: %s", d), true)
 		}
 	case "Task not found":
-		// Mid-dispatch expiry: an attempt-bounded re-submit recovers, and
-		// this is the state PR 41's poll-re-attach expects to encounter.
-		return nil, &inference.JobError{Code: "transient", Retryable: true,
-			Message: "bfl: task expired or unknown at the provider"}
+		// Task-terminal too: the next attempt must re-submit fresh — a
+		// kept handle would poll this same tombstone forever.
+		return failed("transient", "bfl: task expired or unknown at the provider", true)
 	case "Ready":
 		// Fall through to custody below.
 	default:

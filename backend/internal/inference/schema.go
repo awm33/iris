@@ -4,6 +4,7 @@ import (
 	"bytes"
 	_ "embed"
 	"fmt"
+	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -67,5 +68,14 @@ func ValidateParams(paramsSchema, params []byte) error {
 	if err != nil {
 		return fmt.Errorf("params are not valid JSON: %w", err)
 	}
-	return s.Validate(inst)
+	if err := s.Validate(inst); err != nil {
+		// The library's multi-line message leads with our internal urn —
+		// keep the causes, drop the resource preamble.
+		msg := err.Error()
+		if i := strings.Index(msg, "\n"); i > 0 && strings.Contains(msg[:i], "urn:iris") {
+			msg = strings.TrimSpace(msg[i+1:])
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
 }

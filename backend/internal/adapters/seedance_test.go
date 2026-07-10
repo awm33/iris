@@ -194,3 +194,46 @@ func TestStripArkFlags(t *testing.T) {
 		}
 	}
 }
+
+// Re-attach (PR 41): a fresh seedance instance attaches via the persisted
+// handle, polls the SAME Ark task to completion, bridges into the NEW
+// attempt's upload, and cancel-after-attach reaches the remote task (the
+// map entry the attach seeded).
+func TestSeedanceAttachJob(t *testing.T) {
+	sd, mock, sink, uploaded := testStack(t)
+	st, err := sd.CreateJob(context.Background(), &inference.CreateJobRequest{
+		ID: "att-a1", Task: "t2v", Prompt: "reattach me", Seed: 3,
+		Output: &inference.Output{Width: 864, Height: 480, DurationS: 5},
+		Upload: &inference.Upload{Artifacts: []inference.UploadTarget{{PutURL: sink.URL + "/a1", ContentType: "video/mp4"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Handle) == 0 {
+		t.Fatal("CreateJob must return a handle")
+	}
+
+	fresh := newSeedance(mock.URL, "k")
+	if err := fresh.AttachJob("att-a2", st.Handle, &inference.Upload{
+		Artifacts: []inference.UploadTarget{{PutURL: sink.URL + "/a2", ContentType: "video/mp4"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	final := waitTerminal(t, fresh, "att-a2")
+	if final.State != "complete" || len(*uploaded) == 0 {
+		t.Fatalf("attached job must complete and bridge: %+v", final)
+	}
+
+	// Cancel path after attach: the seeded map entry must reach the remote.
+	another := newSeedance(mock.URL, "k")
+	if err := another.AttachJob("att-a3", st.Handle, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := another.CancelJob(context.Background(), "att-a3"); err != nil {
+		t.Fatalf("cancel after attach must reach the remote task: %v", err)
+	}
+
+	if err := fresh.AttachJob("bad", json.RawMessage(`{"x":1}`), nil); err == nil {
+		t.Fatal("unusable handle must error")
+	}
+}

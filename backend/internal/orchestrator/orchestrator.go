@@ -296,10 +296,12 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 			}
 			return err
 		}
-		if len(status.Handle) > 0 {
+		if _, ok := client.(adapters.Attacher); ok && len(status.Handle) > 0 {
 			// Persistence is best-effort: losing it only re-exposes the
-			// pre-PR41 re-submit behavior on a later reclaim.
-			if herr := queue.SetGenerationJobHandle(ctx, o.Pool, job.ID, o.Name, status.Handle); herr != nil {
+			// pre-PR41 re-submit behavior on a later reclaim. Gated on
+			// Attacher: a spec-speaking remote's handle would be an
+			// endpoint-controlled blob stored for nothing.
+			if herr := queue.SetGenerationJobHandle(ctx, o.Pool, job.ID, o.Name, job.Attempts, status.Handle); herr != nil {
 				slog.Warn("persisting remote handle failed", "job", job.ID, "err", herr)
 			}
 		}
@@ -308,10 +310,20 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 	// Poll with heartbeats: the heartbeat also detects cancellation (the
 	// cancel API flips our row; heartbeat then reports ErrNotOwner). All
 	// endpoint-side calls use the per-attempt id (infReq.ID), not job.ID.
+	// Whether this attempt holds a persisted remote handle: when it does,
+	// a restart RE-ATTACHES — so shutdown must NOT cancel the remote task
+	// (that would kill exactly the work re-attach exists to resume), and a
+	// reclaimed row's task now belongs to the successor.
+	handlePersisted := attached
+	if _, ok := client.(adapters.Attacher); ok && len(status.Handle) > 0 {
+		handlePersisted = true
+	}
 	for !status.Terminal() {
 		select {
 		case <-ctx.Done():
-			_ = client.CancelJob(context.Background(), infReq.ID)
+			if !handlePersisted {
+				_ = client.CancelJob(context.Background(), infReq.ID)
+			}
 			return ctx.Err()
 		case <-time.After(pollInterval):
 		}
@@ -320,7 +332,14 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 		progress := min(max(status.Progress, 0), 1)
 		if err := queue.HeartbeatGenerationJob(ctx, o.Pool, job.ID, o.Name, "running", progress); err != nil {
 			if errors.Is(err, queue.ErrNotOwner) {
-				_ = client.CancelJob(context.Background(), infReq.ID)
+				// Losing ownership means CANCELED **or** RECLAIMED — and a
+				// successor attempt may have re-attached to this very
+				// remote task. Only a genuinely canceled row cancels the
+				// remote work (pre-PR this was unconditional: safe then,
+				// task-killing now — review PR41-F2).
+				if st, serr := queue.GenerationJobState(context.Background(), o.Pool, job.ID); serr == nil && st == "canceled" {
+					_ = client.CancelJob(context.Background(), infReq.ID)
+				}
 				return errCanceled
 			}
 			return err
@@ -338,11 +357,32 @@ func (o *Orchestrator) dispatch(ctx context.Context, job *queue.GenerationJob) e
 		// Failed generations still burned GPU time (spec §3 provides metrics
 		// on any terminal state) — meter them or the spend is invisible.
 		o.meterUsage(job, status)
+		// The remote task is DEAD: a retryable failure must re-submit
+		// fresh, not re-attach to the corpse and burn every remaining
+		// attempt on the same terminal answer (review PR41-F1).
+		if handlePersisted {
+			if cerr := queue.ClearGenerationJobHandle(ctx, o.Pool, job.ID, o.Name, job.Attempts); cerr != nil {
+				slog.Warn("clearing dead remote handle failed", "job", job.ID, "err", cerr)
+			}
+		}
 		if status.Error != nil {
 			return status.Error
 		}
 		return fmt.Errorf("endpoint reported failure without error detail")
 	case "canceled":
+		// Remote says canceled — but is the ROW canceled? If we still own
+		// a healthy row, the task was canceled out from under us (a stale
+		// goroutine's cancel, or vendor-side): clear the handle and retry
+		// fresh instead of stranding the row (review PR41-F2).
+		if err := queue.HeartbeatGenerationJob(ctx, o.Pool, job.ID, o.Name, "running", status.Progress); err == nil {
+			if handlePersisted {
+				if cerr := queue.ClearGenerationJobHandle(ctx, o.Pool, job.ID, o.Name, job.Attempts); cerr != nil {
+					slog.Warn("clearing canceled remote handle failed", "job", job.ID, "err", cerr)
+				}
+			}
+			return &inference.JobError{Code: "transient", Retryable: true,
+				Message: "remote task canceled while the job is still live — re-submitting"}
+		}
 		return errCanceled
 	}
 

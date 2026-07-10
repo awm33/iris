@@ -410,8 +410,8 @@ func TestBuildExportArgsDissolve(t *testing.T) {
 	graph := graphOf(t, args)
 	for _, want := range []string{
 		"-ss 5.000000 -t 1.000000 -i /t/a.mp4", // outgoing seeks its OUT point
-		"[1:v]",                                 // blend outgoing = input 1
-		"[2:v]",                                 // blend incoming = input 2
+		"[1:v]",                                // blend outgoing = input 1
+		"[2:v]",                                // blend incoming = input 2
 		"[v1a][v1b]xfade=transition=fade:duration=1.000000:offset=0,trim=end_frame=24,setpts=PTS-STARTPTS[v1]",
 		"[v0][v1][v2]concat=n=3:v=1:a=0[vout]",
 		"[4:a]aresample", // audio input follows all visual inputs

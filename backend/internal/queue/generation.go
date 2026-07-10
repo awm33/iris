@@ -466,14 +466,16 @@ func backoffFor(attempts int) time.Duration {
 	return d
 }
 
-// SetGenerationJobHandle persists the adapter's remote pointer, ownership-
-// guarded: a reaped job's stale goroutine must not overwrite the handle a
-// newer attempt is using.
-func SetGenerationJobHandle(ctx context.Context, pool *pgxpool.Pool, jobID, worker string, handle []byte) error {
+// SetGenerationJobHandle persists the adapter's remote pointer. ATTEMPT-
+// granular ownership: claimed_by alone is worker-name-granular, and a
+// single orchestrator reaping its own stuck job would let the stale
+// goroutine's late persist overwrite the successor attempt's handle
+// (attempts increments per reclaim, so it disambiguates for free).
+func SetGenerationJobHandle(ctx context.Context, pool *pgxpool.Pool, jobID, worker string, attempts int, handle []byte) error {
 	tag, err := pool.Exec(ctx, `
 		UPDATE generation_jobs SET remote_handle = $3, updated_at = now()
-		WHERE id = $1 AND claimed_by = $2 AND state IN ('dispatched', 'running')`,
-		jobID, worker, handle)
+		WHERE id = $1 AND claimed_by = $2 AND attempts = $4 AND state IN ('dispatched', 'running')`,
+		jobID, worker, handle, attempts)
 	if err != nil {
 		return err
 	}
@@ -481,4 +483,26 @@ func SetGenerationJobHandle(ctx context.Context, pool *pgxpool.Pool, jobID, work
 		return ErrNotOwner
 	}
 	return nil
+}
+
+// ClearGenerationJobHandle drops the remote pointer once the remote task is
+// observed TERMINAL (failed/canceled/expired): re-attaching to a corpse
+// would burn every remaining attempt polling it — the next attempt must
+// submit fresh. Same attempt-granular guard as the setter.
+func ClearGenerationJobHandle(ctx context.Context, pool *pgxpool.Pool, jobID, worker string, attempts int) error {
+	_, err := pool.Exec(ctx, `
+		UPDATE generation_jobs SET remote_handle = NULL, updated_at = now()
+		WHERE id = $1 AND claimed_by = $2 AND attempts = $3`,
+		jobID, worker, attempts)
+	return err
+}
+
+// GenerationJobState reads the row's current state — the poll loop uses it
+// to distinguish "the user canceled" (cancel the remote task) from "the
+// job was reclaimed by a successor attempt" (the remote task now belongs
+// to the successor: leave it alone).
+func GenerationJobState(ctx context.Context, pool *pgxpool.Pool, jobID string) (string, error) {
+	var state string
+	err := pool.QueryRow(ctx, `SELECT state FROM generation_jobs WHERE id = $1`, jobID).Scan(&state)
+	return state, err
 }

@@ -415,6 +415,9 @@ func (s *seedance) call(ctx context.Context, method, path string, body, out any)
 
 // stripArkFlags removes "--"-prefixed tokens from user text — the Ark
 // text-command channel belongs to the adapter, never the prompt author.
+// LIVE-VERIFY: whether Ark also accepts unicode dashes (em-dash — macOS
+// auto-substitutes typed "--") or mid-token "--"; and whether an empty
+// text item (a flags-only prompt with no Output) 422s.
 func stripArkFlags(p string) string {
 	fields := strings.Fields(p)
 	out := fields[:0]

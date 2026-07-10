@@ -186,7 +186,7 @@ func (m *Manifest) Validate(req *CreateJobRequest) error {
 	// that declares none are rejected outright — an undeclared param must
 	// fail HERE, not get forwarded to a paid endpoint or silently dropped
 	// (before-real-keys, PR 41).
-	if len(req.Params) > 0 && string(req.Params) != "null" && string(req.Params) != "{}" {
+	if hasParams(req.Params) {
 		if len(m.ParamsSchema) == 0 {
 			return invalid("model %s declares no params", m.ID)
 		}
@@ -204,4 +204,18 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// hasParams: semantically non-empty params. Byte-literal checks would
+// reject a pretty-printed "{ }" against a schema-less model — parse, don't
+// pattern-match (review PR41-F5).
+func hasParams(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return true // not an object/null — let schema validation produce the real error
+	}
+	return len(m) > 0
 }

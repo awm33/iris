@@ -68,7 +68,7 @@ func TestValidateParams(t *testing.T) {
 	}
 
 	// Empty/null params always fine
-	for _, p := range []string{"", "null", "{}"} {
+	for _, p := range []string{"", "null", "{}", "{ }", "\n{\n}\n"} {
 		empty := *base
 		if p != "" {
 			empty.Params = json.RawMessage(p)
