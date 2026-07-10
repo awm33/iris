@@ -190,6 +190,30 @@ body {
   color: var(--text-dim);
 }
 
+/* Command palette + shortcuts + history + rail collapse */
+.palette-overlay { align-items: flex-start; padding-top: 12vh; }
+.palette { width: 480px; max-width: 90vw; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.palette input { width: 100%; background: var(--bg); border: none; border-bottom: 1px solid var(--border); color: var(--text); padding: 12px 14px; font-size: 14px; outline: none; }
+.palette-list { max-height: 320px; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; }
+.palette-item { all: unset; display: flex; justify-content: space-between; gap: 10px; padding: 7px 10px; border-radius: 6px; cursor: pointer; color: var(--text); }
+.palette-item.highlight { background: var(--bg-hover); }
+.shortcut-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+.shortcut-group h4 { margin: 0 0 6px; font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+.shortcut-row { display: flex; gap: 10px; align-items: baseline; padding: 2px 0; }
+kbd { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: 11px; font-family: ui-monospace, monospace; white-space: nowrap; }
+.history-panel { position: fixed; right: 16px; top: 60px; bottom: 16px; width: 260px; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; z-index: 5; }
+.history-list { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.history-row { display: flex; justify-content: space-between; gap: 6px; font-size: 12px; padding: 3px 6px; border-radius: 4px; }
+.history-row:hover { background: var(--bg-hover); }
+.history-row.inactive { text-decoration: line-through; color: var(--text-dim); }
+.history-row.is-undo { color: var(--text-dim); font-style: italic; }
+.rail-min { width: 44px; padding: 12px 4px; }
+.rail-min button { text-align: center; padding: 7px 0; }
+.rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 2px; }
+.rail-foot button { all: unset; padding: 7px 10px; border-radius: 6px; color: var(--text-dim); cursor: pointer; font-size: 12px; }
+.rail-foot button:hover { background: var(--bg-hover); color: var(--text); }
+.rail-min .rail-foot button { text-align: center; padding: 7px 0; }
+
 /* Story board (§3.1) */
 .board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 12px; }
 .board-col { width: 250px; flex-shrink: 0; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
