@@ -96,6 +96,16 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     return e.loaded ? e.img : null;
   };
 
+  // The canvases list shows op counts — refresh it however the editor is
+  // left (toolbar ←, browser Back, palette jump), not just the one onBack
+  // callback App happens to wire.
+  useEffect(
+    () => () => {
+      void qc.invalidateQueries({ queryKey: ["canvases"] });
+    },
+    [qc],
+  );
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -608,6 +618,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
             if (subjectRef.current) subjectRef.current.points = [];
           }}
           onUndo={() => session?.doc.undo()}
+          onRedo={() => session?.doc.redo()}
         />
       )}
 

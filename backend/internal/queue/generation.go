@@ -202,12 +202,31 @@ func rollupParent(ctx context.Context, tx pgx.Tx, subJobID string) error {
 }
 
 func rollupParentByID(ctx context.Context, tx pgx.Tx, parentID string) error {
-	if _, err := tx.Exec(ctx, `
-		SELECT 1 FROM generation_jobs WHERE id = $1 FOR UPDATE`, parentID); err != nil {
+	prevState, newState, err := rollupUpdate(ctx, tx, parentID)
+	if err != nil {
 		return err
 	}
-	var prevState, newState string
-	err := tx.QueryRow(ctx, `
+	// Dependency-failure propagation (C1): dependents gate on this parent
+	// reaching 'complete'; if it terminalized any other way they can never
+	// run — fail them now (transitively), same transaction.
+	if newState != prevState && (newState == "failed" || newState == "canceled") {
+		return FailDependents(ctx, tx, parentID)
+	}
+	return nil
+}
+
+// rollupUpdate is the single aggregate UPDATE shared by every rollup path —
+// a parent can terminalize failed via a finishing sibling, a cancel, or
+// dependency propagation, and ALL of them must copy the representative
+// child error (the Jobs UI lists parents only; a reasonless failure was
+// review P0.1). Locks the parent before aggregating (see the concurrency
+// note above rollupParent).
+func rollupUpdate(ctx context.Context, tx pgx.Tx, parentID string) (prevState, newState string, err error) {
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM generation_jobs WHERE id = $1 FOR UPDATE`, parentID); err != nil {
+		return "", "", err
+	}
+	err = tx.QueryRow(ctx, `
 		WITH agg AS (
 			SELECT count(*) AS total,
 			       count(*) FILTER (WHERE state IN ('complete','failed','canceled')) AS terminal,
@@ -218,9 +237,7 @@ func rollupParentByID(ctx context.Context, tx pgx.Tx, parentID string) error {
 		), prev AS (
 			SELECT state FROM generation_jobs WHERE id = $1
 		), rep AS (
-			-- Representative child failure: the parent is the user-facing
-			-- unit (the Jobs UI lists parents only), so a parent that
-			-- terminalizes failed must say WHY. Earliest failed child wins,
+			-- Representative child failure: earliest failed child wins,
 			-- preferring ones that carry a code.
 			SELECT error_code, error_message
 			FROM generation_jobs
@@ -247,16 +264,7 @@ func rollupParentByID(ctx context.Context, tx pgx.Tx, parentID string) error {
 		FROM agg CROSS JOIN prev LEFT JOIN rep ON true
 		WHERE p.id = $1
 		RETURNING prev.state, p.state`, parentID).Scan(&prevState, &newState)
-	if err != nil {
-		return err
-	}
-	// Dependency-failure propagation (C1): dependents gate on this parent
-	// reaching 'complete'; if it terminalized any other way they can never
-	// run — fail them now (transitively), same transaction.
-	if newState != prevState && (newState == "failed" || newState == "canceled") {
-		return FailDependents(ctx, tx, parentID)
-	}
-	return nil
+	return prevState, newState, err
 }
 
 // RollupAfterCancel reconciles aggregates after CancelGeneration: if the
@@ -321,34 +329,10 @@ func FailDependents(ctx context.Context, tx pgx.Tx, failedJobID string) error {
 // rollupParentDependentsOnly is rollupParentByID without re-entering
 // FailDependents (the caller's loop handles transitivity).
 func rollupParentDependentsOnly(ctx context.Context, tx pgx.Tx, parentID string) error {
-	if _, err := tx.Exec(ctx, `
-		SELECT 1 FROM generation_jobs WHERE id = $1 FOR UPDATE`, parentID); err != nil {
+	if _, _, err := rollupUpdate(ctx, tx, parentID); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `
-		WITH agg AS (
-			SELECT count(*) AS total,
-			       count(*) FILTER (WHERE state IN ('complete','failed','canceled')) AS terminal,
-			       count(*) FILTER (WHERE state = 'complete') AS ok,
-			       avg(progress) AS progress,
-			       sum(cost_actual) AS cost_actual
-			FROM generation_jobs WHERE parent_job_id = $1
-		)
-		UPDATE generation_jobs p
-		SET state = CASE
-		        WHEN p.state = 'canceled' THEN 'canceled'
-		        WHEN agg.terminal = agg.total AND agg.ok > 0 THEN 'complete'
-		        WHEN agg.terminal = agg.total THEN 'failed'
-		        ELSE 'running'
-		    END,
-		    progress = COALESCE(agg.progress, 0),
-		    cost_actual = agg.cost_actual,
-		    updated_at = now()
-		FROM agg WHERE p.id = $1`, parentID)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `SELECT pg_notify($1, $2)`, GenerationChannel, parentID)
+	_, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, GenerationChannel, parentID)
 	return err
 }
 

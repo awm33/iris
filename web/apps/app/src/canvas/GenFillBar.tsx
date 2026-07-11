@@ -35,8 +35,9 @@ export function GenFillBar(props: {
   onDiscard: () => void;
   /** Dismiss the bar entirely (clear the armed selection). */
   onDismiss: () => void;
-  /** Canvas undo — the autofocused prompt input must not eat Cmd+Z. */
+  /** Canvas undo/redo — the autofocused prompt input must not eat Cmd+Z. */
   onUndo?: () => void;
+  onRedo?: () => void;
 }) {
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState(4);
@@ -124,9 +125,10 @@ export function GenFillBar(props: {
             props.onGenerate(prompt.trim(), count, endpoint);
           } else if (e.key === "Escape") {
             props.onDismiss();
-          } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
+          } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
             e.preventDefault();
-            props.onUndo?.();
+            if (e.shiftKey) props.onRedo?.();
+            else props.onUndo?.();
           }
         }}
         style={{ flex: 1 }}

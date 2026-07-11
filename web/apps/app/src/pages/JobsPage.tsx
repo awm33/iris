@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { JobState, type GenerationJob } from "@iris/api-client";
 import { assetClient, generationClient } from "../api";
-import { isActiveJob, isPromptFault } from "../jobBadges";
+import { isActiveJob, isPromptFault, isRetryFutile } from "../jobBadges";
 
 export function JobsPage(props: { projectId?: string }) {
   const jobs = useQuery({
@@ -48,10 +48,10 @@ const stateLabel: Partial<Record<JobState, string>> = {
 function JobCard({ job }: { job: GenerationJob }) {
   const qc = useQueryClient();
   const active = isActiveJob(job);
-  // A safety-blocked or invalid-input failure fails identically on retry —
-  // offering Retry there is a trap; the prompt has to change.
+  // A safety-blocked / invalid-input / dependency failure fails identically
+  // on retry — offering Retry there is a trap.
   const retryable =
-    job.state === JobState.CANCELED || (job.state === JobState.FAILED && !isPromptFault(job.errorCode));
+    job.state === JobState.CANCELED || (job.state === JobState.FAILED && !isRetryFutile(job.errorCode));
 
   const cancel = useMutation({
     mutationFn: () => generationClient.cancelJob({ id: job.id }),

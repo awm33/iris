@@ -18,6 +18,13 @@ export function isPromptFault(errorCode: string): boolean {
   return errorCode === "safety_blocked" || errorCode === "invalid_input";
 }
 
+// Retry recreates the request verbatim, so it is pointless for prompt
+// faults AND for dependency failures (the retried fanout gates on the same
+// terminally-failed dependency and the reaper insta-fails it again).
+export function isRetryFutile(errorCode: string): boolean {
+  return isPromptFault(errorCode) || errorCode === "dependency_failed";
+}
+
 export function jobFailureText(j: GenerationJob): string {
   const reason = j.errorMessage || j.errorCode || "generation failed";
   return isPromptFault(j.errorCode) ? `${reason} — edit the prompt and regenerate` : reason;

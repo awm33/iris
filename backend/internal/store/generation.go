@@ -252,7 +252,7 @@ func (s *Store) CancelGeneration(ctx context.Context, jobID string) error {
 		WITH victims AS (
 			SELECT id FROM generation_jobs
 			WHERE (id = $1 OR parent_job_id = $1)
-			  AND state IN ('queued', 'dispatched', 'running')
+			  AND state IN ('queued', 'dispatched', 'running', 'uploading')
 			ORDER BY (parent_job_id IS NULL), id
 			FOR UPDATE
 		)
