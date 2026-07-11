@@ -39,6 +39,8 @@
 9. **Project/canvas cards are clickable divs** [live + code]: unreachable by keyboard (confirmed by tabbing through the whole Projects page), no role/tabIndex (`ProjectsPage.tsx:46`, `CanvasesPage.tsx:85`). The story board already has the right `.card-button` pattern — reuse it.
 10. **Jobs cards don't say which shot they targeted** [live]: a failed shot-generation can't be traced back to its shot, and there's no click-through. Add "Target: Scene 2 · Shot 1" linkage.
 
+> **Status 2026-07-11 (evening):** P2 backlog swept in PR 44 (merged) — one vocabulary ("takes", humanized task ids, model-not-endpoint copy), panel model persistence + submit feedback, Scenes list folded into the Story board (detail keeps its URL), gen-fill prompt context (strip quote + prompt-named layers) with Remove disabled under a typed prompt, selections clamped to the document, Fit/1:1 zoom, Subject-tool discoverability, topmost-only Esc (with the canvas hotkeys deferring to shell overlays per review), ⌘K project jump, per-view tab titles + real favicon, rail tooltip/count fixes, pluralization, project-card cleanup, chip wrap. Deliberately deferred: modal focus trap (needs a shared modal wrapper), rail glyph redesign, LIMIT-200 stack-split edge. The review backlog is now fully dispositioned.
+
 ## P2 — polish / consistency backlog
 
 - **Vocabulary drift** [live]: label "Takes" above a button that says "Generate 4 candidates" in the same panel; gen-fill says "Candidates ×N" with a different option set (1/2/4/6 vs 1/2/4/8). Pick one word and one set.
