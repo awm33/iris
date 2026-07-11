@@ -357,7 +357,20 @@ export function App() {
             }
           />
         )}
-        {view === "jobs" && <JobsPage projectId={project?.id} />}
+        {view === "jobs" && (
+          <JobsPage
+            projectId={project?.id}
+            onOpenTarget={(targetId, targetSceneId) => {
+              if (targetId.startsWith("cnv_")) {
+                goTo("canvases");
+                setCanvasId(targetId);
+              } else if (targetSceneId) {
+                goTo("scenes");
+                setSceneId(targetSceneId);
+              }
+            }}
+          />
+        )}
       </main>
       {paletteOpen && (
         <CommandPalette

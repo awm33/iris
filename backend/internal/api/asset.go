@@ -46,6 +46,7 @@ func (s *AssetServer) StartUpload(ctx context.Context, req *connect.Request[iris
 		Filename:    m.Filename,
 		ContentType: m.ContentType,
 		SizeBytes:   m.SizeBytes,
+		Tags:        m.Tags,
 	}
 	if err := s.Store.CreatePendingUpload(ctx, u); err != nil {
 		return nil, connectErr(err)
@@ -88,6 +89,7 @@ func (s *AssetServer) CompleteUpload(ctx context.Context, req *connect.Request[i
 		ProjectID:   u.ProjectID,
 		Kind:        kindFromContentType(u.ContentType),
 		Name:        u.Filename,
+		Tags:        u.Tags,
 	}
 	// Video/audio need the ffprobe pass (duration/fps/dims, poster); the job
 	// is enqueued in the same transaction as the asset rows.
@@ -375,7 +377,7 @@ func assetPB(a *store.Asset) *irisv1.Asset {
 	return &irisv1.Asset{
 		Id: a.ID, WorkspaceId: a.WorkspaceID, ProjectId: a.ProjectID,
 		Kind: kindToPB[a.Kind], Name: a.Name, HeadVersionId: a.HeadVersionID,
-		Tags: a.Tags, Timestamps: ts(a.CreatedAt, a.UpdatedAt),
+		Tags: a.Tags, SourceJobId: a.SourceJobID, Timestamps: ts(a.CreatedAt, a.UpdatedAt),
 	}
 }
 

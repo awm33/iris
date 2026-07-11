@@ -145,15 +145,19 @@ type PendingUpload struct {
 	ID, WorkspaceID, ProjectID       string
 	Filename, ContentType, ObjectKey string
 	SizeBytes                        int64
+	Tags                             []string
 }
 
 func (s *Store) CreatePendingUpload(ctx context.Context, u *PendingUpload) error {
 	u.ID = ids.New("upl")
 	u.ObjectKey = "uploads/" + u.ID
+	if u.Tags == nil {
+		u.Tags = []string{}
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO pending_uploads (id, workspace_id, project_id, filename, content_type, size_bytes, object_key)
-		VALUES ($1, $2, NULLIF($3,''), $4, $5, $6, $7)`,
-		u.ID, u.WorkspaceID, u.ProjectID, u.Filename, u.ContentType, u.SizeBytes, u.ObjectKey)
+		INSERT INTO pending_uploads (id, workspace_id, project_id, filename, content_type, size_bytes, object_key, tags)
+		VALUES ($1, $2, NULLIF($3,''), $4, $5, $6, $7, $8)`,
+		u.ID, u.WorkspaceID, u.ProjectID, u.Filename, u.ContentType, u.SizeBytes, u.ObjectKey, u.Tags)
 	return err
 }
 
@@ -162,8 +166,8 @@ func (s *Store) TakePendingUpload(ctx context.Context, id string) (*PendingUploa
 	var projectID *string
 	err := s.pool.QueryRow(ctx, `
 		DELETE FROM pending_uploads WHERE id = $1
-		RETURNING id, workspace_id, project_id, filename, content_type, size_bytes, object_key`, id).
-		Scan(&u.ID, &u.WorkspaceID, &projectID, &u.Filename, &u.ContentType, &u.SizeBytes, &u.ObjectKey)
+		RETURNING id, workspace_id, project_id, filename, content_type, size_bytes, object_key, tags`, id).
+		Scan(&u.ID, &u.WorkspaceID, &projectID, &u.Filename, &u.ContentType, &u.SizeBytes, &u.ObjectKey, &u.Tags)
 	if projectID != nil {
 		u.ProjectID = *projectID
 	}
@@ -173,7 +177,10 @@ func (s *Store) TakePendingUpload(ctx context.Context, id string) (*PendingUploa
 type Asset struct {
 	ID, WorkspaceID, ProjectID, Kind, Name, HeadVersionID string
 	Tags                                                  []string
-	CreatedAt, UpdatedAt                                  Time
+	// Parent generation job that produced the head version (lineage);
+	// populated by ListAssets only. Groups fan-out candidates in the Library.
+	SourceJobID          string
+	CreatedAt, UpdatedAt Time
 }
 
 type AssetVersion struct {
@@ -206,10 +213,13 @@ func (s *Store) CreateAssetWithVersion(ctx context.Context, a *Asset, v *AssetVe
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if a.Tags == nil {
+		a.Tags = []string{}
+	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO assets (id, workspace_id, project_id, kind, name)
-		VALUES ($1, $2, NULLIF($3,''), $4, $5)`,
-		a.ID, a.WorkspaceID, a.ProjectID, a.Kind, a.Name); err != nil {
+		INSERT INTO assets (id, workspace_id, project_id, kind, name, tags)
+		VALUES ($1, $2, NULLIF($3,''), $4, $5, $6)`,
+		a.ID, a.WorkspaceID, a.ProjectID, a.Kind, a.Name, a.Tags); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -286,13 +296,24 @@ func (s *Store) GetAsset(ctx context.Context, id string) (*Asset, []*AssetVersio
 
 func (s *Store) ListAssets(ctx context.Context, workspaceID, projectID, kind, query string) ([]*Asset, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, workspace_id, COALESCE(project_id,''), kind, name, COALESCE(head_version_id,''), tags, created_at, updated_at
-		FROM assets
-		WHERE workspace_id = $1
-		  AND ($2 = '' OR project_id = $2)
-		  AND ($3 = '' OR kind = $3)
-		  AND ($4 = '' OR name ILIKE '%' || $4 || '%')
-		ORDER BY created_at DESC
+		SELECT a.id, a.workspace_id, COALESCE(a.project_id,''), a.kind, a.name, COALESCE(a.head_version_id,''), a.tags,
+		       COALESCE(src.job_id, '') AS source_job_id,
+		       a.created_at, a.updated_at
+		FROM assets a
+		LEFT JOIN LATERAL (
+			-- The PARENT job is the grouping key: candidates link to their
+			-- sub-job, and siblings share the parent.
+			SELECT COALESCE(g.parent_job_id, g.id) AS job_id
+			FROM asset_links l
+			JOIN generation_jobs g ON g.id = l.to_entity_id
+			WHERE l.from_version_id = a.head_version_id AND l.role = 'generated_by'
+			LIMIT 1
+		) src ON true
+		WHERE a.workspace_id = $1
+		  AND ($2 = '' OR a.project_id = $2)
+		  AND ($3 = '' OR a.kind = $3)
+		  AND ($4 = '' OR a.name ILIKE '%' || $4 || '%')
+		ORDER BY a.created_at DESC
 		LIMIT 200`, workspaceID, projectID, kind, query)
 	if err != nil {
 		return nil, err
@@ -302,7 +323,7 @@ func (s *Store) ListAssets(ctx context.Context, workspaceID, projectID, kind, qu
 	for rows.Next() {
 		a := &Asset{}
 		if err := rows.Scan(&a.ID, &a.WorkspaceID, &a.ProjectID, &a.Kind, &a.Name,
-			&a.HeadVersionID, &a.Tags, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&a.HeadVersionID, &a.Tags, &a.SourceJobID, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

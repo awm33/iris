@@ -23,12 +23,13 @@ export const canvasKeepaliveClient = createClient(CanvasService, keepaliveTransp
 export const timelineKeepaliveClient = createClient(TimelineService, keepaliveTransport);
 
 /** Full presigned upload flow: StartUpload → PUT bytes → CompleteUpload. */
-export async function uploadFile(file: File, projectId?: string) {
+export async function uploadFile(file: File, projectId?: string, tags?: string[]) {
   const start = await assetClient.startUpload({
     projectId: projectId ?? "",
     filename: file.name,
     contentType: file.type || "application/octet-stream",
     sizeBytes: BigInt(file.size),
+    tags: tags ?? [],
   });
   const putUrl = start.partPutUrls[0];
   if (!putUrl) throw new Error("no upload URL returned");

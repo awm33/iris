@@ -645,6 +645,8 @@ func genJobPB(j *store.GenJob) *irisv1.GenerationJob {
 		Seed:               genReq.Seed,
 		Count:              int32(genReq.Count),
 		TargetEntityId:     j.TargetEntityID,
+		TargetLabel:        j.TargetLabel,
+		TargetSceneId:      j.TargetSceneID,
 		DependsOnJobId:     j.DependsOnJobID,
 		State:              stateToPB[j.State],
 		Progress:           j.Progress,

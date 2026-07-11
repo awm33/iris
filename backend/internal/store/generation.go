@@ -20,11 +20,14 @@ type GenJob struct {
 	Task, Profile, State                   string
 	Request                                json.RawMessage
 	TargetEntityID                         string
-	Progress                               float64
-	ErrorCode, ErrorMessage                string
-	CostEstimate, CostActual               float64
-	ArtifactVersionIDs                     []string
-	CreatedAt, UpdatedAt                   Time
+	// Human label + owning scene for the target, resolved by ListGenJobs
+	// only (the Jobs UI links back to the shot/canvas a job was for).
+	TargetLabel, TargetSceneID string
+	Progress                   float64
+	ErrorCode, ErrorMessage    string
+	CostEstimate, CostActual   float64
+	ArtifactVersionIDs         []string
+	CreatedAt, UpdatedAt       Time
 }
 
 // GenRequest is the resolved request stored on each job row (asset ids, not
@@ -136,6 +139,14 @@ const genJobCols = `id, workspace_id, project_id, endpoint_id,
 	COALESCE(error_code,''), COALESCE(error_message,''),
 	COALESCE(cost_estimate,0), COALESCE(cost_actual,0), created_at, updated_at`
 
+// genJobColsG is genJobCols qualified with the g alias — ListGenJobs joins
+// shots/scenes/canvases whose id/name/state would otherwise be ambiguous.
+const genJobColsG = `g.id, g.workspace_id, g.project_id, g.endpoint_id,
+	COALESCE(g.parent_job_id,''), COALESCE(g.depends_on_job_id,''), g.task, g.profile,
+	g.state, g.request, COALESCE(g.target_entity_id,''), g.progress,
+	COALESCE(g.error_code,''), COALESCE(g.error_message,''),
+	COALESCE(g.cost_estimate,0), COALESCE(g.cost_actual,0), g.created_at, g.updated_at`
+
 func scanGenJob(row interface{ Scan(...any) error }) (*GenJob, error) {
 	j := &GenJob{}
 	err := row.Scan(&j.ID, &j.WorkspaceID, &j.ProjectID, &j.EndpointID,
@@ -183,9 +194,18 @@ func (s *Store) GetGenJob(ctx context.Context, id string) (*GenJob, error) {
 // Jobs UI renders thumbnails straight from the list.
 func (s *Store) ListGenJobs(ctx context.Context, projectID, state string) ([]*GenJob, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+genJobCols+`,
+		SELECT `+genJobColsG+`,
+		       CASE
+		           WHEN sh.id IS NOT NULL THEN sc.name || ' · ' || COALESCE(NULLIF(sh.description, ''), 'shot')
+		           WHEN cv.id IS NOT NULL THEN 'Canvas · ' || cv.name
+		           ELSE ''
+		       END AS target_label,
+		       COALESCE(sh.scene_id, '') AS target_scene_id,
 		       COALESCE(art.ids, '{}') AS artifact_ids
 		FROM generation_jobs g
+		LEFT JOIN shots sh ON sh.id = g.target_entity_id
+		LEFT JOIN scenes sc ON sc.id = sh.scene_id
+		LEFT JOIN canvases cv ON cv.id = g.target_entity_id
 		LEFT JOIN LATERAL (
 			SELECT array_agg(l.from_version_id ORDER BY l.created_at, l.from_version_id) AS ids
 			FROM asset_links l
@@ -207,6 +227,7 @@ func (s *Store) ListGenJobs(ctx context.Context, projectID, state string) ([]*Ge
 			&j.State, &j.Request, &j.TargetEntityID, &j.Progress,
 			&j.ErrorCode, &j.ErrorMessage,
 			&j.CostEstimate, &j.CostActual, &j.CreatedAt, &j.UpdatedAt,
+			&j.TargetLabel, &j.TargetSceneID,
 			&j.ArtifactVersionIDs); err != nil {
 			return nil, err
 		}

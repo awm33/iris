@@ -43,10 +43,10 @@ export function ProjectsPage(props: { onOpen: (projectId: string, name: string) 
       )}
       <div className="grid">
         {projects.data?.projects.map((p) => (
-          <div key={p.id} className="card" onClick={() => props.onOpen(p.id, p.name)}>
+          <button key={p.id} className="card card-button" onClick={() => props.onOpen(p.id, p.name)}>
             <div className="name">{p.name}</div>
             <div className="meta">{p.description || p.id}</div>
-          </div>
+          </button>
         ))}
       </div>
     </div>

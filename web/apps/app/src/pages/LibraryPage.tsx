@@ -1,5 +1,5 @@
 import { Code, ConnectError } from "@connectrpc/connect";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { AssetKind, type Asset } from "@iris/api-client";
 import { assetClient, storyClient, uploadFile } from "../api";
@@ -14,11 +14,39 @@ export function LibraryPage(props: {
   const qc = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
   const [stockOpen, setStockOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [showUtility, setShowUtility] = useState(false);
 
   const assets = useQuery({
-    queryKey: ["assets", props.projectId ?? ""],
-    queryFn: () => assetClient.listAssets({ projectId: props.projectId ?? "" }),
+    queryKey: ["assets", props.projectId ?? "", search],
+    // Typing must not unmount the grid to "Loading…" between keystrokes
+    // (which would also collapse every expanded stack).
+    placeholderData: keepPreviousData,
+    queryFn: () => assetClient.listAssets({ projectId: props.projectId ?? "", query: search }),
   });
+
+  // Workflow intermediates (gen-fill source/mask flattens) are tagged
+  // "utility" at upload — real work, not library content. Hidden by default.
+  const all = assets.data?.assets ?? [];
+  const utilityCount = all.filter((a) => a.tags.includes("utility")).length;
+  const visible = showUtility ? all : all.filter((a) => !a.tags.includes("utility"));
+
+  // Fan-out candidates share a source job; stack them behind one card so a
+  // ×8 run reads as one row, not eight identical thumbnails.
+  const groups: { key: string; items: Asset[] }[] = [];
+  {
+    const byJob = new Map<string, { key: string; items: Asset[] }>();
+    for (const a of visible) {
+      const existing = a.sourceJobId ? byJob.get(a.sourceJobId) : undefined;
+      if (existing) {
+        existing.items.push(a);
+        continue;
+      }
+      const g = { key: a.sourceJobId || a.id, items: [a] };
+      groups.push(g);
+      if (a.sourceJobId) byJob.set(a.sourceJobId, g);
+    }
+  }
 
   const upload = useMutation({
     mutationFn: (file: File) => uploadFile(file, props.projectId),
@@ -53,20 +81,78 @@ export function LibraryPage(props: {
             e.target.value = "";
           }}
         />
-        {upload.isError && <span className="status">upload failed: {String(upload.error)}</span>}
+        <input
+          type="search"
+          placeholder="Search library…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          aria-label="Search library"
+        />
+        {utilityCount > 0 && (
+          <button
+            className="btn secondary"
+            title="Gen-fill source/mask uploads and other workflow files"
+            onClick={() => setShowUtility((v) => !v)}
+          >
+            {showUtility ? "Hide" : "Show"} utility files ({utilityCount})
+          </button>
+        )}
+        {upload.isError && <span className="status error">upload failed: {String(upload.error)}</span>}
       </div>
 
       {assets.isLoading && <div className="empty">Loading…</div>}
-      {assets.data && assets.data.assets.length === 0 && (
-        <div className="empty">Library is empty — upload an image, video, or audio file.</div>
+      {assets.data && visible.length === 0 && (
+        <div className="empty">
+          {search
+            ? "No matches — try a different search."
+            : utilityCount > 0
+              ? `${utilityCount} utility file${utilityCount > 1 ? "s" : ""} hidden — nothing else here yet.`
+              : "Library is empty — upload an image, video, or audio file."}
+        </div>
       )}
       <div className="grid">
-        {assets.data?.assets.map((a) => (
-          <AssetCard key={a.id} asset={a} projectId={props.projectId} onEditInCanvas={props.onEditInCanvas} />
-        ))}
+        {groups.map((g) =>
+          g.items.length === 1 ? (
+            <AssetCard key={g.key} asset={g.items[0]} projectId={props.projectId} onEditInCanvas={props.onEditInCanvas} />
+          ) : (
+            <AssetStack key={g.key} assets={g.items} projectId={props.projectId} onEditInCanvas={props.onEditInCanvas} />
+          ),
+        )}
       </div>
       {stockOpen && props.projectId && <StockPicker projectId={props.projectId} onClose={() => setStockOpen(false)} />}
     </div>
+  );
+}
+
+// Candidates from one generation job: one card until expanded.
+function AssetStack(props: {
+  assets: Asset[];
+  projectId?: string;
+  onEditInCanvas?: (assetId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!open) {
+    return (
+      <AssetCard
+        asset={props.assets[0]}
+        projectId={props.projectId}
+        onEditInCanvas={props.onEditInCanvas}
+        stack={{ count: props.assets.length, onExpand: () => setOpen(true) }}
+      />
+    );
+  }
+  return (
+    <>
+      {props.assets.map((a) => (
+        <AssetCard key={a.id} asset={a} projectId={props.projectId} onEditInCanvas={props.onEditInCanvas} />
+      ))}
+      <div className="card">
+        <button className="card-button" onClick={() => setOpen(false)}>
+          <div className="thumb-placeholder">⌃</div>
+          <div className="name">Collapse {props.assets.length} takes</div>
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -74,10 +160,12 @@ function AssetCard({
   asset,
   projectId,
   onEditInCanvas,
+  stack,
 }: {
   asset: Asset;
   projectId?: string;
   onEditInCanvas?: (assetId: string) => void;
+  stack?: { count: number; onExpand: () => void };
 }) {
   const qc = useQueryClient();
   const [promoting, setPromoting] = useState<"view" | "character" | null>(null);
@@ -138,6 +226,13 @@ function AssetCard({
       )}
       <div className="name">{asset.name}</div>
       <div className="meta">{AssetKind[asset.kind]?.toLowerCase() ?? "asset"}</div>
+      {stack && (
+        <div className="promote-row">
+          <button className="btn secondary chip-add" onClick={stack.onExpand}>
+            ▤ {stack.count} takes — show all
+          </button>
+        </div>
+      )}
       {isVideo && asset.headVersionId && (
         <div className="promote-row">
           <button className="btn secondary chip-add" onClick={() => setPlaying(true)}>

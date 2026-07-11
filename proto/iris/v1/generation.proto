@@ -76,6 +76,11 @@ message GenerationJob {
   // job's landed artifact (video → its last frame, image → as-is). Requires
   // depends_on_job_id; mutually exclusive with conditioning.first_frame.
   bool carry_from_depends_on = 25;
+  // Human-readable target ("Diner · Mara at the counter" / "Canvas · Poster")
+  // + the scene the target shot lives in, for click-through. Resolved by
+  // ListJobs only; empty on GetJob and for untargeted jobs.
+  string target_label = 26;
+  string target_scene_id = 27;
   Timestamps timestamps = 15;
 }
 
