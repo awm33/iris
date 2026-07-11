@@ -14,6 +14,8 @@
 
 ---
 
+> **Status 2026-07-11:** all three P0s fixed in PR 42 (merged) — parent-job rollup copies the representative child error on every path incl. dependency propagation, Jobs shows reasons and suppresses futile retries (`safety_blocked`/`invalid_input`/`dependency_failed`), Story/Scene shots badge "⚠ failed" from the newest targeting job, `UPLOADING` counts as active everywhere; hash routing (`#/<view>/<projectId>[/<entityId>]`) with malformed-fragment fallback, NotFound-only stale-link redirect via replaceState, and no history junk; gen-fill bar handles Esc/Cmd+Z/Cmd+Shift+Z inside the prompt input and has a visible ×. P1/P2 items below remain open.
+
 ## P0 — fix before image dogfooding
 
 1. **Failed generations are silent everywhere except Jobs, and even Jobs never says why.** [live + code]
