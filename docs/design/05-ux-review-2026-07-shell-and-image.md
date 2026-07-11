@@ -27,6 +27,8 @@
 
 3. **Gen-fill bar can't be dismissed from the keyboard once you've typed.** [live + code] The prompt input autofocuses; with focus in it, Esc does nothing (confirmed live — bar stayed mounted), and there is no × button. The user must click the canvas, then Esc. `GenFillBar.tsx:110`, key handler ignores INPUT targets (`CanvasPage.tsx:190-191`). Fix: handle Escape (and Cmd+Z) in the input's own onKeyDown + add a visible close button.
 
+> **Status 2026-07-11 (later):** P1 items 5–10 fixed in PR 43 (merged) — Library groups fan-out candidates per job ("N takes — show all") via lineage-resolved source_job_id, gen-fill source/mask upload tagged `utility` and hidden behind a toggle, server-side search; canvas mount re-attaches to still-active inpaint jobs (completed ones stay in Jobs/Library by design); gen-fill submit phase is cancelable (nonce-aborted); rejected-save recovery ("↻ Retry save" + confirm-on-leave, beforeunload guard order fixed per review); project/canvas cards are real buttons; Jobs cards link "→ Scene · shot" / "→ Canvas · name" through to their target. Item 4 (UPLOADING) shipped in PR 42. P2 backlog below remains open.
+
 ## P1 — high friction, fix soon
 
 4. **`UPLOADING` is excluded from every "active job" filter** [code]: rail count drops, shot ⟳ badges vanish, JobsPage hides progress+Cancel, and the poll backstop stops while a job uploads (`App.tsx:97-103`, `JobsPage.tsx:49`); with SSE down a job strands. Include UPLOADING in all four filters.
