@@ -601,6 +601,13 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           onPick={(index) => genFill?.phase === "choosing" && setGenFill({ ...genFill, index })}
           onCommit={commitCandidate}
           onDiscard={() => void discardGenFill()}
+          onDismiss={() => {
+            // Same contract as Esc on the canvas: clear the armed selection
+            // (and its subject refine points) so the bar unmounts.
+            setSelection(undefined);
+            if (subjectRef.current) subjectRef.current.points = [];
+          }}
+          onUndo={() => session?.doc.undo()}
         />
       )}
 

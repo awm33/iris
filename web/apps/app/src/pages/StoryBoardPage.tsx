@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { type ChainEdge, JobState, type Shot } from "@iris/api-client";
+import { type ChainEdge, type Shot } from "@iris/api-client";
 import { generationClient, storyClient } from "../api";
+import { shotJobBadges } from "../jobBadges";
 import { useEscape, VersionThumb } from "../components/AssetThumb";
 import { TakePicker } from "../components/TakePicker";
 import { truncate } from "./ScenePage";
@@ -29,15 +30,7 @@ export function StoryBoardPage(props: {
     queryKey: ["jobs", props.projectId],
     queryFn: () => generationClient.listJobs({ projectId: props.projectId }),
   });
-  const generatingShots = new Set(
-    (jobs.data?.jobs ?? [])
-      .filter(
-        (j) =>
-          (j.state === JobState.QUEUED || j.state === JobState.DISPATCHED || j.state === JobState.RUNNING) &&
-          j.targetEntityId !== "",
-      )
-      .map((j) => j.targetEntityId),
-  );
+  const shotBadges = shotJobBadges(jobs.data?.jobs ?? []);
 
   const createScene = useMutation({
     mutationFn: (name: string) => storyClient.createScene({ projectId: props.projectId, name }),
@@ -79,7 +72,8 @@ export function StoryBoardPage(props: {
             index={i}
             sceneId={sc.id}
             name={sc.name}
-            generatingShots={generatingShots}
+            generatingShots={shotBadges.generating}
+            failedShots={shotBadges.failed}
             onOpenScene={() => props.onOpenScene(sc.id)}
             onGenerateForShot={props.onGenerateForShot}
           />
@@ -94,6 +88,7 @@ function SceneColumn(props: {
   sceneId: string;
   name: string;
   generatingShots: Set<string>;
+  failedShots: Map<string, string>;
   onOpenScene: () => void;
   onGenerateForShot: (shotId: string, label: string) => void;
 }) {
@@ -225,6 +220,7 @@ function SceneColumn(props: {
               chainIn={chainInto.get(sh.id)}
               fromShotNo={chainInto.get(sh.id) ? shotNo.get(chainInto.get(sh.id)!.fromShotId) : undefined}
               generating={props.generatingShots.has(sh.id)}
+              failedReason={props.failedShots.get(sh.id)}
               dragging={dragId === sh.id}
               dragActive={dragId !== null}
               onDragStart={() => setDragId(sh.id)}
@@ -287,6 +283,7 @@ function BoardShotCard(props: {
   chainIn?: ChainEdge;
   fromShotNo?: number;
   generating: boolean;
+  failedReason?: string;
   dragging: boolean;
   dragActive: boolean;
   onDragStart: () => void;
@@ -336,6 +333,11 @@ function BoardShotCard(props: {
           {sh.selectedTakeId ? " · ✓" : ""}
           {props.generating ? " · ⟳ generating" : ""}
           {sh.continuityStale ? " · ⚠ stale" : ""}
+          {!props.generating && props.failedReason ? (
+            <span className="status error" title={props.failedReason}>
+              {" "}· ⚠ failed
+            </span>
+          ) : ""}
           {sh.pinned ? " · 📌" : ""}
         </div>
         <div className="board-shot-actions">

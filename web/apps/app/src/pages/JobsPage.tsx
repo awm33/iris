@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { JobState, type GenerationJob } from "@iris/api-client";
 import { assetClient, generationClient } from "../api";
+import { isActiveJob, isPromptFault } from "../jobBadges";
 
 export function JobsPage(props: { projectId?: string }) {
   const jobs = useQuery({
@@ -46,8 +47,11 @@ const stateLabel: Partial<Record<JobState, string>> = {
 
 function JobCard({ job }: { job: GenerationJob }) {
   const qc = useQueryClient();
-  const active = job.state === JobState.QUEUED || job.state === JobState.DISPATCHED || job.state === JobState.RUNNING;
-  const retryable = job.state === JobState.FAILED || job.state === JobState.CANCELED;
+  const active = isActiveJob(job);
+  // A safety-blocked or invalid-input failure fails identically on retry —
+  // offering Retry there is a trap; the prompt has to change.
+  const retryable =
+    job.state === JobState.CANCELED || (job.state === JobState.FAILED && !isPromptFault(job.errorCode));
 
   const cancel = useMutation({
     mutationFn: () => generationClient.cancelJob({ id: job.id }),
@@ -72,9 +76,11 @@ function JobCard({ job }: { job: GenerationJob }) {
             <div className="progress-bar" style={{ width: `${Math.round(job.progress * 100)}%` }} />
           </div>
         )}
-        {job.errorMessage && (
+        {job.state === JobState.FAILED && (
           <div className="status error">
-            {job.errorCode}: {job.errorMessage}
+            {job.errorCode ? `${job.errorCode}: ` : ""}
+            {job.errorMessage || "generation failed (no error detail)"}
+            {isPromptFault(job.errorCode) ? " — edit the prompt and regenerate; retrying won't help" : ""}
           </div>
         )}
         {job.artifactVersionIds.length > 0 && (

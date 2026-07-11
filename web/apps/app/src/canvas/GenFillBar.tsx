@@ -33,6 +33,10 @@ export function GenFillBar(props: {
   onPick: (index: number) => void;
   onCommit: () => void;
   onDiscard: () => void;
+  /** Dismiss the bar entirely (clear the armed selection). */
+  onDismiss: () => void;
+  /** Canvas undo — the autofocused prompt input must not eat Cmd+Z. */
+  onUndo?: () => void;
 }) {
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState(4);
@@ -97,6 +101,9 @@ export function GenFillBar(props: {
     return (
       <div className="genfill-bar">
         <span className="status error">No endpoint offers gen-fill (task "inpaint" + mask/source_image).</span>
+        <button className="chip-x" title="Dismiss (Esc) — clears the selection" onClick={props.onDismiss}>
+          ×
+        </button>
       </div>
     );
   }
@@ -109,9 +116,19 @@ export function GenFillBar(props: {
         value={prompt}
         autoFocus
         onChange={(e) => setPrompt(e.target.value)}
-        onKeyDown={(e) =>
-          e.key === "Enter" && prompt.trim() && endpoint && props.onGenerate(prompt.trim(), count, endpoint)
-        }
+        onKeyDown={(e) => {
+          // The global canvas hotkeys ignore INPUT targets, and this input
+          // autofocuses — without local handling, Esc and Cmd+Z are dead
+          // until the user thinks to click the canvas first.
+          if (e.key === "Enter" && prompt.trim() && endpoint) {
+            props.onGenerate(prompt.trim(), count, endpoint);
+          } else if (e.key === "Escape") {
+            props.onDismiss();
+          } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
+            e.preventDefault();
+            props.onUndo?.();
+          }
+        }}
         style={{ flex: 1 }}
       />
       {promptable.length > 1 && (
@@ -162,6 +179,9 @@ export function GenFillBar(props: {
         ✂ Remove
       </button>
       {props.error && <span className="status error">{props.error}</span>}
+      <button className="chip-x" title="Dismiss (Esc) — clears the selection" onClick={props.onDismiss}>
+        ×
+      </button>
     </div>
   );
 }

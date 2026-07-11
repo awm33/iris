@@ -217,6 +217,16 @@ func rollupParentByID(ctx context.Context, tx pgx.Tx, parentID string) error {
 			FROM generation_jobs WHERE parent_job_id = $1
 		), prev AS (
 			SELECT state FROM generation_jobs WHERE id = $1
+		), rep AS (
+			-- Representative child failure: the parent is the user-facing
+			-- unit (the Jobs UI lists parents only), so a parent that
+			-- terminalizes failed must say WHY. Earliest failed child wins,
+			-- preferring ones that carry a code.
+			SELECT error_code, error_message
+			FROM generation_jobs
+			WHERE parent_job_id = $1 AND state = 'failed'
+			ORDER BY (COALESCE(error_code, '') = ''), created_at, id
+			LIMIT 1
 		)
 		UPDATE generation_jobs p
 		SET state = CASE
@@ -225,10 +235,16 @@ func rollupParentByID(ctx context.Context, tx pgx.Tx, parentID string) error {
 		        WHEN agg.terminal = agg.total THEN 'failed'
 		        ELSE 'running'
 		    END,
+		    error_code = CASE
+		        WHEN p.state <> 'canceled' AND agg.terminal = agg.total AND agg.ok = 0
+		        THEN COALESCE(rep.error_code, p.error_code) ELSE p.error_code END,
+		    error_message = CASE
+		        WHEN p.state <> 'canceled' AND agg.terminal = agg.total AND agg.ok = 0
+		        THEN COALESCE(rep.error_message, p.error_message) ELSE p.error_message END,
 		    progress = COALESCE(agg.progress, 0),
 		    cost_actual = agg.cost_actual,
 		    updated_at = now()
-		FROM agg, prev
+		FROM agg CROSS JOIN prev LEFT JOIN rep ON true
 		WHERE p.id = $1
 		RETURNING prev.state, p.state`, parentID).Scan(&prevState, &newState)
 	if err != nil {
