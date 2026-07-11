@@ -44,7 +44,10 @@ const GROUPS: [string, [string, string][]][] = [
     "Canvas",
     [
       ["⌘Z / ⇧⌘Z", "Undo / redo"],
-      ["Esc", "Clear selection"],
+      ["Esc", "Clear selection / dismiss the gen-fill bar"],
+      ["✨ click", "Subject select — click again to refine (up to 16 points)"],
+      ["✨ ⇧-click", "Exclude a region from the subject selection"],
+      ["← / → / ↵", "Compare gen-fill takes / commit as layer"],
     ],
   ],
 ];

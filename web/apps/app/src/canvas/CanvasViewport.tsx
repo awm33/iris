@@ -12,6 +12,8 @@ export type CanvasTool = "pan" | "brush" | "eraser" | "marquee" | "lasso" | "sub
  * replay), then commit as one op on release.
  */
 export function CanvasViewport(props: {
+  /** Receives zoom commands for the toolbar (fit-to-window / 100%). */
+  onViewApi?: (api: { fit: () => void; actual: () => void }) => void;
   doc: CanvasDoc;
   cache: LayerRasterCache;
   docW: number;
@@ -153,6 +155,29 @@ export function CanvasViewport(props: {
     requestDrawRef.current();
   }, [props.redrawTick, props.preview, props.selection, props.overlayLayer]);
 
+  // Toolbar zoom commands share the wheel-zoom transform state.
+  useEffect(() => {
+    const apply = (scale: number) => {
+      const rect = containerRef.current!.getBoundingClientRect();
+      const p = propsRef.current;
+      vtRef.current = {
+        scale,
+        x: (rect.width - p.docW * scale) / 2,
+        y: (rect.height - p.docH * scale) / 2,
+      };
+      requestDrawRef.current();
+    };
+    propsRef.current.onViewApi?.({
+      fit: () => {
+        const rect = containerRef.current!.getBoundingClientRect();
+        const p = propsRef.current;
+        apply(Math.min(rect.width / p.docW, rect.height / p.docH) * 0.9 || 1);
+      },
+      actual: () => apply(1),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Wheel zoom must preventDefault → non-passive listener.
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -175,6 +200,13 @@ export function CanvasViewport(props: {
     const rect = canvasRef.current!.getBoundingClientRect();
     const vt = vtRef.current;
     return [(e.clientX - rect.left - vt.x) / vt.scale, (e.clientY - rect.top - vt.y) / vt.scale];
+  };
+  // Selections are clamped to the document: marching ants marching off into
+  // the checkerboard promise pixels the fill can never touch.
+  const toDocClamped = (e: React.PointerEvent): [number, number] => {
+    const [x, y] = toDoc(e);
+    const p = propsRef.current;
+    return [Math.min(Math.max(x, 0), p.docW), Math.min(Math.max(y, 0), p.docH)];
   };
 
   // Capture keeps strokes/pans alive when the pointer leaves the viewport;
@@ -204,7 +236,7 @@ export function CanvasViewport(props: {
       return;
     }
     if (props.tool === "marquee" || props.tool === "lasso") {
-      const pt = toDoc(e);
+      const pt = toDocClamped(e);
       capture(e);
       if (props.tool === "marquee") {
         selecting.current = { kind: "rect", anchor: pt };
@@ -300,7 +332,7 @@ export function CanvasViewport(props: {
     }
     if (selecting.current) {
       const p = propsRef.current;
-      const pt = toDoc(e);
+      const pt = toDocClamped(e);
       if (selecting.current.kind === "rect") {
         const [ax, ay] = selecting.current.anchor;
         p.onSelectionChange?.({

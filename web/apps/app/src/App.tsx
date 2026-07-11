@@ -20,7 +20,6 @@ import { JobsPage } from "./pages/JobsPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { ScenePage } from "./pages/ScenePage";
-import { ScenesPage } from "./pages/ScenesPage";
 import { StoryBoardPage } from "./pages/StoryBoardPage";
 import { useEvents } from "./useEvents";
 
@@ -53,6 +52,9 @@ function parseHash(hash: string): Route {
   if (!view || !VIEWS.includes(view as View) || view === "projects" || !projectId) {
     return { view: "projects" };
   }
+  // The scenes LIST is folded into the Story board (review P2: two nav
+  // entries over the same entities); only scene DETAIL keeps the view.
+  if (view === "scenes" && !entityId) return { view: "story", projectId };
   return { view: view as View, projectId, entityId };
 }
 
@@ -167,6 +169,15 @@ export function App() {
     syncedOnce.current = true;
   }, [view, project?.id, sceneId, canvasId, timelineId]);
 
+  // The tab must say where you are — a dozen "Iris" tabs are unfindable.
+  useEffect(() => {
+    const labels: Record<View, string> = {
+      projects: "Projects", story: "Story", scenes: "Scenes", characters: "Characters",
+      canvases: "Canvases", timelines: "Timelines", library: "Library", jobs: "Jobs",
+    };
+    document.title = project ? `${labels[view]} · ${project.name} — Iris` : "Iris";
+  }, [view, project]);
+
   // Global affordances: ⌘K opens the palette anywhere; ? opens the
   // shortcut reference. Same input guards as every other hotkey surface.
   useEffect(() => {
@@ -174,6 +185,9 @@ export function App() {
       const t = e.target as HTMLElement;
       if ((e.metaKey || e.ctrlKey) && !e.repeat && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        // The help renders above the palette but would sit BELOW it on the
+        // escape stack — close it instead of stacking inverted layers.
+        setHelpOpen(false);
         setPaletteOpen((v) => !v);
         return;
       }
@@ -204,6 +218,7 @@ export function App() {
     setCanvasId(undefined);
     setTimelineId(undefined);
     setGenerating(false);
+    setCanvasError(undefined); // an old open-in-canvas failure must not haunt other views
   };
 
   const jobs = useQuery({
@@ -219,14 +234,18 @@ export function App() {
   const glyphs: Record<string, string> = {
     story: "▦", scenes: "🎬", characters: "👤", canvases: "🖼", timelines: "🎞", library: "📁", jobs: "⟳",
   };
-  const navButton = (v: View, label: string) => (
+  const navButton = (v: View, label: string, opts?: { count?: number; alsoActive?: View[] }) => (
     <button
-      className={view === v ? "active" : ""}
+      className={view === v || opts?.alsoActive?.includes(view) ? "active" : ""}
       disabled={!project}
-      title={project ? label : "Open a project first"}
+      title={project ? label : `${label} — open a project first`}
       onClick={() => goTo(v)}
     >
-      {railCollapsed ? glyphs[v] ?? label[0] : label}
+      {railCollapsed
+        ? `${glyphs[v] ?? label[0]}${opts?.count ? opts.count : ""}`
+        : opts?.count
+          ? `${label} ⟳${opts.count}`
+          : label}
     </button>
   );
 
@@ -243,13 +262,12 @@ export function App() {
         >
           {railCollapsed ? "⌂" : "Projects"}
         </button>
-        {navButton("story", "Story")}
-        {navButton("scenes", "Scenes")}
+        {navButton("story", "Story", { alsoActive: ["scenes"] })}
         {navButton("characters", "Characters")}
         {navButton("canvases", "Canvases")}
         {navButton("timelines", "Timelines")}
         {navButton("library", "Library")}
-        {navButton("jobs", activeJobs > 0 ? `Jobs ⟳${activeJobs}` : "Jobs")}
+        {navButton("jobs", "Jobs", { count: activeJobs || undefined })}
         <div className="rail-foot">
           <button title="Keyboard shortcuts (?)" onClick={() => setHelpOpen(true)}>
             ⌨{!railCollapsed && " Shortcuts"}
@@ -283,16 +301,22 @@ export function App() {
           />
         )}
         {view === "scenes" && project && !sceneId && (
-          <ScenesPage projectId={project.id} onOpen={(id) => setSceneId(id)} />
+          <StoryBoardPage
+            projectId={project.id}
+            onOpenScene={(id) => {
+              setSceneId(id);
+              setView("scenes");
+            }}
+            onGenerateForShot={(shotId, label) =>
+              setGenerating({ shotId, label, nonce: ++generateNonce.current })
+            }
+          />
         )}
         {view === "scenes" && project && sceneId && (
           <ScenePage
             projectId={project.id}
             sceneId={sceneId}
-            onBack={() => {
-              setSceneId(undefined);
-              setGenerating(false);
-            }}
+            onBack={() => goTo("story")}
             onGenerateForShot={(shotId, label, recipeJson) =>
               setGenerating({
                 shotId,
@@ -379,7 +403,6 @@ export function App() {
             ...(project
               ? ([
                   { label: "Go to Story board", hint: "nav", run: () => goTo("story") },
-                  { label: "Go to Scenes", hint: "nav", run: () => goTo("scenes") },
                   { label: "Go to Characters", hint: "nav", run: () => goTo("characters") },
                   { label: "Go to Canvases", hint: "nav", run: () => goTo("canvases") },
                   { label: "Go to Timelines", hint: "nav", run: () => goTo("timelines") },
@@ -392,6 +415,10 @@ export function App() {
             { label: railCollapsed ? "Expand rail" : "Collapse rail", hint: "action", run: toggleRail },
             { label: "Keyboard shortcuts", hint: "help", run: () => setHelpOpen(true) },
           ] as PaletteCommand[])}
+          onOpenProject={(id, name) => {
+            setProject({ id, name });
+            goTo("story");
+          }}
           onOpenScene={(id) => { goTo("scenes"); setSceneId(id); }}
           onOpenCanvas={(id) => { goTo("canvases"); setCanvasId(id); }}
           onOpenTimeline={(id) => { goTo("timelines"); setTimelineId(id); }}

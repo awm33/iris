@@ -33,7 +33,7 @@ export function ProjectsPage(props: { onOpen: (projectId: string, name: string) 
         <button className="btn" disabled={!name.trim() || create.isPending} onClick={() => create.mutate(name.trim())}>
           Create project
         </button>
-        {create.isError && <span className="status">create failed: {String(create.error)}</span>}
+        {create.isError && <span className="status error">create failed: {String(create.error)}</span>}
       </div>
 
       {projects.isLoading && <div className="empty">Loading…</div>}
@@ -43,9 +43,11 @@ export function ProjectsPage(props: { onOpen: (projectId: string, name: string) 
       )}
       <div className="grid">
         {projects.data?.projects.map((p) => (
-          <button key={p.id} className="card card-button" onClick={() => props.onOpen(p.id, p.name)}>
-            <div className="name">{p.name}</div>
-            <div className="meta">{p.description || p.id}</div>
+          <button key={p.id} className="card card-button" title={p.name} onClick={() => props.onOpen(p.id, p.name)}>
+            <div className="name truncate">{p.name}</div>
+            {/* No raw prj_… ids as pseudo-descriptions — an empty line reads
+                better than plumbing. */}
+            <div className="meta truncate">{p.description || "no description"}</div>
           </button>
         ))}
       </div>
