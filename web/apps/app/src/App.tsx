@@ -2,10 +2,11 @@
 // Live: Projects, Story board (project landing), Scenes (+ scene detail),
 // Characters, Canvases (+ canvas editor), Timelines (+ editor), Library,
 // Jobs, and the Generate panel with shot targeting.
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Code, ConnectError } from "@connectrpc/connect";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { JobState } from "@iris/api-client";
-import { generationClient } from "./api";
+import { generationClient, workspaceClient } from "./api";
+import { isActiveJob } from "./jobBadges";
 import { CanvasesPage } from "./canvas/CanvasesPage";
 import { TimelinesPage } from "./timeline/TimelinesPage";
 import { TimelinePage } from "./timeline/TimelinePage";
@@ -25,6 +26,42 @@ import { useEvents } from "./useEvents";
 
 type View = "projects" | "story" | "scenes" | "characters" | "canvases" | "timelines" | "library" | "jobs";
 
+const VIEWS: View[] = ["projects", "story", "scenes", "characters", "canvases", "timelines", "library", "jobs"];
+
+// URL scheme: #/projects, #/<view>/<projectId>, #/<view>/<projectId>/<entityId>
+// (scenes/canvases/timelines detail views). The hash is the ONLY routing
+// state carrier — refresh restores it, Back/Forward walk it, and every view
+// is linkable. Unparseable hashes fall back to Projects rather than a 404:
+// in a hash router a bad fragment is a typo, not a missing page.
+type Route = { view: View; projectId?: string; entityId?: string };
+
+function parseHash(hash: string): Route {
+  let parts: string[];
+  try {
+    parts = hash
+      .replace(/^#\/?/, "")
+      .split("/")
+      .filter(Boolean)
+      .map(decodeURIComponent);
+  } catch {
+    // Malformed percent-encoding ("#/story/prj%") throws in decodeURIComponent
+    // — a truncated pasted link is exactly the "typo" case above, and it must
+    // land on Projects, not crash render into a reload-proof ErrorBoundary.
+    return { view: "projects" };
+  }
+  const [view, projectId, entityId] = parts;
+  if (!view || !VIEWS.includes(view as View) || view === "projects" || !projectId) {
+    return { view: "projects" };
+  }
+  return { view: view as View, projectId, entityId };
+}
+
+function buildHash(view: View, projectId?: string, entityId?: string): string {
+  if (view === "projects" || !projectId) return "#/projects";
+  const parts = [view, projectId, ...(entityId ? [entityId] : [])];
+  return `#/${parts.map(encodeURIComponent).join("/")}`;
+}
+
 // localStorage can throw (Safari private mode, storage-disabled embeds) —
 // a rail-width nicety must never crash the shell at boot.
 const railPref = {
@@ -34,12 +71,25 @@ const railPref = {
 
 export function App() {
   useEvents();
-  const qc = useQueryClient();
-  const [view, setView] = useState<View>("projects");
-  const [project, setProject] = useState<{ id: string; name: string }>();
-  const [sceneId, setSceneId] = useState<string>();
-  const [canvasId, setCanvasId] = useState<string>();
-  const [timelineId, setTimelineId] = useState<string>();
+  // Boot state comes from the hash (not an effect): the state→hash sync
+  // effect below runs on first render, and if state started at defaults it
+  // would clobber a deep link before any restore effect could apply it.
+  // useState's lazy initializer (not a useRef argument): the expression must
+  // run once, not re-parse the live hash on every render.
+  const [bootRoute] = useState(() => parseHash(window.location.hash));
+  const [view, setView] = useState<View>(bootRoute.view);
+  const [project, setProject] = useState<{ id: string; name: string } | undefined>(
+    bootRoute.projectId ? { id: bootRoute.projectId, name: "…" } : undefined,
+  );
+  const [sceneId, setSceneId] = useState<string | undefined>(
+    bootRoute.view === "scenes" ? bootRoute.entityId : undefined,
+  );
+  const [canvasId, setCanvasId] = useState<string | undefined>(
+    bootRoute.view === "canvases" ? bootRoute.entityId : undefined,
+  );
+  const [timelineId, setTimelineId] = useState<string | undefined>(
+    bootRoute.view === "timelines" ? bootRoute.entityId : undefined,
+  );
   const [canvasError, setCanvasError] = useState<string>();
   const [generating, setGenerating] = useState<
     { shotId: string; label: string; prefill?: GeneratePrefill; nonce: number } | true | false
@@ -48,6 +98,74 @@ export function App() {
   const [railCollapsed, setRailCollapsed] = useState(() => railPref.get() === "min");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+
+  // Resolve a hash-restored project id to its real name (and confirm it
+  // still exists — a stale link must land on Projects, not a ghost shell).
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  const resolveProject = (id: string) => {
+    workspaceClient
+      .getProject({ id })
+      .then((res) => {
+        setProject((p) =>
+          p?.id === id ? { id, name: res.project?.name || id } : p,
+        );
+      })
+      .catch((e) => {
+        if (projectRef.current?.id !== id) return; // user already moved on
+        // Only a confirmed-missing project abandons the URL — a transient
+        // outage keeps the placeholder and lets the page queries surface it.
+        if (!(e instanceof ConnectError && e.code === Code.NotFound)) return;
+        // replaceState, not push: pushing #/projects on top of the dead
+        // entry would trap Back (every press re-lands on the dead link and
+        // bounces forward again).
+        window.history.replaceState(null, "", "#/projects");
+        setProject(undefined);
+        setView("projects");
+      });
+  };
+  useEffect(() => {
+    if (bootRoute.projectId) resolveProject(bootRoute.projectId);
+    // Back/Forward (and hand-edited fragments): apply the route. Same-
+    // document traversals that differ in fragment always fire hashchange.
+    const onHashChange = () => {
+      const r = parseHash(window.location.hash);
+      // Normalize malformed/partial fragments in place — pushing the
+      // canonical form would stack a junk entry per traversal onto them.
+      const canonical = buildHash(r.view, r.projectId, r.entityId);
+      if (window.location.hash !== canonical) {
+        window.history.replaceState(null, "", canonical);
+      }
+      setView(r.view);
+      setSceneId(r.view === "scenes" ? r.entityId : undefined);
+      setCanvasId(r.view === "canvases" ? r.entityId : undefined);
+      setTimelineId(r.view === "timelines" ? r.entityId : undefined);
+      setGenerating(false); // stale shot targets must not survive traversal
+      if (!r.projectId) {
+        setProject(undefined);
+      } else if (projectRef.current?.id !== r.projectId) {
+        setProject({ id: r.projectId, name: "…" });
+        resolveProject(r.projectId);
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // State → URL. Equality-guarded: applying a route FROM the hash re-derives
+  // the same hash, so traversal doesn't push echo entries. The first run
+  // REPLACES (normalizing a bare/junk boot URL must not add an entry the
+  // user has to Back through twice to leave the site).
+  const syncedOnce = useRef(false);
+  useEffect(() => {
+    const h = buildHash(view, project?.id, sceneId ?? canvasId ?? timelineId);
+    if (window.location.hash !== h) {
+      if (syncedOnce.current) window.history.pushState(null, "", h);
+      else window.history.replaceState(null, "", h);
+    }
+    syncedOnce.current = true;
+  }, [view, project?.id, sceneId, canvasId, timelineId]);
 
   // Global affordances: ⌘K opens the palette anywhere; ? opens the
   // shortcut reference. Same input guards as every other hotkey surface.
@@ -94,19 +212,9 @@ export function App() {
     queryFn: () => generationClient.listJobs({ projectId: project!.id }),
     // Slow-poll backstop while jobs are in flight: SSE is best-effort (a
     // dropped terminal event or a bridge outage must not strand the UI).
-    refetchInterval: (query) =>
-      query.state.data?.jobs.some(
-        (j) =>
-          j.state === JobState.QUEUED || j.state === JobState.DISPATCHED || j.state === JobState.RUNNING,
-      )
-        ? 15_000
-        : false,
+    refetchInterval: (query) => (query.state.data?.jobs.some(isActiveJob) ? 15_000 : false),
   });
-  const activeJobs =
-    jobs.data?.jobs.filter(
-      (j) =>
-        j.state === JobState.QUEUED || j.state === JobState.DISPATCHED || j.state === JobState.RUNNING,
-    ).length ?? 0;
+  const activeJobs = jobs.data?.jobs.filter(isActiveJob).length ?? 0;
 
   const glyphs: Record<string, string> = {
     story: "▦", scenes: "🎬", characters: "👤", canvases: "🖼", timelines: "🎞", library: "📁", jobs: "⟳",
@@ -209,10 +317,7 @@ export function App() {
             key={canvasId}
             canvasId={canvasId}
             projectId={project.id}
-            onBack={() => {
-              setCanvasId(undefined);
-              void qc.invalidateQueries({ queryKey: ["canvases"] });
-            }}
+            onBack={() => setCanvasId(undefined)} // list refresh: CanvasPage unmount effect
           />
         )}
         {view === "timelines" && project && !timelineId && (

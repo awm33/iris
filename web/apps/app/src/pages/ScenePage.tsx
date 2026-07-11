@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { JobState, type Shot } from "@iris/api-client";
+import { type Shot } from "@iris/api-client";
 import { generationClient, storyClient } from "../api";
+import { shotJobBadges } from "../jobBadges";
 import { AssetThumb, VersionThumb } from "../components/AssetThumb";
 import { ImagePicker } from "../components/ImagePicker";
 import { TakePicker } from "../components/TakePicker";
@@ -32,15 +33,7 @@ export function ScenePage(props: {
     queryKey: ["jobs", props.projectId],
     queryFn: () => generationClient.listJobs({ projectId: props.projectId }),
   });
-  const generatingShots = new Set(
-    (jobs.data?.jobs ?? [])
-      .filter(
-        (j) =>
-          (j.state === JobState.QUEUED || j.state === JobState.DISPATCHED || j.state === JobState.RUNNING) &&
-          j.targetEntityId !== "",
-      )
-      .map((j) => j.targetEntityId),
-  );
+  const shotBadges = shotJobBadges(jobs.data?.jobs ?? []);
 
   const addView = useMutation({
     mutationFn: (p: { assetId: string; name: string }) =>
@@ -164,7 +157,8 @@ export function ScenePage(props: {
               index={i}
               shot={sh}
               sceneId={props.sceneId}
-              generating={generatingShots.has(sh.id)}
+              generating={shotBadges.generating.has(sh.id)}
+              failedReason={shotBadges.failed.get(sh.id)}
               onGenerate={(recipeJson) =>
                 props.onGenerateForShot(
                   sh.id,
@@ -197,6 +191,7 @@ function ShotCard(props: {
   shot: Shot;
   sceneId: string;
   generating: boolean;
+  failedReason?: string;
   onGenerate: (recipeJson?: string) => void;
 }) {
   const qc = useQueryClient();
@@ -237,6 +232,9 @@ function ShotCard(props: {
           {props.generating ? " · ⟳ generating" : ""}
           {sh.continuityStale ? " · ⚠ stale" : ""}
         </div>
+        {!props.generating && props.failedReason && (
+          <div className="status error">⚠ last generation failed: {props.failedReason}</div>
+        )}
         {del.isError && <div className="status error">{String(del.error)}</div>}
       </div>
       <div className="shot-actions">
