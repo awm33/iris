@@ -215,6 +215,10 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   // otherwise clears the selection.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Shell overlays (⌘K, ?) own the keyboard while open — without this,
+      // Esc-to-close-the-help also discarded a billed choosing strip, and
+      // Enter invisibly committed the previewed candidate (review PR44-M1).
+      if (document.querySelector(".palette-overlay, .help-overlay")) return;
       const t = e.target as HTMLElement;
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
@@ -523,7 +527,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         name: genFill.removal
           ? "Remove"
           : genFill.prompt
-            ? `Gen fill · ${genFill.prompt.length > 24 ? genFill.prompt.slice(0, 24) + "…" : genFill.prompt}`
+            ? `Gen fill · ${[...genFill.prompt].length > 24 ? [...genFill.prompt].slice(0, 24).join("") + "…" : genFill.prompt}`
             : "Gen fill",
         kind: "image",
         version_id: genFill.candidates[genFill.index],
@@ -889,7 +893,7 @@ function ScenePickerRow(props: { projectId: string; onPick: (sceneId: string) =>
     <div className="genfill-bar">
       <span className="meta">Add flattened canvas as a view of…</span>
       {scenes.isLoading && <span className="meta">Loading…</span>}
-      {scenes.data?.scenes.length === 0 && <span className="meta">No scenes yet — create one on the Scenes page.</span>}
+      {scenes.data?.scenes.length === 0 && <span className="meta">No scenes yet — create one on the Story board.</span>}
       {scenes.data?.scenes.map((s) => (
         <button key={s.id} className="btn secondary chip-add" onClick={() => props.onPick(s.id)}>
           {s.name}

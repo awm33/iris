@@ -66,7 +66,7 @@ export function GenFillBar(props: {
           {st.candidates.length > 1
             ? `Take ${st.index + 1}/${st.candidates.length} — ←/→ to compare, Enter to commit`
             : `${st.removal ? "Removal" : "Result"} — Enter to commit`}
-          {st.prompt ? ` · “${st.prompt.length > 40 ? st.prompt.slice(0, 40) + "…" : st.prompt}”` : ""}
+          {st.prompt ? ` · “${[...st.prompt].length > 40 ? [...st.prompt].slice(0, 40).join("") + "…" : st.prompt}”` : ""}
         </span>
         <div className="genfill-strip">
           {st.candidates.map((v, i) => (
@@ -90,7 +90,7 @@ export function GenFillBar(props: {
           {st.phase === "submitting"
             ? "Uploading source + mask…"
             : `Generating… ${Math.round((props.progress ?? 0) * 100)}%${
-                st.prompt ? ` · “${st.prompt.length > 40 ? st.prompt.slice(0, 40) + "…" : st.prompt}”` : ""
+                st.prompt ? ` · “${[...st.prompt].length > 40 ? [...st.prompt].slice(0, 40).join("") + "…" : st.prompt}”` : ""
               }`}
         </span>
         {/* Cancelable in BOTH phases: a large-canvas flatten + two uploads

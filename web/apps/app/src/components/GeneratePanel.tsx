@@ -381,7 +381,7 @@ export function GeneratePanel(props: {
     fallbackNotes.push(`Original model unavailable — using ${endpoint.displayName}.`);
   }
   if (props.prefill?.task && activeTask !== props.prefill.task) {
-    fallbackNotes.push(`Task "${props.prefill.task}" not supported here — using "${activeTask}".`);
+    fallbackNotes.push(`Task "${taskLabel(props.prefill.task)}" not supported here — using "${taskLabel(activeTask)}".`);
   }
   if (effectiveRefs.length + effectiveAudioRefs.length !== refs.length) {
     fallbackNotes.push(

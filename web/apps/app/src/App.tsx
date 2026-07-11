@@ -185,6 +185,9 @@ export function App() {
       const t = e.target as HTMLElement;
       if ((e.metaKey || e.ctrlKey) && !e.repeat && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        // The help renders above the palette but would sit BELOW it on the
+        // escape stack — close it instead of stacking inverted layers.
+        setHelpOpen(false);
         setPaletteOpen((v) => !v);
         return;
       }

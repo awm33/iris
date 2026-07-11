@@ -271,7 +271,7 @@ function AssetCard({
           loading={scenes.isLoading}
           pending={promoteView.isPending}
           items={(scenes.data?.scenes ?? []).map((s) => ({ id: s.id, label: s.name }))}
-          emptyHint="No scenes yet — create one on the Scenes page."
+          emptyHint="No scenes yet — create one on the Story board."
           onPick={(id) => promoteView.mutate(id)}
           onClose={() => setPromoting(null)}
         />
