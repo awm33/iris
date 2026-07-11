@@ -89,11 +89,12 @@ export function GenFillBar(props: {
             ? "Uploading source + mask…"
             : `Generating… ${Math.round((props.progress ?? 0) * 100)}%`}
         </span>
-        {st.phase === "generating" && (
-          <button className="btn secondary" onClick={props.onDiscard}>
-            Cancel
-          </button>
-        )}
+        {/* Cancelable in BOTH phases: a large-canvas flatten + two uploads
+            can hang, and a bar with no button while Esc is suppressed was a
+            trap (review P1.8). */}
+        <button className="btn secondary" onClick={props.onDiscard}>
+          Cancel
+        </button>
       </div>
     );
   }

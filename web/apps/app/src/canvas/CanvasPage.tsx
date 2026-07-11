@@ -12,6 +12,7 @@ import {
   type SyncStatus,
 } from "@iris/doc-runtime";
 import { assetClient, canvasClient, canvasKeepaliveClient, generationClient, storyClient, uploadFile } from "../api";
+import { isActiveJob } from "../jobBadges";
 import { flatten, LayerRasterCache } from "./renderer";
 import { CanvasViewport, type CanvasTool } from "./CanvasViewport";
 import { GenFillBar, type GenFillState } from "./GenFillBar";
@@ -60,6 +61,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   // Subject-select session: the flatten is uploaded once and reused until
   // the doc changes (ops length moves); clicks accumulate as refine points.
   const subjectRef = useRef<{ versionId: string; opsLen: number; points: { x: number; y: number; negative: boolean }[] } | null>(null);
+  // Bumped by discard: a gen-fill submit in flight checks it after every
+  // await and abandons itself (see submitGenFill).
+  const submitNonce = useRef(0);
 
   // Image-layer pixels: versionId → Image, loaded via signed URLs.
   // crossOrigin=anonymous keeps the canvas untainted so export can read it.
@@ -182,11 +186,19 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     // urgent=true → keepalive fetch: an ordinary fetch is killed on unload
     // and the debounced batch would be silently lost.
     const flush = () => void session.sync.flush(true);
-    window.addEventListener("beforeunload", flush);
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      flush();
+      // Ops the server REJECTED (not a transient outage) can only be saved
+      // by user action — closing the tab silently discards them. Ask.
+      if (session.sync.status === "error" && !session.sync.retrying && session.sync.pendingCount > 0) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
     document.addEventListener("visibilitychange", flush);
     return () => {
       unsub();
-      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("beforeunload", onBeforeUnload);
       document.removeEventListener("visibilitychange", flush);
       flush();
     };
@@ -234,9 +246,11 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   });
 
   // Gen-fill stances, stated once (v1, single-user):
-  // - Navigating away mid-generation cancels nothing: the job completes and
-  //   its candidates land in the Library (reachable via Jobs), but the
-  //   choosing UI does not reattach on return.
+  // - Navigating away mid-generation cancels nothing; on RETURN the canvas
+  //   re-attaches to a still-ACTIVE inpaint job targeting it (the poll below
+  //   then carries it into choosing as usual). Jobs that finished while away
+  //   stay in Library/Jobs — resurrecting a completed strip would also
+  //   resurrect every strip the user already discarded.
   // - Editing while generating is allowed; the eventual commit is a masked
   //   layer over the doc AS IT IS THEN — "fill this region as it was when I
   //   asked". Strokes painted inside the selection meanwhile end up occluded
@@ -250,6 +264,30 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     queryFn: () => generationClient.listModelEndpoints({}),
   });
   const gfEndpoints = genFillEndpoints(endpoints.data?.endpoints ?? []);
+
+  // Re-attach on mount: an ACTIVE inpaint job targeting this canvas (the
+  // user backed out mid-generation and returned) resumes the generating UI.
+  // The job's echoed conditioning carries the mask refs commit needs.
+  const reattached = useRef(false);
+  useEffect(() => {
+    if (reattached.current || !session) return;
+    reattached.current = true;
+    void generationClient.listJobs({ projectId: props.projectId }).then((r) => {
+      // Newest-first; only ever adopt the most recent claim on this canvas.
+      const j = r.jobs.find((x) => x.targetEntityId === props.canvasId && x.task === "inpaint");
+      if (!j || !isActiveJob(j) || !j.conditioning?.mask) return;
+      setGenFill((cur) =>
+        cur ?? {
+          phase: "generating",
+          jobId: j.id,
+          maskVersionId: j.conditioning!.mask!.versionId,
+          maskAssetId: j.conditioning!.mask!.assetId,
+          removal: j.prompt === "",
+        },
+      );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
 
   // Poll the gen-fill job while it runs (SSE invalidation accelerates this;
   // polling is the backstop, same stance as everywhere else).
@@ -400,12 +438,18 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     // The genFill guard doubles as a re-entrancy lock: a second submit would
     // overwrite the first job's id — never polled, never cancelable, billed.
     if (!selection || genFill) return;
+    // Discard during the submitting phase bumps the nonce; every await below
+    // re-checks it so an abandoned submit never creates (or reports) a job.
+    const nonce = ++submitNonce.current;
+    const aborted = () => submitNonce.current !== nonce;
     setGenFillError(undefined);
     setGenFill({ phase: "submitting" });
     try {
       const profile = pickProfile(ep, canvas.width, canvas.height);
       if (!profile) throw new Error(`canvas exceeds ${ep.name}'s max resolution`);
-      const src = await uploadFile(await flattenToFile(" (gen-fill source)"), props.projectId);
+      // "utility": workflow intermediates — hidden from the default Library.
+      const src = await uploadFile(await flattenToFile(" (gen-fill source)"), props.projectId, ["utility"]);
+      if (aborted()) return;
       // Removal grows the mask (Photoshop-style): fringes and slight
       // under-selection must not leave amputated object edges behind.
       // Prompted gen-fill keeps the exact selection — it IS the intent.
@@ -414,8 +458,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
       const mask = await uploadFile(
         new File([maskBlob], `${canvas.name} (gen-fill mask).png`, { type: "image/png" }),
         props.projectId,
+        ["utility"],
       );
-      void qc.invalidateQueries({ queryKey: ["assets"] });
+      if (aborted()) return;
       const r = await generationClient.createJob({
         job: {
           projectId: props.projectId,
@@ -432,6 +477,11 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           },
         },
       });
+      if (aborted()) {
+        // Job created in the abort window: stop paying for it, silently.
+        void generationClient.cancelJob({ id: r.job!.id }).catch(() => {});
+        return;
+      }
       setGenFill({
         phase: "generating",
         jobId: r.job!.id,
@@ -440,6 +490,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         removal: prompt === "",
       });
     } catch (e) {
+      if (aborted()) return; // the user already walked away from this submit
       setGenFillError(String(e));
       setGenFill(undefined);
     }
@@ -468,6 +519,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
 
   async function discardGenFill() {
     const jobId = genFill?.phase === "generating" ? genFill.jobId : undefined;
+    // A submit in flight is abandoned by the nonce bump — its remaining
+    // awaits see the change and bail (canceling the job if one was created).
+    submitNonce.current++;
     // Clear state BEFORE the cancel roundtrip: if the poll fetches CANCELED
     // mid-await, the effect would surface the user's own cancel as an error.
     setGenFill(undefined);
@@ -534,7 +588,22 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   return (
     <div className="canvas-page">
       <div className="toolbar canvas-toolbar">
-        <button className="btn secondary" onClick={props.onBack}>
+        <button
+          className="btn secondary"
+          onClick={() => {
+            // Rejected-and-unretryable ops die with the session — confirm
+            // before Back throws them away (Retry save is right there).
+            if (
+              status === "error" &&
+              !retrying &&
+              (session?.sync.pendingCount ?? 0) > 0 &&
+              !window.confirm("Some edits could not be saved and will be lost if you leave. Leave anyway?")
+            ) {
+              return;
+            }
+            props.onBack();
+          }}
+        >
           ←
         </button>
         <span className="truncate" style={{ maxWidth: 220 }}>
@@ -583,8 +652,17 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           {status === "pending" && "…"}
           {status === "saving" && "saving…"}
           {status === "error" &&
-            `save failed: ${syncError ?? ""} ${retrying ? "(retrying)" : "(ops kept locally — not retryable)"}`}
+            `save failed: ${syncError ?? ""} ${retrying ? "(retrying)" : "(ops kept locally)"}`}
         </span>
+        {status === "error" && !retrying && (
+          <button
+            className="btn secondary"
+            title="Re-attempt the failed save — the edits are still queued locally"
+            onClick={() => void session?.sync.flush()}
+          >
+            ↻ Retry save
+          </button>
+        )}
         {imageError && <span className="status error">{imageError}</span>}
         {/* The GenFillBar renders errors while mounted; before a selection
             exists (e.g. a failed subject click) this is the only surface. */}

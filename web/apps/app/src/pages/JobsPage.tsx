@@ -5,7 +5,11 @@ import { JobState, type GenerationJob } from "@iris/api-client";
 import { assetClient, generationClient } from "../api";
 import { isActiveJob, isPromptFault, isRetryFutile } from "../jobBadges";
 
-export function JobsPage(props: { projectId?: string }) {
+export function JobsPage(props: {
+  projectId?: string;
+  /** Jump to the shot's scene or the canvas a job targeted. */
+  onOpenTarget?: (targetEntityId: string, targetSceneId: string) => void;
+}) {
   const jobs = useQuery({
     queryKey: ["jobs", props.projectId ?? ""],
     enabled: !!props.projectId,
@@ -28,7 +32,7 @@ export function JobsPage(props: { projectId?: string }) {
         <div className="empty">No generation jobs yet — hit ⚡ Generate in the Library.</div>
       )}
       <div className="job-list">
-        {jobs.data?.jobs.map((j) => <JobCard key={j.id} job={j} />)}
+        {jobs.data?.jobs.map((j) => <JobCard key={j.id} job={j} onOpenTarget={props.onOpenTarget} />)}
       </div>
     </div>
   );
@@ -45,7 +49,13 @@ const stateLabel: Partial<Record<JobState, string>> = {
   [JobState.CANCELED]: "canceled",
 };
 
-function JobCard({ job }: { job: GenerationJob }) {
+function JobCard({
+  job,
+  onOpenTarget,
+}: {
+  job: GenerationJob;
+  onOpenTarget?: (targetEntityId: string, targetSceneId: string) => void;
+}) {
   const qc = useQueryClient();
   const active = isActiveJob(job);
   // A safety-blocked / invalid-input / dependency failure fails identically
@@ -70,6 +80,21 @@ function JobCard({ job }: { job: GenerationJob }) {
           {stateLabel[job.state]} · {job.count > 1 ? `${job.count} takes · ` : ""}
           {job.task} · {job.profile}
           {job.costActual ? ` · ${job.costActual.toFixed(1)} gpu·s` : ""}
+          {job.targetLabel &&
+            (onOpenTarget ? (
+              <>
+                {" · "}
+                <button
+                  className="link-button"
+                  title="Open the shot's scene / the canvas"
+                  onClick={() => onOpenTarget(job.targetEntityId, job.targetSceneId)}
+                >
+                  → {job.targetLabel}
+                </button>
+              </>
+            ) : (
+              ` · → ${job.targetLabel}`
+            ))}
         </div>
         {active && (
           <div className="progress">

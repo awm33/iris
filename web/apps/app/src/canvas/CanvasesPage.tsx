@@ -82,13 +82,17 @@ export function CanvasesPage(props: { projectId: string; onOpen: (id: string) =>
       )}
       <div className="grid">
         {canvases.data?.canvases.map((c) => (
-          <div key={c.id} className="card" onClick={() => props.onOpen(c.id)}>
-            <div className="thumb-placeholder">🎨</div>
-            <div className="name">{c.name}</div>
-            <div className="meta">
-              {c.width}×{c.height} · {c.headSeq.toString()} ops
-            </div>
-            <div className="promote-row" onClick={(e) => e.stopPropagation()}>
+          <div key={c.id} className="card">
+            {/* The open target is a real button (keyboard-reachable); the
+                Delete row stays a sibling — buttons must not nest. */}
+            <button className="card-button" onClick={() => props.onOpen(c.id)} title="Open canvas">
+              <div className="thumb-placeholder">🎨</div>
+              <div className="name">{c.name}</div>
+              <div className="meta">
+                {c.width}×{c.height} · {c.headSeq.toString()} ops
+              </div>
+            </button>
+            <div className="promote-row">
               {confirmDelete === c.id ? (
                 <>
                   <button

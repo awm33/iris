@@ -25,6 +25,10 @@ message Asset {
   string name = 5;
   string head_version_id = 6;
   repeated string tags = 7;
+  // The generation job (parent) that produced the head version, resolved
+  // from lineage. Populated by ListAssets only — the Library groups fan-out
+  // candidates by it. Empty for uploads/imports.
+  string source_job_id = 8;
   Timestamps timestamps = 15;
 }
 
@@ -111,6 +115,9 @@ message StartUploadRequest {
   string filename = 3;
   string content_type = 4;
   int64 size_bytes = 5;
+  // Carried onto the created asset. "utility" hides workflow intermediates
+  // (gen-fill source/mask flattens) from the default Library listing.
+  repeated string tags = 6;
 }
 message StartUploadResponse {
   string upload_id = 1;
