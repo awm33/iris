@@ -1,5 +1,5 @@
 import { Code, ConnectError } from "@connectrpc/connect";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { AssetKind, type Asset } from "@iris/api-client";
 import { assetClient, storyClient, uploadFile } from "../api";
@@ -19,6 +19,9 @@ export function LibraryPage(props: {
 
   const assets = useQuery({
     queryKey: ["assets", props.projectId ?? "", search],
+    // Typing must not unmount the grid to "Loading…" between keystrokes
+    // (which would also collapse every expanded stack).
+    placeholderData: keepPreviousData,
     queryFn: () => assetClient.listAssets({ projectId: props.projectId ?? "", query: search }),
   });
 
@@ -102,7 +105,9 @@ export function LibraryPage(props: {
         <div className="empty">
           {search
             ? "No matches — try a different search."
-            : "Library is empty — upload an image, video, or audio file."}
+            : utilityCount > 0
+              ? `${utilityCount} utility file${utilityCount > 1 ? "s" : ""} hidden — nothing else here yet.`
+              : "Library is empty — upload an image, video, or audio file."}
         </div>
       )}
       <div className="grid">

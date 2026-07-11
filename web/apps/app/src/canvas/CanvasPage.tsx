@@ -187,11 +187,16 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     // and the debounced batch would be silently lost.
     const flush = () => void session.sync.flush(true);
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      // Evaluate BEFORE flushing: flush() synchronously flips status to
+      // "saving", so a post-flush check can never see "error" (review H1).
+      const unsaveable =
+        session.sync.status === "error" && !session.sync.retrying && session.sync.pendingCount > 0;
       flush();
       // Ops the server REJECTED (not a transient outage) can only be saved
       // by user action — closing the tab silently discards them. Ask.
-      if (session.sync.status === "error" && !session.sync.retrying && session.sync.pendingCount > 0) {
+      if (unsaveable) {
         e.preventDefault();
+        e.returnValue = ""; // legacy engines require the assignment form
       }
     };
     window.addEventListener("beforeunload", onBeforeUnload);
@@ -272,7 +277,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   useEffect(() => {
     if (reattached.current || !session) return;
     reattached.current = true;
-    void generationClient.listJobs({ projectId: props.projectId }).then((r) => {
+    void generationClient
+      .listJobs({ projectId: props.projectId })
+      .then((r) => {
       // Newest-first; only ever adopt the most recent claim on this canvas.
       const j = r.jobs.find((x) => x.targetEntityId === props.canvasId && x.task === "inpaint");
       if (!j || !isActiveJob(j) || !j.conditioning?.mask) return;
@@ -285,7 +292,10 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           removal: j.prompt === "",
         },
       );
-    });
+      })
+      .catch(() => {
+        /* best-effort: no reattach on a flaky mount, nothing to surface */
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
