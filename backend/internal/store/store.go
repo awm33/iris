@@ -179,7 +179,7 @@ type Asset struct {
 	Tags                                                  []string
 	// Parent generation job that produced the head version (lineage);
 	// populated by ListAssets only. Groups fan-out candidates in the Library.
-	SourceJobID string
+	SourceJobID          string
 	CreatedAt, UpdatedAt Time
 }
 

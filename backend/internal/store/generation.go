@@ -24,10 +24,10 @@ type GenJob struct {
 	// only (the Jobs UI links back to the shot/canvas a job was for).
 	TargetLabel, TargetSceneID string
 	Progress                   float64
-	ErrorCode, ErrorMessage                string
-	CostEstimate, CostActual               float64
-	ArtifactVersionIDs                     []string
-	CreatedAt, UpdatedAt                   Time
+	ErrorCode, ErrorMessage    string
+	CostEstimate, CostActual   float64
+	ArtifactVersionIDs         []string
+	CreatedAt, UpdatedAt       Time
 }
 
 // GenRequest is the resolved request stored on each job row (asset ids, not
