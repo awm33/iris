@@ -5,7 +5,7 @@ import { type GenFillEndpoint, pickRemovalEndpoint } from "./genfill";
 
 export type GenFillState =
   | { phase: "submitting" }
-  | { phase: "generating"; jobId: string; maskVersionId: string; maskAssetId: string; removal?: boolean }
+  | { phase: "generating"; jobId: string; maskVersionId: string; maskAssetId: string; removal?: boolean; prompt?: string }
   | {
       phase: "choosing";
       jobId: string;
@@ -14,6 +14,7 @@ export type GenFillState =
       candidates: string[]; // artifact version ids
       index: number;
       removal?: boolean;
+      prompt?: string;
     };
 
 /**
@@ -63,8 +64,9 @@ export function GenFillBar(props: {
       <div className="genfill-bar">
         <span className="meta">
           {st.candidates.length > 1
-            ? `Candidate ${st.index + 1}/${st.candidates.length} — ←/→ to compare, Enter to commit`
+            ? `Take ${st.index + 1}/${st.candidates.length} — ←/→ to compare, Enter to commit`
             : `${st.removal ? "Removal" : "Result"} — Enter to commit`}
+          {st.prompt ? ` · “${st.prompt.length > 40 ? st.prompt.slice(0, 40) + "…" : st.prompt}”` : ""}
         </span>
         <div className="genfill-strip">
           {st.candidates.map((v, i) => (
@@ -87,7 +89,9 @@ export function GenFillBar(props: {
         <span className="meta">
           {st.phase === "submitting"
             ? "Uploading source + mask…"
-            : `Generating… ${Math.round((props.progress ?? 0) * 100)}%`}
+            : `Generating… ${Math.round((props.progress ?? 0) * 100)}%${
+                st.prompt ? ` · “${st.prompt.length > 40 ? st.prompt.slice(0, 40) + "…" : st.prompt}”` : ""
+              }`}
         </span>
         {/* Cancelable in BOTH phases: a large-canvas flatten + two uploads
             can hang, and a bar with no button while Esc is suppressed was a
@@ -102,7 +106,7 @@ export function GenFillBar(props: {
   if (props.endpoints.length === 0) {
     return (
       <div className="genfill-bar">
-        <span className="status error">No endpoint offers gen-fill (task "inpaint" + mask/source_image).</span>
+        <span className="status error">None of the available models can gen-fill (inpaint into a selection).</span>
         <button className="chip-x" title="Dismiss (Esc) — clears the selection" onClick={props.onDismiss}>
           ×
         </button>
@@ -154,8 +158,8 @@ export function GenFillBar(props: {
           ))}
         </select>
       )}
-      <select value={count} onChange={(e) => setCount(Number(e.target.value))} aria-label="Candidates">
-        {[1, 2, 4, 6].map((n) => (
+      <select value={count} onChange={(e) => setCount(Number(e.target.value))} aria-label="Takes">
+        {[1, 2, 4, 8].map((n) => (
           <option key={n} value={n}>
             ×{n}
           </option>
@@ -164,18 +168,20 @@ export function GenFillBar(props: {
       <button
         className="btn"
         disabled={!prompt.trim() || !endpoint}
-        title={endpoint ? undefined : "No prompt-conditioned endpoint is available — only removal specialists are up"}
+        title={endpoint ? undefined : "No prompt-capable model is available — only removal specialists are up"}
         onClick={() => endpoint && props.onGenerate(prompt.trim(), count, endpoint)}
       >
         ⚡ Generate
       </button>
       <button
         className="btn secondary"
-        disabled={!removalEndpoint}
+        disabled={!removalEndpoint || prompt.trim() !== ""}
         title={
-          removalEndpoint
-            ? `Remove: reconstruct the background under the selection (${removalEndpoint.name})`
-            : "No endpoint fits this canvas for removal"
+          prompt.trim() !== ""
+            ? "Remove ignores the prompt — clear it first (or hit Generate)"
+            : removalEndpoint
+              ? `Remove: reconstruct the background under the selection (${removalEndpoint.name})`
+              : "No model fits this canvas for removal"
         }
         onClick={() => removalEndpoint && props.onGenerate("", 1, removalEndpoint)}
       >

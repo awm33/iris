@@ -134,7 +134,17 @@ export function GeneratePanel(props: {
     [endpoints.data],
   );
 
-  const [endpointId, setEndpointId] = useState<string | undefined>(props.prefill?.endpointId);
+  // Model choice is per-operation and REMEMBERED (same contract as the
+  // gen-fill bar): an image-dogfooding user must not re-pick FLUX over the
+  // video default on every single open. Prefill (regenerate) wins.
+  const [endpointId, setEndpointId] = useState<string | undefined>(() => {
+    if (props.prefill?.endpointId) return props.prefill.endpointId;
+    try {
+      return localStorage.getItem("iris.generate.endpoint") ?? undefined;
+    } catch {
+      return undefined;
+    }
+  });
   const endpoint = healthy.find((e) => e.id === endpointId) ?? healthy[0];
   const manifest = useMemo<Manifest | undefined>(() => {
     if (!endpoint) return undefined;
@@ -339,7 +349,14 @@ export function GeneratePanel(props: {
     },
   });
 
-  if (endpoints.isLoading) return <aside className="panel">Loading models…</aside>;
+  if (endpoints.isLoading) {
+    return (
+      <aside className="panel">
+        <PanelHeader onClose={props.onClose} />
+        <div className="empty">Loading models…</div>
+      </aside>
+    );
+  }
   if (endpoints.isError) {
     return (
       <aside className="panel">
@@ -387,7 +404,7 @@ export function GeneratePanel(props: {
         </label>
       )}
       {fallbackNotes.length > 0 && (
-        <div className="status error">{fallbackNotes.join(" ")}</div>
+        <div className="status warn">{fallbackNotes.join(" ")}</div>
       )}
 
       <label className="field">
@@ -399,6 +416,11 @@ export function GeneratePanel(props: {
             // carrying them across a model switch would submit chips the
             // panel no longer displays.
             setEndpointId(e.target.value);
+            try {
+              localStorage.setItem("iris.generate.endpoint", e.target.value);
+            } catch {
+              /* session-only */
+            }
             setRefs([]);
             setShowRefPicker(false);
             setShowAudioPicker(false);
@@ -419,7 +441,9 @@ export function GeneratePanel(props: {
         Task
         <select value={activeTask} onChange={(e) => setTask(e.target.value)}>
           {offerableTasks.map((t) => (
-            <option key={t}>{t}</option>
+            <option key={t} value={t}>
+              {taskLabel(t)}
+            </option>
           ))}
         </select>
       </label>
@@ -604,9 +628,9 @@ export function GeneratePanel(props: {
         }
         onClick={() => create.mutate()}
       >
-        ⚡ Generate {count} {isVideo ? "take" : "candidate"}
-        {count > 1 ? "s" : ""}
-        {formatEstimate(estimate, count, manifest.pricing?.unit)}
+        {create.isPending
+          ? "Submitting…"
+          : `⚡ Generate ${count} take${count > 1 ? "s" : ""}${formatEstimate(estimate, count, manifest.pricing?.unit)}`}
       </button>
       {!durationValid && (
         <div className="status error">
@@ -636,6 +660,23 @@ const unitLabels: Record<string, string> = {
   usd_per_image: "USD",
   usd_per_job: "USD",
 };
+
+// Task ids come straight from model manifests — readable labels here,
+// raw ids preserved as values.
+function taskLabel(t: string): string {
+  const labels: Record<string, string> = {
+    t2i: "Text → image",
+    i2i: "Image → image",
+    inpaint: "Inpaint / fill",
+    t2v: "Text → video",
+    i2v: "Image → video",
+    extend: "Extend video",
+    v2v: "Video → video",
+    tts: "Text → speech",
+    lipsync_post: "Lip sync (post)",
+  };
+  return labels[t] ?? t;
+}
 
 function formatEstimate(estimate: number | undefined, count: number, unit?: string): string {
   if (estimate === undefined || !Number.isFinite(estimate)) return "";

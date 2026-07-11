@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { canvasClient, storyClient, timelineClient } from "../api";
+import { canvasClient, storyClient, timelineClient, workspaceClient } from "../api";
 import { useEscape } from "./AssetThumb";
 
 // ⌘K command palette (UX doc §3.1 header): navigation, actions, and
@@ -19,6 +19,7 @@ export function CommandPalette(props: {
   onOpenScene: (id: string) => void;
   onOpenCanvas: (id: string) => void;
   onOpenTimeline: (id: string) => void;
+  onOpenProject: (id: string, name: string) => void;
   onClose: () => void;
 }) {
   useEscape(props.onClose);
@@ -43,9 +44,22 @@ export function CommandPalette(props: {
     enabled: !!pid,
     queryFn: () => timelineClient.listTimelines({ projectId: pid }),
   });
+  // Projects are always jumpable — "Jump to…" from the Projects page used
+  // to answer "No matches" for a project name, which reads as broken.
+  const projects = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => workspaceClient.listProjects({}),
+  });
 
   const items = useMemo<PaletteCommand[]>(() => {
     const entities: PaletteCommand[] = [
+      ...(projects.data?.projects ?? [])
+        .filter((p) => p.id !== props.projectId)
+        .map((p) => ({
+          label: `Open project: ${p.name}`,
+          hint: "project",
+          run: () => props.onOpenProject(p.id, p.name),
+        })),
       ...(scenes.data?.scenes ?? []).map((s) => ({
         label: s.name,
         hint: "scene",
@@ -73,7 +87,7 @@ export function CommandPalette(props: {
     };
     return all.filter((c) => matches(c.label) || (c.hint && c.hint.includes(needle))).slice(0, 12);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, props.commands, scenes.data, canvases.data, timelines.data]);
+  }, [q, props.commands, scenes.data, canvases.data, timelines.data, projects.data]);
 
   useEffect(() => setHighlight(0), [q]);
 

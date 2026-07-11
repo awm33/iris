@@ -15,6 +15,7 @@
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-button { all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; cursor: pointer; }
+.status.warn { color: #e8b74a; }
 .link-button { all: unset; cursor: pointer; color: var(--accent, #8f7aff); }
 .link-button:hover { text-decoration: underline; }
 .link-button:focus-visible { outline: 2px solid var(--accent, #8f7aff); border-radius: 3px; }
@@ -451,7 +452,7 @@ kbd { background: var(--bg); border: 1px solid var(--border); border-radius: 4px
 .genfill-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Library promote */
-.promote-row { display: flex; gap: 6px; margin-top: 8px; }
+.promote-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .promote-list {
   margin-top: 8px;
   display: flex;

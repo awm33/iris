@@ -177,7 +177,9 @@ function SceneColumn(props: {
           Scene {props.index + 1} · {props.name}
         </span>
         <span className="meta">
-          {scene.isPending ? "…" : `${scene.data?.scene?.views.length ?? 0} views · ${shots.length} shots`}
+          {scene.isPending
+            ? "…"
+            : `${scene.data?.scene?.views.length ?? 0} view${(scene.data?.scene?.views.length ?? 0) === 1 ? "" : "s"} · ${shots.length} shot${shots.length === 1 ? "" : "s"}`}
           {reorder.isPending ? " · reordering…" : ""}
         </span>
       </button>

@@ -61,7 +61,7 @@ export function ScenePage(props: {
       <div>
         <div className="toolbar">
           <button className="btn secondary" onClick={props.onBack}>
-            ← Scenes
+            ← Story board
           </button>
         </div>
         <div className="empty">
@@ -82,7 +82,7 @@ export function ScenePage(props: {
     <div>
       <div className="toolbar">
         <button className="btn secondary" onClick={props.onBack}>
-          ← Scenes
+          ← Story board
         </button>
         <h2 style={{ margin: 0 }}>{sc.name}</h2>
       </div>

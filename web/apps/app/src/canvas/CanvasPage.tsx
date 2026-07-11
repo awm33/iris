@@ -64,6 +64,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
   // Bumped by discard: a gen-fill submit in flight checks it after every
   // await and abandons itself (see submitGenFill).
   const submitNonce = useRef(0);
+  const viewApi = useRef<{ fit: () => void; actual: () => void } | null>(null);
 
   // Image-layer pixels: versionId → Image, loaded via signed URLs.
   // crossOrigin=anonymous keeps the canvas untainted so export can read it.
@@ -290,6 +291,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           maskVersionId: j.conditioning!.mask!.versionId,
           maskAssetId: j.conditioning!.mask!.assetId,
           removal: j.prompt === "",
+          prompt: j.prompt,
         },
       );
       })
@@ -320,6 +322,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         candidates: j.artifactVersionIds,
         index: 0,
         removal: genFill.removal,
+        prompt: genFill.prompt,
       });
     } else if (j.state === JobState.COMPLETE) {
       // Terminal with nothing to choose — without this branch the poll would
@@ -498,6 +501,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         maskVersionId: mask.version!.id,
         maskAssetId: mask.asset!.id,
         removal: prompt === "",
+        prompt,
       });
     } catch (e) {
       if (aborted()) return; // the user already walked away from this submit
@@ -515,8 +519,12 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
       layer: {
         id,
         // Removal (empty prompt) and generation read differently in the
-        // layers panel — name them apart.
-        name: genFill.removal ? "Remove" : "Gen fill",
+        // layers panel; a prompt excerpt beats N layers all named "Gen fill".
+        name: genFill.removal
+          ? "Remove"
+          : genFill.prompt
+            ? `Gen fill · ${genFill.prompt.length > 24 ? genFill.prompt.slice(0, 24) + "…" : genFill.prompt}`
+            : "Gen fill",
         kind: "image",
         version_id: genFill.candidates[genFill.index],
         mask_version_id: genFill.maskVersionId,
@@ -589,8 +597,8 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         }
       : undefined;
 
-  const toolButton = (t: CanvasTool, label: string) => (
-    <button className={`btn secondary${tool === t ? " tool-active" : ""}`} onClick={() => setTool(t)}>
+  const toolButton = (t: CanvasTool, label: string, title?: string) => (
+    <button className={`btn secondary${tool === t ? " tool-active" : ""}`} title={title} onClick={() => setTool(t)}>
       {label}
     </button>
   );
@@ -627,7 +635,8 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
         {toolButton("eraser", "◻ Eraser")}
         {toolButton("marquee", "▭ Select")}
         {toolButton("lasso", "◯ Lasso")}
-        {toolButton("subject", subjectBusy ? "✨ …" : "✨ Subject")}
+        {toolButton("subject", subjectBusy ? "✨ …" : "✨ Subject",
+          "Click a subject to select it — click again to refine, shift-click to exclude a region")}
         {toolButton("text", "T Text")}
         <input
           type="color"
@@ -656,6 +665,12 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
           title="Shift+Cmd+Z"
         >
           ↪
+        </button>
+        <button className="btn secondary" title="Fit canvas to window" onClick={() => viewApi.current?.fit()}>
+          ⤢ Fit
+        </button>
+        <button className="btn secondary" title="Zoom to 100%" onClick={() => viewApi.current?.actual()}>
+          1:1
         </button>
         <span className={`status${status === "error" ? " error" : ""}`}>
           {status === "saved" && "saved"}
@@ -712,6 +727,7 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
 
       <div className="canvas-body">
         <CanvasViewport
+          onViewApi={(api) => (viewApi.current = api)}
           doc={doc}
           cache={cache}
           docW={canvas.width}

@@ -1,6 +1,6 @@
 import { Code, ConnectError } from "@connectrpc/connect";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { assetClient } from "../api";
 
 // Shared version thumbnail. kind-aware: images skip the guaranteed-404 poster
@@ -72,12 +72,26 @@ export function AssetThumb({
 }
 
 // Escape-to-close for modal pickers (UX doc §5 keyboard operability, minimum).
+// Overlays register on a stack and ONLY the topmost one handles Escape —
+// stacked overlays (take picker over scene page, picker over panel) must
+// close one at a time, as the shortcut help promises ("close topmost").
+const escapeStack: symbol[] = [];
 export function useEscape(onClose: () => void) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
+    const token = Symbol("escape-layer");
+    escapeStack.push(token);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      if (escapeStack[escapeStack.length - 1] !== token) return;
+      closeRef.current();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    return () => {
+      const i = escapeStack.indexOf(token);
+      if (i >= 0) escapeStack.splice(i, 1);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, []);
 }
