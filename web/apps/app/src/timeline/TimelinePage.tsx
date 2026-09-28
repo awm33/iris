@@ -746,24 +746,24 @@ export function TimelinePage(props: {
   return (
     <div>
       <div className="toolbar">
-        <button className="btn secondary" onClick={props.onBack}>←</button>
+        <button className="btn secondary icon" title="Back to timelines" aria-label="Back to timelines" onClick={props.onBack}>←</button>
         <span className="truncate" style={{ maxWidth: 220 }}>{tl.name}</span>
         <span className="meta">{tl.fps} fps</span>
         <button className="btn secondary" onClick={() => setPicking("media")}>+ Clip</button>
         <button className="btn secondary" onClick={() => setPicking("shots")}>⧉ Scene shots</button>
-        <button className="btn secondary" disabled={!doc.canUndo} onClick={() => doc.undo()}>↩</button>
-        <button className="btn secondary" disabled={!doc.canRedo} onClick={() => doc.redo()}>↪</button>
-        <button className="btn secondary" title="Blade at playhead (B)" onClick={blade}>🔪</button>
-        <button className="btn secondary" title="Play/pause (space)" onClick={togglePlay}>{playing ? "⏸" : "▶"}</button>
+        <button className="btn secondary icon" title="Undo (⌘Z)" aria-label="Undo" disabled={!doc.canUndo} onClick={() => doc.undo()}>↩</button>
+        <button className="btn secondary icon" title="Redo (⇧⌘Z)" aria-label="Redo" disabled={!doc.canRedo} onClick={() => doc.redo()}>↪</button>
+        <button className="btn secondary icon" title="Blade at playhead (B)" aria-label="Blade at playhead" onClick={blade}>🔪</button>
+        <button className="btn secondary icon" title="Play/pause (space)" aria-label={playing ? "Pause" : "Play"} onClick={togglePlay}>{playing ? "⏸" : "▶"}</button>
         <button
-          className={`btn secondary${showHistory ? " tool-active" : ""}`}
+          className={`btn secondary icon${showHistory ? " tool-active" : ""}`}
           title="History — the op log, newest first"
           onClick={() => setShowHistory((v) => !v)}
         >
           🕘
         </button>
         <button
-          className={`btn secondary${colorEdit ? " tool-active" : ""}`}
+          className={`btn secondary icon${colorEdit ? " tool-active" : ""}`}
           disabled={!selectedVideoClip}
           title={selectedVideoClip ? "Color — exposure, contrast, temperature" : "Select a video clip to grade"}
           onClick={() =>
@@ -780,7 +780,7 @@ export function TimelinePage(props: {
           🎨
         </button>
         <button
-          className={`btn secondary${selectedVideoClip?.transition ? " tool-active" : ""}`}
+          className={`btn secondary icon${selectedVideoClip?.transition ? " tool-active" : ""}`}
           disabled={!selectedVideoClip}
           title={
             selectedVideoClip
@@ -801,7 +801,7 @@ export function TimelinePage(props: {
           ⧓
         </button>
         <button
-          className={`btn secondary${selectedAudibleClip?.speech ? " tool-active" : ""}`}
+          className={`btn secondary icon${selectedAudibleClip?.speech ? " tool-active" : ""}`}
           disabled={!selectedAudibleClip}
           title={
             selectedAudibleClip
@@ -843,7 +843,7 @@ export function TimelinePage(props: {
         )}
         {ClipDecoder.supported() && (
           <button
-            className={`btn secondary${engineOn ? " tool-active" : ""}`}
+            className={`btn secondary icon${engineOn ? " tool-active" : ""}`}
             title="WebCodecs compositor preview (default) — gapless boundaries + mixed audio; toggle for the <video> fallback"
             onClick={() => {
               setEngineError(undefined);

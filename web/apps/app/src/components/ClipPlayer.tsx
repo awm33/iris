@@ -4,6 +4,7 @@ import { ClipDecoder } from "@iris/media-engine";
 import { assetClient } from "../api";
 import { useEscape } from "./AssetThumb";
 import { EnginePlayer } from "./EnginePlayer";
+import { ACCENT_FALLBACK, tokenRGB } from "../theme";
 
 // Clip player (M5 slice 2): native <video> over the prep proxy — the
 // profiling-not-ideology choice for a single clip. The WebCodecs decode
@@ -234,7 +235,7 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
             >
               {playing ? "⏸" : "▶"}
             </button>
-            <span className="meta">
+            <span className="meta num">
               {fmt(time)} / {fmt(duration)}
             </span>
           </div>
@@ -254,7 +255,7 @@ function Waveform(props: { peaks: number[] }) {
     const w = (c.width = (c.clientWidth || 600) * dpr);
     const h = (c.height = 28 * dpr);
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = "rgba(139,124,246,0.7)";
+    ctx.fillStyle = `rgba(${tokenRGB("--accent", ACCENT_FALLBACK).join(",")},0.7)`;
     const n = props.peaks.length;
     for (let x = 0; x < w; x++) {
       const p = props.peaks[Math.floor((x / w) * n)] ?? 0;

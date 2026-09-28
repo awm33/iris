@@ -2,6 +2,7 @@
 // parsing. The mask contract follows spec/inference-api.md — white = generate,
 // black = preserve.
 import type { ModelEndpoint } from "@iris/api-client";
+import { ACCENT_FALLBACK, tokenRGB } from "../theme";
 
 export type Selection =
   | { kind: "rect"; x: number; y: number; w: number; h: number }
@@ -49,6 +50,7 @@ export async function bitmapSelectionFromMask(png: Uint8Array, docW: number, doc
   const tctx = tintCanvas.getContext("2d")!;
   const tint = tctx.createImageData(docW, docH);
   let x0 = docW, y0 = docH, x1 = -1, y1 = -1;
+  const [tr, tg, tb] = tokenRGB("--accent", ACCENT_FALLBACK);
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     if (data[i] > 127) {
       const x = p % docW, y = (p / docW) | 0;
@@ -56,9 +58,9 @@ export async function bitmapSelectionFromMask(png: Uint8Array, docW: number, doc
       if (x > x1) x1 = x;
       if (y < y0) y0 = y;
       if (y > y1) y1 = y;
-      tint.data[i] = 139; // iris violet
-      tint.data[i + 1] = 124;
-      tint.data[i + 2] = 246;
+      tint.data[i] = tr;
+      tint.data[i + 1] = tg;
+      tint.data[i + 2] = tb;
       tint.data[i + 3] = 110;
     }
   }

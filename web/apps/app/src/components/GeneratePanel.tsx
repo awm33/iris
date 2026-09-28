@@ -395,7 +395,12 @@ export function GeneratePanel(props: {
   return (
     <aside className="panel">
       <PanelHeader onClose={props.onClose} />
-      {props.target && <div className="target-chip">Target: {props.target.label}</div>}
+      {props.target && (
+        <div className="target">
+          <span className="target-label">Target</span>
+          <span className="target-value">{props.target.label}</span>
+        </div>
+      )}
       {props.target && isVideo && !isLipsyncPost && manifest.conditioning?.first_frame === true && carrySource && (
         <label className="carry-chip" title={carrySource.isImage ? "Sends the upstream take (a still) as first_frame conditioning" : "Sends the upstream take's last frame as first_frame conditioning"}>
           <input type="checkbox" checked={carry && carryReady} disabled={!carryReady} onChange={(e) => setCarry(e.target.checked)} />
@@ -609,6 +614,7 @@ export function GeneratePanel(props: {
               type="text"
               inputMode="numeric"
               placeholder="random"
+              className="mono"
               value={seed}
               onChange={(e) => setSeed(e.target.value)}
             />

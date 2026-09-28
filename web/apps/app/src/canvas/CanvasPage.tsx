@@ -611,7 +611,9 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
     <div className="canvas-page">
       <div className="toolbar canvas-toolbar">
         <button
-          className="btn secondary"
+          className="btn secondary icon"
+          title="Back to canvases"
+          aria-label="Back to canvases"
           onClick={() => {
             // Rejected-and-unretryable ops die with the session — confirm
             // before Back throws them away (Retry save is right there).
@@ -659,14 +661,15 @@ export function CanvasPage(props: { canvasId: string; projectId: string; onBack:
             onChange={(e) => setBrushSize(Number(e.target.value))}
           />
         </label>
-        <button className="btn secondary" disabled={!doc.canUndo} onClick={() => doc.undo()} title="Cmd+Z">
+        <button className="btn secondary icon" disabled={!doc.canUndo} onClick={() => doc.undo()} title="Undo (⌘Z)" aria-label="Undo">
           ↩
         </button>
         <button
-          className="btn secondary"
+          className="btn secondary icon"
           disabled={!doc.canRedo}
           onClick={() => doc.redo()}
-          title="Shift+Cmd+Z"
+          title="Redo (⇧⌘Z)"
+          aria-label="Redo"
         >
           ↪
         </button>
