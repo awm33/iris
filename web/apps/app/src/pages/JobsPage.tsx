@@ -79,7 +79,7 @@ function JobCard({
         <div className="meta">
           {stateLabel[job.state]} · {job.count > 1 ? `${job.count} takes · ` : ""}
           {job.task} · {job.profile}
-          {job.costActual ? ` · ${job.costActual.toFixed(1)} gpu·s` : ""}
+          {job.costActual ? <span className="num"> · {job.costActual.toFixed(1)} gpu·s</span> : ""}
           {job.targetLabel &&
             (onOpenTarget ? (
               <>

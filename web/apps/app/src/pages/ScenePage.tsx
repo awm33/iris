@@ -219,7 +219,9 @@ function ShotCard(props: {
       {sh.selectedTakeVersionId ? (
         <VersionThumb versionId={sh.selectedTakeVersionId} className="shot-thumb" />
       ) : (
-        <div className="shot-thumb thumb-placeholder-sm">▢</div>
+        <div className={`shot-thumb thumb-placeholder-sm${props.generating ? " is-generating" : ""}`}>
+          {props.generating ? "⟳" : "▢"}
+        </div>
       )}
       <div className="shot-main">
         <div className="name truncate">
@@ -228,9 +230,9 @@ function ShotCard(props: {
         </div>
         <div className="meta">
           {sh.takeCount > 0 ? `${sh.takeCount} take${sh.takeCount > 1 ? "s" : ""}` : "no takes"}
-          {sh.selectedTakeId ? " · ✓ selected" : ""}
-          {props.generating ? " · ⟳ generating" : ""}
-          {sh.continuityStale ? " · ⚠ stale" : ""}
+          {sh.selectedTakeId && <span className="state-selected"> · ✓ selected</span>}
+          {props.generating && <span className="state-generating"> · ⟳ generating</span>}
+          {sh.continuityStale && <span className="state-stale"> · ⚠ stale</span>}
         </div>
         {!props.generating && props.failedReason && (
           <div className="status error">⚠ last generation failed: {props.failedReason}</div>
@@ -244,7 +246,7 @@ function ShotCard(props: {
         <button className="btn secondary" disabled={sh.takeCount === 0} onClick={() => setPickingTakes(true)}>
           Takes ▾
         </button>
-        <button className="btn secondary" title="Delete shot" disabled={del.isPending} onClick={confirmDelete}>
+        <button className="btn secondary quiet-danger" title="Delete shot" aria-label="Delete shot" disabled={del.isPending} onClick={confirmDelete}>
           🗑
         </button>
       </div>

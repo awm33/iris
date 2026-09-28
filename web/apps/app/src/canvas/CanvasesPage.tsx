@@ -96,7 +96,7 @@ export function CanvasesPage(props: { projectId: string; onOpen: (id: string) =>
               {confirmDelete === c.id ? (
                 <>
                   <button
-                    className="btn secondary chip-add"
+                    className="btn danger chip-add"
                     disabled={remove.isPending}
                     onClick={() => remove.mutate(c.id)}
                   >

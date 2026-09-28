@@ -323,7 +323,7 @@ function BoardShotCard(props: {
       {sh.selectedTakeVersionId ? (
         <VersionThumb versionId={sh.selectedTakeVersionId} className="board-thumb" />
       ) : (
-        <div className="board-thumb thumb-placeholder-sm">{props.generating ? "⟳" : "▢"}</div>
+        <div className={`board-thumb thumb-placeholder-sm${props.generating ? " is-generating" : ""}`}>{props.generating ? "⟳" : "▢"}</div>
       )}
       <div className="board-shot-body">
         <div className="name truncate">
@@ -332,9 +332,9 @@ function BoardShotCard(props: {
         <div className="meta">
           {sh.durationTargetS > 0 ? `${sh.durationTargetS}s · ` : ""}
           {empty ? "empty" : `${sh.takeCount} take${sh.takeCount > 1 ? "s" : ""}`}
-          {sh.selectedTakeId ? " · ✓" : ""}
-          {props.generating ? " · ⟳ generating" : ""}
-          {sh.continuityStale ? " · ⚠ stale" : ""}
+          {sh.selectedTakeId && <span className="state-selected" title="A take is selected"> · ✓</span>}
+          {props.generating && <span className="state-generating"> · ⟳ generating</span>}
+          {sh.continuityStale && <span className="state-stale"> · ⚠ stale</span>}
           {!props.generating && props.failedReason ? (
             <span className="status error" title={props.failedReason}>
               {" "}· ⚠ failed
@@ -428,7 +428,7 @@ function ChainInspector(props: {
               This shot's selected take was generated with the upstream take's last frame as its first-frame
               conditioning.
             </div>
-            <div className={`meta${chain.fresh ? "" : " status error"}`} style={{ marginTop: 6 }}>
+            <div className={`meta${chain.fresh ? "" : " status stale"}`} style={{ marginTop: 6 }}>
               {chain.fresh
                 ? "✓ Fresh — the carried frame is still the upstream shot's selected take."
                 : "⚠ Stale — the upstream selection changed since this carry. Regenerate to continue the current pick."}

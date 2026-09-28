@@ -2,6 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
+// Self-hosted (OFL) so type renders the same on every machine; styles.css
+// references it as "Inter Variable".
+import "@fontsource-variable/inter";
 import "./styles.css";
 
 const queryClient = new QueryClient({
