@@ -89,7 +89,7 @@ export function EnginePlayer(props: { src: string }) {
       <canvas ref={canvasRef} />
       <div className="toolbar" style={{ marginBottom: 0 }}>
         <button className="btn secondary" onClick={() => setReplayNonce((n) => n + 1)}>⟳ Replay</button>
-        <span className="meta">{status}</span>
+        <span className={/^(decode|engine) failed:/.test(status) ? "status error" : "meta"}>{status}</span>
       </div>
     </div>
   );

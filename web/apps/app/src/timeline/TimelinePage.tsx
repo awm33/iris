@@ -758,12 +758,16 @@ export function TimelinePage(props: {
         <button
           className={`btn secondary icon${showHistory ? " tool-active" : ""}`}
           title="History — the op log, newest first"
+          aria-label="History"
+          aria-pressed={showHistory}
           onClick={() => setShowHistory((v) => !v)}
         >
           🕘
         </button>
         <button
           className={`btn secondary icon${colorEdit ? " tool-active" : ""}`}
+          aria-label="Color"
+          aria-pressed={!!colorEdit}
           disabled={!selectedVideoClip}
           title={selectedVideoClip ? "Color — exposure, contrast, temperature" : "Select a video clip to grade"}
           onClick={() =>
@@ -781,6 +785,8 @@ export function TimelinePage(props: {
         </button>
         <button
           className={`btn secondary icon${selectedVideoClip?.transition ? " tool-active" : ""}`}
+          aria-label="Dissolve transition"
+          aria-pressed={!!selectedVideoClip?.transition}
           disabled={!selectedVideoClip}
           title={
             selectedVideoClip
@@ -802,6 +808,8 @@ export function TimelinePage(props: {
         </button>
         <button
           className={`btn secondary icon${selectedAudibleClip?.speech ? " tool-active" : ""}`}
+          aria-label="Mark as speech"
+          aria-pressed={!!selectedAudibleClip?.speech}
           disabled={!selectedAudibleClip}
           title={
             selectedAudibleClip
@@ -845,6 +853,8 @@ export function TimelinePage(props: {
           <button
             className={`btn secondary icon${engineOn ? " tool-active" : ""}`}
             title="WebCodecs compositor preview (default) — gapless boundaries + mixed audio; toggle for the <video> fallback"
+            aria-label="Compositor preview"
+            aria-pressed={engineOn}
             onClick={() => {
               setEngineError(undefined);
               setEngineOn((v) => !v);
@@ -1252,9 +1262,9 @@ function PreviewPane(props: {
         />
       )}
       {(srcQ.isError || mediaError) && (
-        <div className="meta">Preview unavailable — {mediaError ? "the signed link may have expired; retrying" : "signing failed"}.</div>
+        <div className="status error">Preview unavailable — {mediaError ? "the signed link may have expired; retrying" : "signing failed"}.</div>
       )}
-      {shotQ.isError && <div className="meta">Preview unavailable — shot lookup failed.</div>}
+      {shotQ.isError && <div className="status error">Preview unavailable — shot lookup failed.</div>}
       {audioBlocked && props.playing && <div className="tl-preview-note">🔇 audio blocked by the browser — muted playback</div>}
       {c?.shotId && !versionId && !shotQ.isPending && !shotQ.isError && (
         <div className="tl-preview-shot">

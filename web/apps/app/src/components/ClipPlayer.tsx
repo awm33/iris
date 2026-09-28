@@ -227,7 +227,8 @@ export function ClipPlayer(props: { versionId: string; title?: string; onClose: 
         {!engineMode && (
           <div className="toolbar" style={{ marginBottom: 0 }}>
             <button
-              className="btn secondary"
+              className="btn secondary icon"
+              aria-label={playing ? "Pause" : "Play"}
               onClick={() => {
                 const el = videoRef.current!;
                 el.paused ? void el.play() : el.pause();
